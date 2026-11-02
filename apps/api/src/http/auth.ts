@@ -10,7 +10,6 @@ import {
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
-  workspaceMcpPerimeterChallenge,
 } from "../mcp-oauth";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
@@ -27,10 +26,7 @@ const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/ins
 const prReviewGithubBrowserPathPattern =
   /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
 
-export function requireAccessKey(
-  settings: Settings,
-  verifyManagedSession?: (context: Context) => Promise<boolean>,
-): MiddlewareHandler {
+export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
     // per-tenant identity gate (that is resolveAccessContext). When
@@ -51,28 +47,6 @@ export function requireAccessKey(
       await next();
       return;
     }
-    // Managed humans authenticate with their current browser session, never a
-    // deployment key shipped to the browser. The app supplies the canonical
-    // session resolver; a cookie by itself is not proof. Explicit credentials
-    // select their own lane and must never fall back to an ambient session.
-    if (
-      settings.productAccessMode === "managed" &&
-      c.req.path.startsWith("/v1/") &&
-      c.req.header("cookie") !== undefined &&
-      c.req.header("authorization") === undefined &&
-      c.req.header("x-opengeni-access-key") === undefined &&
-      verifyManagedSession &&
-      (await verifyManagedSession(c))
-    ) {
-      await next();
-      return;
-    }
-    // A workspace MCP route sets its OAuth challenge itself, but a request
-    // refused here never reaches it. Attach the same challenge so an MCP
-    // client can still discover the protected-resource metadata; the refusal
-    // is unchanged.
-    const challenge = workspaceMcpPerimeterChallenge(settings, new URL(c.req.url).pathname);
-    if (challenge) c.header("www-authenticate", challenge);
     return c.json({ error: "unauthorized" }, 401);
   };
 }
@@ -120,15 +94,6 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path.startsWith("/v1/webhooks/automations/")) {
     return true;
   }
-  // Event source webhooks are authenticated by the sender's signature, which
-  // the intake verifies over the raw body before reading anything.
-  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
-    return true;
-  }
-  // The GitHub App's webhooks: GitHub's signature with the App's webhook secret.
-  if (c.req.method === "POST" && path === "/v1/webhooks/github") {
-    return true;
-  }
   if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
     return true;
   }
@@ -154,7 +119,6 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     path === "/v1/integrations/slack/callback" ||
-    path === "/v1/integrations/teams/messages" ||
     path === "/v1/integrations/slack/events" ||
     path === "/v1/integrations/slack/commands" ||
     path === "/v1/integrations/slack/interactions" ||

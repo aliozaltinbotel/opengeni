@@ -1,11 +1,4 @@
-import {
-  Children,
-  isValidElement,
-  useId,
-  type ReactNode,
-  forwardRef,
-  type ComponentPropsWithoutRef,
-} from "react";
+import { Children, isValidElement, useId, type ComponentProps, type ReactNode } from "react";
 import { Slot } from "radix-ui";
 
 import { ReasonTooltip } from "./disabled-reason";
@@ -30,7 +23,7 @@ import { cn } from "../lib/cn";
 
 export type NavItemSize = "default" | "comfortable";
 
-export interface NavItemProps extends Omit<ComponentPropsWithoutRef<"a">, "children"> {
+export interface NavItemProps extends Omit<ComponentProps<"a">, "children"> {
   /** Render your router's link as the only child (`<Link to="..." />`). */
   asChild?: boolean | undefined;
   children?: ReactNode | undefined;
@@ -65,32 +58,28 @@ function textLabel(label: ReactNode): string | undefined {
   return typeof label === "string" ? label : undefined;
 }
 
-export const NavItem = /* @__PURE__ */ forwardRef<HTMLAnchorElement, NavItemProps>(function NavItem(
-  {
-    asChild = false,
-    children,
-    label,
-    icon,
-    active = false,
-    badge,
-    attention = false,
-    attentionLabel = "Needs your review",
-    trailingIcon,
-    collapsed = false,
-    size = "default",
-    disabledReason,
-    className,
-    ...props
-  },
-  ref,
-) {
+export function NavItem({
+  asChild = false,
+  children,
+  label,
+  icon,
+  active = false,
+  badge,
+  attention = false,
+  attentionLabel = "Needs your review",
+  trailingIcon,
+  collapsed = false,
+  size = "default",
+  disabledReason,
+  className,
+  ...props
+}: NavItemProps) {
   const disabled = Boolean(disabledReason);
   const reasonId = useId();
   const Comp = disabled ? "span" : asChild ? Slot.Root : "a";
 
   const item = (
     <Comp
-      ref={ref}
       data-slot="nav-item"
       // A blocked destination is still announced as one: "Insights, link, dimmed".
       role={disabled ? "link" : undefined}
@@ -177,7 +166,7 @@ export const NavItem = /* @__PURE__ */ forwardRef<HTMLAnchorElement, NavItemProp
       </Tooltip>
     </TooltipProvider>
   );
-});
+}
 
 /** A placeholder item while the list of destinations loads. */
 export function NavItemSkeleton({
@@ -247,7 +236,7 @@ export function NavGroup({
 
 export type SettingsNavVariant = "column" | "rail";
 
-export interface SettingsNavProps extends ComponentPropsWithoutRef<"nav"> {
+export interface SettingsNavProps extends ComponentProps<"nav"> {
   variant?: SettingsNavVariant | undefined;
   /** Top slot: the workspace switcher (rail) or a small title (column). */
   header?: ReactNode | undefined;
@@ -256,27 +245,29 @@ export interface SettingsNavProps extends ComponentPropsWithoutRef<"nav"> {
 }
 
 /** The settings navigation. Label it: `aria-label="Workspace settings"`. */
-export const SettingsNav = /* @__PURE__ */ forwardRef<HTMLElement, SettingsNavProps>(
-  function SettingsNav({ variant = "column", header, footer, className, children, ...props }, ref) {
-    const rail = variant === "rail";
-    return (
-      <nav
-        data-slot="settings-nav"
-        data-variant={variant}
-        className={cn(
-          "flex min-h-0 min-w-0 flex-col",
-          rail ? "w-60 shrink-0 border-r border-border bg-bg px-3 py-3" : "w-[200px] shrink-0",
-          className,
-        )}
-        ref={ref}
-        {...props}
-      >
-        {header ? <div className={cn("min-w-0", rail ? "mb-4" : "mb-3")}>{header}</div> : null}
-        <div className={cn("flex min-w-0 flex-1 flex-col", rail ? "gap-5" : "gap-4")}>
-          {children}
-        </div>
-        {footer ? <div className="mt-4 min-w-0 border-t border-border pt-3">{footer}</div> : null}
-      </nav>
-    );
-  },
-);
+export function SettingsNav({
+  variant = "column",
+  header,
+  footer,
+  className,
+  children,
+  ...props
+}: SettingsNavProps) {
+  const rail = variant === "rail";
+  return (
+    <nav
+      data-slot="settings-nav"
+      data-variant={variant}
+      className={cn(
+        "flex min-h-0 min-w-0 flex-col",
+        rail ? "w-60 shrink-0 border-r border-border bg-bg px-3 py-3" : "w-[200px] shrink-0",
+        className,
+      )}
+      {...props}
+    >
+      {header ? <div className={cn("min-w-0", rail ? "mb-4" : "mb-3")}>{header}</div> : null}
+      <div className={cn("flex min-w-0 flex-1 flex-col", rail ? "gap-5" : "gap-4")}>{children}</div>
+      {footer ? <div className="mt-4 min-w-0 border-t border-border pt-3">{footer}</div> : null}
+    </nav>
+  );
+}

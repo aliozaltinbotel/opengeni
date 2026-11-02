@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql as drizzleSql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   archiveTaskNote,

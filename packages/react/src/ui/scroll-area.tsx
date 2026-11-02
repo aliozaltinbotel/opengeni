@@ -5,15 +5,15 @@ import { ScrollArea as ScrollAreaPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
 
-const ScrollArea = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof ScrollAreaPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
->(function ScrollArea({ className, children, ...props }, ref) {
+function ScrollArea({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
       className={cn("relative", className)}
-      ref={ref}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
@@ -26,12 +26,13 @@ const ScrollArea = /* @__PURE__ */ React.forwardRef<
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   );
-});
+}
 
-const ScrollBar = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>,
-  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>
->(function ScrollBar({ className, orientation = "vertical", ...props }, ref) {
+function ScrollBar({
+  className,
+  orientation = "vertical",
+  ...props
+}: React.ComponentProps<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>) {
   return (
     <ScrollAreaPrimitive.ScrollAreaScrollbar
       data-slot="scroll-area-scrollbar"
@@ -42,7 +43,6 @@ const ScrollBar = /* @__PURE__ */ React.forwardRef<
         orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent",
         className,
       )}
-      ref={ref}
       {...props}
     >
       <ScrollAreaPrimitive.ScrollAreaThumb
@@ -51,6 +51,6 @@ const ScrollBar = /* @__PURE__ */ React.forwardRef<
       />
     </ScrollAreaPrimitive.ScrollAreaScrollbar>
   );
-});
+}
 
 export { ScrollArea, ScrollBar };

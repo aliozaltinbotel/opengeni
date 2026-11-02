@@ -8,14 +8,6 @@
 //! gate, so the guard never runs VMs past a deadline the agent no longer
 //! holds. A registration's rulings are carried out before the deadline it
 //! brings is written: until then the guard keeps the VMs frozen.
-//!
-//! It runs from the moment the agent process starts until it exits. A
-//! restarted agent takes back what the previous run left before it
-//! answers anything, which on a host with many sandboxes can take longer
-//! than the lease's term, and a stopping one still has work to finish;
-//! while the agent does not serve, the lease held is renewed without a
-//! capacity (the service keeps the one it last heard), and a registration,
-//! which must list everything the host holds, waits.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,9 +23,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
-use super::Agent;
 use super::gate::{LeaseGate, boot_now};
 use super::record::LeaseFile;
+use crate::agent::Handle;
 
 /// The service's answer to one request, or why there is none.
 enum Answer {
@@ -51,7 +43,7 @@ pub(crate) struct Renewer {
     pub(crate) host: Option<u64>,
     pub(crate) file: PathBuf,
     pub(crate) gate: LeaseGate,
-    pub(crate) agent: Agent,
+    pub(crate) handle: Handle,
     pub(crate) info: HostInfo,
     /// The name the fleet gives the image this host's sandboxes start
     /// from.
@@ -101,13 +93,8 @@ impl Running {
     /// Sends the renewal or registration due now.
     async fn send(&mut self) -> anyhow::Result<()> {
         let renewer = &mut self.renewer;
-        let handle = renewer.agent.handle();
-        let status = match &handle {
-            Some(handle) => match handle.status().await {
-                Ok(status) => Some(status),
-                Err(_) => anyhow::bail!("the agent stopped"),
-            },
-            None => None,
+        let Ok(status) = renewer.handle.status().await else {
+            anyhow::bail!("the agent stopped");
         };
         let renewal = renewer.lease.send(boot_now());
         let timeout = renewer.lease.terms().term;
@@ -119,26 +106,17 @@ impl Running {
                 host: renewer.host.unwrap_or_default(),
                 epoch: epoch.0,
                 seq: renewal.seq,
-                capacity: status
-                    .as_ref()
-                    .map(|status| capacity(status, &renewer.image)),
+                capacity: capacity(&status, &renewer.image),
             };
             self.post(RENEW_PATH, &body, timeout, renewal, Answer::Renewed);
             return Ok(());
         }
-        let Some(handle) = handle else {
-            // What the host holds is known once the agent has taken it
-            // back, and a stopping agent leaves registering to the next.
-            tracing::debug!("registering only while the agent serves");
-            self.attempt = None;
-            return Ok(());
-        };
         if renewer.lease.attempt_started(renewal) || self.attempt.is_none() {
             // What the host lists must be all it holds: a create, adopt or
             // change of owner still under way could land after the list
             // and run unruled. None can start now, with no registration
             // held, so the list waits for those under way to end.
-            let status = match handle.inventory().await {
+            let status = match renewer.handle.inventory().await {
                 Ok(Ok(status)) => status,
                 Ok(Err(unsettled)) => {
                     tracing::info!(unsettled, "registering once requests under way end");
@@ -271,14 +249,9 @@ impl Running {
             return Ok(());
         }
         let count = rulings.len();
-        // A registration is sent only while the agent serves; one answered
-        // as it stops is left to the next agent.
-        let Some(handle) = renewer.agent.handle() else {
-            return Ok(());
-        };
         // Everything not kept goes first: the deadline that lets the rest
         // run again is written only after.
-        if let Err(error) = handle.reconcile(rulings).await {
+        if let Err(error) = renewer.handle.reconcile(rulings).await {
             tracing::warn!(%error, "could not carry out the control service's rulings yet");
             return Ok(());
         }
@@ -323,10 +296,7 @@ impl Running {
         let (Some(host), Some(epoch)) = (renewer.host, renewer.lease.epoch()) else {
             return;
         };
-        let Some(handle) = renewer.agent.handle() else {
-            return;
-        };
-        let Ok(status) = handle.status().await else {
+        let Ok(status) = renewer.handle.status().await else {
             return;
         };
         let capacity = capacity(&status, &renewer.image);
@@ -361,10 +331,6 @@ fn capacity(status: &HostStatus, image: &str) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
-        memory_reclaimable_mib: status
-            .capacity
-            .as_ref()
-            .map_or(0, |_| mib(status.reclaimable_memory)),
         cpu_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.total),
         cpu_free_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.free),
         disk_free_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.free)),

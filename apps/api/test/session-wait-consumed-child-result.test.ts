@@ -26,9 +26,12 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const AGENT_PERMISSIONS: Permission[] = ["sessions:read", "sessions:control", "sessions:create"];

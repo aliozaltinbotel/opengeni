@@ -1,9 +1,7 @@
 import Stripe from "stripe";
 import type postgres from "postgres";
 import assert from "node:assert/strict";
-import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { acquireSharedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
 import * as database from "@opengeni/db";
 import {
   createDb,

@@ -2,13 +2,15 @@ import * as React from "react";
 
 import { cn } from "../lib/cn";
 
-const Input = /* @__PURE__ */ React.forwardRef<
-  HTMLInputElement,
-  React.ComponentPropsWithoutRef<"input"> & {
-    /** Resource labels are not a person's identity or a saved credential. */
-    suppressAutofill?: boolean | undefined;
-  }
->(function Input({ className, type, suppressAutofill = false, ...props }, ref) {
+function Input({
+  className,
+  type,
+  suppressAutofill = false,
+  ...props
+}: React.ComponentProps<"input"> & {
+  /** Resource labels are not a person's identity or a saved credential. */
+  suppressAutofill?: boolean | undefined;
+}) {
   return (
     <input
       type={type}
@@ -19,13 +21,12 @@ const Input = /* @__PURE__ */ React.forwardRef<
         "aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40",
         className,
       )}
-      ref={ref}
       {...props}
       {...(suppressAutofill
         ? { autoComplete: "off", "data-1p-ignore": true, "data-lpignore": "true" }
         : {})}
     />
   );
-});
+}
 
 export { Input };

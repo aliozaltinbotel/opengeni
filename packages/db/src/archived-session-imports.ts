@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { SessionArchivedError } from "./session-archive-errors";
 import { organizationApiKeyAllowsWorkspace } from "./organization-api-key-access";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -7,8 +6,6 @@ import {
   ImportArchivedSessionRequest,
   type ArchivedSessionImportEvent,
   type Session,
-  type ToolRef,
-  type SessionToolPolicy,
   type SessionEvent,
   type TurnInitiator,
   type TurnInitiatorContext,
@@ -41,9 +38,7 @@ type ArchivedImportDependencies = {
       initialMessage: string;
       resources: never[];
       skills: never[];
-      tools: ToolRef[];
-      toolPolicy?: SessionToolPolicy;
-      hostSessionCreatePending?: boolean;
+      tools: never[];
       metadata: Record<string, unknown>;
       createdBy: TurnInitiator;
       createdByContext?: TurnInitiatorContext;
@@ -140,8 +135,6 @@ export function canonicalArchivedSessionImportHash(value: unknown): string {
 }
 
 type ImportScope = {
-  hostSessionCreatePending?: boolean;
-  hostRequiredMcpServerIds?: readonly string[];
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -380,22 +373,7 @@ async function importArchivedSession(
           initialMessage: "",
           resources: [],
           skills: [],
-          tools:
-            input.hostRequiredMcpServerIds?.map((id) => ({
-              kind: "mcp" as const,
-              id,
-              eager: true,
-            })) ?? [],
-          ...(input.hostRequiredMcpServerIds?.length
-            ? {
-                toolPolicy: {
-                  mode: "explicit" as const,
-                  inheritedFromSessionId: null,
-                  hostRequiredMcpServerIds: [...input.hostRequiredMcpServerIds],
-                },
-              }
-            : {}),
-          ...(input.hostSessionCreatePending ? { hostSessionCreatePending: true } : {}),
+          tools: [],
           metadata: {},
           createdBy: input.createdBy,
           ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
@@ -529,7 +507,6 @@ async function appendArchivedSessionEvents(
         throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
       }
       await revalidateImporter(tx, input, dependencies);
-      if (row.hostSessionCreateState !== "ready") throw new SessionArchivedError();
       const [existing] = await rawRows<{ requestHash: string; nextOffset: number }>(
         tx,
         sql`select request_hash as "requestHash", next_offset as "nextOffset"

@@ -1,7 +1,6 @@
 import { expect } from "bun:test";
 import { Hono } from "hono";
-import { testSettings } from "@opengeni/testing/settings";
-import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash } from "node:crypto";
 import {
   createOrganizationApiKey,

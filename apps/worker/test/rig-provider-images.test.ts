@@ -12,12 +12,12 @@ import {
   resolveRigProviderImageForRun,
 } from "@opengeni/core";
 import { rigSetupScriptCommand } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithRigProviderImage,
-} from "@opengeni/core";
+} from "../src/activities/sandbox-images";
 import {
   rigPlatformChecksForSettings,
   rigProviderImageContentMarkerCommand,

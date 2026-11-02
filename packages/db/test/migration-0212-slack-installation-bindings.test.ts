@@ -5,7 +5,7 @@ import {
   acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   FORCE_RLS_TABLES,
   RUNTIME_FULL_DML_TABLES,

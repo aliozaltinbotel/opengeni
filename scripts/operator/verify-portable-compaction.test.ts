@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import { acquireSharedTestDatabase, testSettings } from "@opengeni/testing";
 import {
   assertOpaqueKickoff,
   createVerificationClient,
@@ -93,24 +92,6 @@ describe("portable compaction operator verification", () => {
       azureOpenaiAdToken: "synthetic-ad-token",
     });
     expect(deployment.baseURL).toBe("https://fixture.invalid/openai/deployments/fixture");
-    for (const azureOpenaiAuthMode of [
-      "deployment_identity",
-      "workload_identity",
-      "managed_identity",
-    ] as const) {
-      const identity = createVerificationClient({
-        ...base,
-        azureOpenaiAuthMode,
-        azureOpenaiApiKey: undefined,
-        azureOpenaiBaseUrl: "https://fixture.invalid/openai/v1",
-        azureTenantId: "tenant",
-        azureClientId: "client",
-        azureFederatedTokenFile:
-          azureOpenaiAuthMode === "deployment_identity" ? undefined : "/projected/token",
-        azureClientSecret: "fake-client-secret",
-      });
-      expect(identity.baseURL).toBe("https://fixture.invalid/openai/v1");
-    }
     expect(() =>
       createVerificationClient({
         ...base,

@@ -17,9 +17,12 @@ import {
   readLease,
   type DbClient,
 } from "@opengeni/db";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import type { SessionWorkflowClient } from "@opengeni/core";
 import { createApp } from "../../apps/api/src/app";
 

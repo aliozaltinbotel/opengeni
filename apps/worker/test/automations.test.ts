@@ -1,6 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { AutomationAuthorityRevokedError, type AutomationRunExecution } from "@opengeni/db";
 import { createAutomationActivities } from "../src/activities/automations";
 import type { ActivityServices } from "../src/activities/types";
@@ -471,18 +470,6 @@ describe("automation agent configuration", () => {
       tools: [{ kind: "mcp", id: "acme" }],
     });
   });
-
-  test("an attached first-party search is saved eager only for the new session", async () => {
-    const execution = agentRun(undefined);
-    execution.acceptedExecution.sessionTemplate.tools = [{ kind: "mcp", id: "opengeni" }];
-    const { createInput } = await dispatch(execution);
-    expect(createInput).toMatchObject({
-      tools: [{ kind: "mcp", id: "opengeni", eager: ["knowledge_search"] }],
-    });
-    expect(execution.acceptedExecution.sessionTemplate.tools).toEqual([
-      { kind: "mcp", id: "opengeni" },
-    ]);
-  });
 });
 
 describe("automation run workflow", () => {
@@ -501,40 +488,5 @@ describe("automation run workflow", () => {
     ).resolves.toBeUndefined();
     expect(dispatchAutomationRun).toHaveBeenCalledWith(input);
     expect(settleAutomationRunFailure).toHaveBeenCalledWith(input);
-  });
-});
-
-test("automation create forwards the configured host and its accepted service actor", async () => {
-  const service = await services()();
-  const port = {
-    authorizeSession: async () => ({ allowed: true as const }),
-    resolveListScope: async () => ({ kind: "all" as const }),
-  };
-  service.sessionAuthorization = port;
-  let forwarded: unknown;
-  const activity = createAutomationActivities(async () => service, {
-    claim: async () => run,
-    settle: async () => undefined,
-    admit: async () => null,
-    assertModelPolicy: async () => undefined,
-    assertAuthority: async () => undefined,
-    recordUsage: async () => undefined,
-    readWorkspace: async () => ({ settings: {} }) as never,
-    createSession: async (input) => {
-      forwarded = input.sessionCreateHost;
-      return {
-        session: { id: sessionId },
-        outcome: "created",
-        replay: false,
-        changed: true,
-      } as never;
-    },
-  });
-  expect((await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).action).toBe(
-    "started",
-  );
-  expect(forwarded).toMatchObject({
-    port,
-    actor: { kind: "subject", subjectId: run.acceptedExecution.serviceSubjectId },
   });
 });

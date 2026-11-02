@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createDb, provisionRoles, type DbClient } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import {
   EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE,

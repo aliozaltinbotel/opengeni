@@ -36,7 +36,6 @@ import {
 } from "@opengeni/contracts/workspace-integration-wire";
 import {
   VaultProviderError,
-  providerUsernameHint,
   type ProviderCallOperation,
   type ProviderFieldValue,
   type ProviderItemMeta,
@@ -51,7 +50,7 @@ import {
 } from "./provider";
 import { collectProviderPages } from "./provider-pages";
 
-export type RemoteVaultProviderKind = "external";
+export type RemoteVaultProviderKind = "external" | "bitwarden";
 
 /** Case-insensitive header lookup, satisfied by `Headers`. */
 export interface RemoteVaultHeaders {
@@ -346,8 +345,6 @@ function toProviderItem(item: VaultProviderWireItemMeta): ProviderItemMeta {
     externalItemId: item.externalItemId,
     name: item.name,
     type: item.type,
-    username: providerUsernameHint(item.username),
-    ...(item.category ? { category: item.category } : {}),
     websites: [...item.websites],
     fields: item.fields.map((field) => ({
       externalFieldId: field.externalFieldId,
@@ -377,7 +374,7 @@ function toProviderVault(vault: VaultProviderWireVault): ProviderVault {
 export function createRemoteVaultProvider(
   options: RemoteVaultProviderOptions,
 ): RemoteVaultProvider {
-  if (options.provider !== "external") {
+  if (options.provider !== "external" && options.provider !== "bitwarden") {
     fail("provider_unavailable");
   }
   const endpoint = validEndpoint(options.endpoint, options.allowInsecureHttp === true);
@@ -753,7 +750,6 @@ export function createRemoteVaultProvider(
           ...(item.expectedVersion !== undefined ? { expectedVersion: item.expectedVersion } : {}),
           name: item.name,
           type,
-          ...(item.category ? { category: item.category } : {}),
           websites: [...item.websites],
           fields,
         },

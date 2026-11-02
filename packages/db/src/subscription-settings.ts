@@ -27,10 +27,7 @@ import { sql } from "drizzle-orm";
 
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
-import {
-  readSubscriptionEffectiveSettings,
-  withoutRetiredProviderKeys,
-} from "./subscription-core-repository";
+import { readSubscriptionEffectiveSettings } from "./subscription-core-repository";
 import { readSubscriptionCorePrimaryConnectionId } from "./subscription-core/administration";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
@@ -563,7 +560,7 @@ async function workspaceAdministrator(
         where grant_row.account_id = ${input.accountId}::uuid
           and grant_row.workspace_id = ${input.workspaceId}::uuid
           and grant_row.subject_id = ${input.subjectId}
-          and opengeni_private.workspace_membership_administers(grant_row.role, grant_row.permissions)
+          and grant_row.role = 'admin'
       ) as admin`,
   );
   return row?.admin === true;
@@ -843,10 +840,7 @@ export async function readSubscriptionSettingsOverview(
     return {
       organization,
       workspaces: page.map((row) => ({
-        ...settingsViewFromEffective(
-          seededWhenMissing(withoutRetiredProviderKeys(row.effective), row.id),
-          organization.locked,
-        ),
+        ...settingsViewFromEffective(seededWhenMissing(row.effective, row.id), organization.locked),
         workspaceId: row.id,
         name: row.name,
       })),

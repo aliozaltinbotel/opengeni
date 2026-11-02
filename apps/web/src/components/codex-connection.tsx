@@ -15,6 +15,7 @@ import type {
   CodexResetRedemptionRecovery,
   CodexUsageMap,
   CodexUsageWindow,
+  WorkspaceCodexSubscriptionMode,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
@@ -31,7 +32,6 @@ import {
   useSharedQueryValue,
 } from "@opengeni/react/app/lib/shared-query";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import { codexOverviewUsage } from "@/components/models/codex-overview-usage";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -767,10 +767,13 @@ export function useCodexSubscriptions({
           client,
           workspaceId,
           Object.fromEntries(
-            Object.entries(result.accounts).map(([id, overview]) => {
-              const { status, usage } = codexOverviewUsage(overview.usage);
-              return [id, { status, usage }];
-            }),
+            Object.entries(result.accounts).map(([id, overview]) => [
+              id,
+              {
+                status: overview.usage.value?.status ?? "no-data",
+                usage: overview.usage.value ?? null,
+              },
+            ]),
           ) as CodexUsageMap,
           "replace",
         );
@@ -839,7 +842,7 @@ export function useCodexSubscriptions({
   // fresh, server-authorized attempt before the irreversible confirmation.
 
   const setSourceMode = useCallback(
-    async (mode: "automatic" | "disabled", success?: string): Promise<boolean> => {
+    async (mode: WorkspaceCodexSubscriptionMode, success?: string): Promise<boolean> => {
       setBusy(true);
       setWorking("source");
       try {
@@ -858,10 +861,20 @@ export function useCodexSubscriptions({
     [client, workspaceId, refreshAccounts],
   );
 
-  /** Start a device-code sign-in. */
+  /**
+   * Start a device-code sign-in. `useFor` answers "use this account for new
+   * work?" when the workspace is set to use only the organization's accounts:
+   * "together" returns it to the automatic choice, which uses this
+   * workspace's accounts and the organization's together, once the account
+   * exists; "organization" leaves the setting as it is.
+   */
   const connect = useCallback(
-    async (options?: { onConnected?: (accountId: string | null) => void }) => {
+    async (options?: {
+      useFor?: "together" | "organization";
+      onConnected?: (accountId: string | null) => void;
+    }) => {
       const recordOutcome = trackModelConnection("codex", workspaceId);
+      const mode = data?.source?.mode;
       setBusy(true);
       try {
         const start = await client.codexConnectStart(workspaceId);
@@ -884,6 +897,18 @@ export function useCodexSubscriptions({
             if (!result) return;
             if (result.status === "connected") {
               recordOutcome("connected");
+              const sourceChanged = options?.useFor === "together" && mode === "organization";
+              if (sourceChanged) {
+                await client
+                  .requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, {
+                    mode: "automatic",
+                  })
+                  .catch((error: unknown) =>
+                    toast.error("Connected, but couldn't start using it here", {
+                      description: userErrorText(error),
+                    }),
+                  );
+              }
               // The sign-in may finish after Settings is gone: every retained
               // Codex list for this workspace, session choices included, re-reads
               // now (mounted) or on its next mount, whether or not this page is.
@@ -927,7 +952,7 @@ export function useCodexSubscriptions({
         setBusy(false);
       }
     },
-    [client, workspaceId, refreshAccounts],
+    [client, workspaceId, refreshAccounts, data?.source?.mode],
   );
 
   const activate = useCallback(

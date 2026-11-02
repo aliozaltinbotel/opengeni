@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Page } from "playwright";
 import AxeBuilder from "@axe-core/playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess } from "@opengeni/testing/process";
+import { freePort, startProcess } from "@opengeni/testing";
 
 const port = await freePort();
 const baseUrl = `http://127.0.0.1:${port}`;

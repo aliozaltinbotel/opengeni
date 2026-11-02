@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+import { ScriptedModel, testSettings } from "@opengeni/testing";
 import type { FirstPartyMcpToolName, ToolRef } from "@opengeni/contracts";
 import { buildOpenGeniAgent, prepareAgentTools, runAgentStream } from "../src/index";
 import { lazyToolRuntimeForAgent } from "../src/lazy-tool-transport";
@@ -32,7 +31,6 @@ const FIRST_PARTY_CATALOG = [
   "wait_for_input",
   "command_read",
   "command_wait",
-  "sandbox_file_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -140,17 +138,17 @@ const HARNESS_MODEL_NAMES = FIRST_PARTY_CATALOG.filter((name) =>
 ).map((name) => `opengeni__${name}`);
 
 describe("always-visible harness control tools", () => {
-  test("the set is exactly goal lifecycle, command polling, wait_for_input and sandbox_file_publish", () => {
+  test("the set is exactly goal lifecycle, command polling, wait_for_input and excel_run", () => {
     expect([...HARNESS_CONTROL_FIRST_PARTY_TOOLS].sort()).toEqual(
       [
         "command_read",
         "command_wait",
+        "excel_run",
         "goal_complete",
         "goal_pause",
         "goal_resume",
         "goal_set",
         "goal_update",
-        "sandbox_file_publish",
         "wait_for_input",
       ].sort(),
     );
@@ -204,7 +202,6 @@ describe("always-visible harness control tools", () => {
           "opengeni__wait_for_input",
           "opengeni__command_read",
           "opengeni__command_wait",
-          "opengeni__sandbox_file_publish",
         ]);
         for (const name of names) expect(name).not.toContain("goal_");
       } finally {

@@ -19,8 +19,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import postgres from "postgres";
 import { acceptAutomationEvent, registerAutomationRoutes } from "../src/routes/automations";

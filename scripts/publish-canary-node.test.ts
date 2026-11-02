@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -85,8 +84,8 @@ test("trusted bundled publisher executes on Node and still fails closed before u
   }
 });
 
-test("historical workflow fixture: workflow selects pinned native Node, retains Bun builds and preserves signed failure evidence", () => {
-  const workflow = readRetiredWorkflow("publish-canary.yml");
+test("workflow selects pinned native Node, retains Bun builds and preserves signed failure evidence", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/publish-canary.yml"), "utf8");
   expect(workflow).toContain('node-version: "22.20.0"');
   expect(workflow).toContain(
     "bun build scripts/publish-canary-node.ts --target=node --packages=external --outfile .release/publish-canary.mjs",

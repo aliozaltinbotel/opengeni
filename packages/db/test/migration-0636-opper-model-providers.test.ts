@@ -1,6 +1,6 @@
 // opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 
 import {

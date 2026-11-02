@@ -9,8 +9,11 @@ import {
   requireAccessContext,
   requireAccessGrantAuthorization,
 } from "../src/access";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   createDb,
   rawRows,

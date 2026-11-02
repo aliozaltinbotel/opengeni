@@ -431,10 +431,7 @@ export async function loadLegacySubscriptionPlacementWorld(
               ? local
               : []
         ).map((row) => row.id);
-        // The workspace source used only the workspace's own accounts; the
-        // reference model has no source preference (D-50), so the others are
-        // not part of the world.
-        connections = (mode === "workspace" ? local : bounded).map((row) => {
+        connections = bounded.map((row) => {
           const observed = epoch(row.usage_checked_at) !== null;
           const exhaustedUntil = epoch(row.exhausted_until);
           const quota: SubscriptionQuota = {
@@ -509,8 +506,10 @@ export async function loadLegacySubscriptionPlacementWorld(
             ? organizationRotation
             : workspaceRotation;
         rotation = rotationOf(settingsRow);
-        if (mode === "disabled") {
-          providerSwitches = { codex: { enabled: false } };
+        if (mode === "workspace") {
+          providerSwitches = { codex: { useOrganizationAccounts: false, enabled: true } };
+        } else if (mode === "disabled") {
+          providerSwitches = { codex: { useOrganizationAccounts: true, enabled: false } };
         }
         const codexSession = request.legacySession ?? {
           pinnedConnectionId: session.codex_pinned_credential_id,

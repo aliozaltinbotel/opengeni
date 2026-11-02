@@ -6,7 +6,7 @@ import type {
   ResolvedWorkspaceInstructionPolicySnapshot,
   ResolvedWorkspaceInstructionPolicySnapshotEntry,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   WorkspaceGovernancePromptLimitError,
   buildOpenGeniAgent,
@@ -339,7 +339,7 @@ describe("exact-attempt workspace governance prompt", () => {
 
     expect(withEmptyCompanySnapshot).toBe(legacy);
     expect(withEmptyCompanySnapshot).toContain(
-      "Active workspace governance for this turn follows.",
+      "Active workspace governance for this exact accepted attempt follows.",
     );
     expect(withEmptyCompanySnapshot).not.toContain("Company-profile snapshot evidence");
     expect(withEmptyCompanySnapshot).not.toContain("Active organization and workspace governance");

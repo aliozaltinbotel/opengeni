@@ -3,7 +3,6 @@ import {
   SITE_HOSTNAME_PROBLEM_MESSAGES,
   SITE_PLATFORM_BRAKE_ERROR_CODE,
   SITE_PLATFORM_QUOTA_ERROR_CODE,
-  SITE_PUBLISH_NOTICE_CODES,
   siteHostnameLabelProblem,
   suggestSiteHostnameLabel,
   type SiteAccessMode,
@@ -128,7 +127,7 @@ export const ACCESS_CHOICES: readonly {
     title: "Anyone with the link",
     description: ({ loginOnly }) =>
       loginOnly
-        ? "Anyone who signs in to Opengeni. On this deployment, every Site asks visitors to sign in."
+        ? "Anyone signed in to Opengeni. This server requires sign-in for every Site."
         : "No sign-in needed. Visitors who don't sign in are guests.",
   },
 ];
@@ -391,25 +390,13 @@ export function siteErrorCode(error: unknown): string | undefined {
   return typeof details?.code === "string" ? details.code : apiErrorFacts(error).code;
 }
 
-/** Readiness notices (nothing to fix, such as sign-in on a login-only deployment) and problems. */
-export function splitReadinessWarnings(warnings: readonly SitePublishWarning[]): {
-  notices: SitePublishWarning[];
-  problems: SitePublishWarning[];
-} {
-  return {
-    notices: warnings.filter((warning) => SITE_PUBLISH_NOTICE_CODES.has(warning.code)),
-    problems: warnings.filter((warning) => !SITE_PUBLISH_NOTICE_CODES.has(warning.code)),
-  };
-}
-
-/** "2 things won't work for public visitors" (notices are shown on their own, not counted). */
+/** "2 things won't work for public visitors". */
 export function readinessTitle(
   warnings: readonly SitePublishWarning[],
   access: SiteAccessMode,
 ): string {
-  const { problems } = splitReadinessWarnings(warnings);
-  const skipped = problems.some((warning) => warning.code === "page_not_checked");
-  const count = problems.filter((warning) => warning.code !== "page_not_checked").length;
+  const skipped = warnings.some((warning) => warning.code === "page_not_checked");
+  const count = warnings.filter((warning) => warning.code !== "page_not_checked").length;
   const who = access === "public" ? "public visitors" : "invited people";
   if (count === 0 && skipped) return "Readiness check incomplete";
   return `${count} ${count === 1 ? "thing" : "things"} won't work for ${who}${skipped ? " · check incomplete" : ""}`;

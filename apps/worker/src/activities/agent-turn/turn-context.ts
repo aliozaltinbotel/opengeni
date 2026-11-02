@@ -12,10 +12,10 @@ import type {
   ModelContextContributionSummary,
   SessionStatus,
   TurnRouteDeclarationV1,
+  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
-  InputWaitRequest,
   OpenGeniRuntime,
   RunCredentialCommandSession,
   SelfhostedSession,
@@ -180,7 +180,7 @@ export type EventingState = {
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
-  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
+  inputWaitReplyGuard: (() => Promise<string | null>) | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;

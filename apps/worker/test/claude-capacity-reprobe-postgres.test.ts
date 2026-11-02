@@ -9,9 +9,12 @@
  * Real PostgreSQL; only the usage endpoint is stubbed, and no model is called.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { parseClaudeUsageHeaders } from "@opengeni/config";
 import {
   armSubscriptionCoreCapacityWait,

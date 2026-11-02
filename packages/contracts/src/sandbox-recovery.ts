@@ -1,59 +1,39 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-const checkpointSelectionFields = () => ({
-  version: z.literal(1),
-  sessionId: primitives.uuid,
-  sandboxGroupId: primitives.uuid,
-  leaseId: primitives.uuid,
-  routeEpoch: primitives.nonnegativeInteger,
-  authorityEpoch: primitives.positiveInteger,
-  leaseEpoch: primitives.nonnegativeInteger,
-  workspaceGeneration: primitives.nonnegativeInteger,
-  archiveGeneration: primitives.nonnegativeInteger,
-  revision: z.string().min(1).max(512),
-  capturedAt: primitives.dateTime,
-});
-
-/** Public, content-free selection of a registered native checkpoint, offered
- * for human consent. Never include native provider bindings. */
+/** Public, content-free selection. Never include native provider bindings. */
 export const SandboxRecoverySelection = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      ...checkpointSelectionFields(),
-      artifactId: primitives.uuid,
+      version: z.literal(1),
+      sessionId: z.string().uuid(),
+      sandboxGroupId: z.string().uuid(),
+      leaseId: z.string().uuid(),
+      routeEpoch: z.number().int().nonnegative(),
+      authorityEpoch: z.number().int().positive(),
+      leaseEpoch: z.number().int().nonnegative(),
+      workspaceGeneration: z.number().int().nonnegative(),
+      archiveGeneration: z.number().int().nonnegative(),
+      artifactId: z.string().uuid(),
+      revision: z.string().min(1).max(512),
+      capturedAt: z.string().datetime(),
     })
     .strict(),
 );
 export type SandboxRecoverySelection = z.infer<typeof SandboxRecoverySelection>;
-
-/** The checkpoint automatic recovery restores, native or portable. `artifactId`
- * is the registered native checkpoint (Modal), or null for a portable archive,
- * whose bytes are verified against `revision` instead. Only human consent uses
- * {@link SandboxRecoverySelection}, which always names a native checkpoint. */
-export const SandboxCheckpointSelection = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      ...checkpointSelectionFields(),
-      artifactId: primitives.nullableUuid,
-    })
-    .strict(),
-);
-export type SandboxCheckpointSelection = z.infer<typeof SandboxCheckpointSelection>;
 
 /** Exact failed/current workspace selection; portable archives need no native
  * checkpoint artifact. Contains no object keys or provider credentials. */
 export const SandboxRecoveryTarget = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sessionId: primitives.uuid,
-      sandboxGroupId: primitives.uuid,
-      leaseId: primitives.uuid,
-      routeEpoch: primitives.nonnegativeInteger,
-      authorityEpoch: primitives.positiveInteger,
-      leaseEpoch: primitives.nonnegativeInteger,
-      workspaceGeneration: primitives.nonnegativeInteger,
+      sessionId: z.string().uuid(),
+      sandboxGroupId: z.string().uuid(),
+      leaseId: z.string().uuid(),
+      routeEpoch: z.number().int().nonnegative(),
+      authorityEpoch: z.number().int().positive(),
+      leaseEpoch: z.number().int().nonnegative(),
+      workspaceGeneration: z.number().int().nonnegative(),
       archiveGeneration: z.number().int().nonnegative().nullable(),
       revision: z.string().min(1).max(512).nullable(),
       restoreStatus: z.string().min(1).max(64),
@@ -76,24 +56,17 @@ export const SandboxRecoveryProjection = /* @__PURE__ */ defineSchema(() =>
         "restored",
       ]),
       reason: z.string().max(128).nullable(),
-      /** The registered native checkpoint a person can consent to restore, and
-       * for an automatic Retry its checkpoint when that one is native. */
       checkpoint: SandboxRecoverySelection.nullable(),
-      operationId: primitives.nullableUuid,
+      operationId: z.string().uuid().nullable(),
       target: SandboxRecoveryTarget.optional(),
-      retryAvailable: primitives.optionalBoolean,
-      freshWorkspaceAvailable: primitives.optionalBoolean,
+      retryAvailable: z.boolean().optional(),
+      freshWorkspaceAvailable: z.boolean().optional(),
       groupSessionCount: z.number().int().positive().optional(),
       /** Retry may elect a system-selected verified checkpoint; no consent POST. */
-      automaticAvailable: primitives.optionalBoolean,
-      /** What an automatic Retry will do: restore `automaticCheckpoint`, or
-       * continue on a new empty workspace because no usable checkpoint survived
-       * the loss. */
+      automaticAvailable: z.boolean().optional(),
+      /** What an automatic Retry will do: restore `checkpoint`, or continue on a
+       * new empty workspace because no usable checkpoint survived the loss. */
       automaticLane: z.enum(["checkpoint", "fresh_workspace"]).optional(),
-      /** The checkpoint an automatic Retry restores (lane `checkpoint`), native
-       * or portable. Older readers use `checkpoint`, which is set only when it
-       * is native. */
-      automaticCheckpoint: SandboxCheckpointSelection.optional(),
       /** For a timed recovery wait: the earliest time a Retry or a new message
        * can let Opengeni decide again. Nothing proceeds by itself before then. */
       availableAt: z.string().datetime().optional(),
@@ -119,13 +92,13 @@ export const SandboxFreshWorkspaceRecovery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(1),
-      sessionId: primitives.uuid,
-      sandboxGroupId: primitives.uuid,
-      leaseId: primitives.uuid,
-      leaseEpoch: primitives.nonnegativeInteger,
-      workspaceGeneration: primitives.nonnegativeInteger,
+      sessionId: z.string().uuid(),
+      sandboxGroupId: z.string().uuid(),
+      leaseId: z.string().uuid(),
+      leaseEpoch: z.number().int().nonnegative(),
+      workspaceGeneration: z.number().int().nonnegative(),
       archiveGeneration: z.number().int().nonnegative().nullable(),
-      lostAt: primitives.dateTime,
+      lostAt: z.string().datetime(),
       reason: SandboxFreshWorkspaceReason,
     })
     .strict(),
@@ -136,21 +109,21 @@ export const SandboxRecoveryRequest = /* @__PURE__ */ defineSchema(() =>
   z.union([
     z
       .object({
-        operationId: primitives.uuid,
+        operationId: z.string().uuid(),
         acceptHistoricalCheckpoint: z.literal(true),
         selection: SandboxRecoverySelection,
       })
       .strict(),
     z
       .object({
-        operationId: primitives.uuid,
+        operationId: z.string().uuid(),
         action: z.literal("retry"),
         target: SandboxRecoveryTarget,
       })
       .strict(),
     z
       .object({
-        operationId: primitives.uuid,
+        operationId: z.string().uuid(),
         action: z.literal("continue_fresh"),
         acceptEmptyWorkspace: z.literal(true),
         target: SandboxRecoveryTarget,
@@ -164,7 +137,7 @@ export const SandboxRecoveryResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       outcome: z.enum(["accepted", "replayed"]),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       recovery: SandboxRecoveryProjection,
     })
     .strict(),
@@ -180,7 +153,7 @@ export function sandboxRecoveryDiscontinuity(selection: SandboxRecoverySelection
  * `shared` names the sandbox this session shares with other sessions; every
  * member of that group receives its own receipt for the same selection. */
 export function automaticSandboxRecoveryDiscontinuity(
-  selection: SandboxCheckpointSelection,
+  selection: SandboxRecoverySelection,
   scope: "session" | "shared" = "session",
 ): string {
   const subject =

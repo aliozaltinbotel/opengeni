@@ -16,7 +16,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createTemporalScheduleSynchronizer } from "../src/temporal-schedule-sync";
 
 let shared: SharedTestDatabase;

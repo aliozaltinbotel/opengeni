@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, MenuIcon } from "lucide-react";
+import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -7,13 +7,12 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentType,
   type KeyboardEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
 
-import { BrandMark, Wordmark, useProductName } from "@opengeni/react/app/components/brand-mark";
+import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
@@ -57,13 +56,10 @@ export const SETTINGS_SHELL_CLASS =
 
 const NARROW_QUERY = desktopBridge ? "(max-width: 639px)" : "(max-width: 1023px)";
 
-/** A rail item's icon: a lucide icon, or a host extension's own. */
-export type SettingsRailIcon = ComponentType<{ className?: string }>;
-
 export interface SettingsRailItem {
   id: string;
   label: string;
-  icon: SettingsRailIcon;
+  icon: LucideIcon;
   /** The router link for this destination, without children (`<Link to=... />`). */
   link: ReactElement;
   /** A purple dot for "needs you". */
@@ -230,7 +226,6 @@ function SettingsRail({
   onNavigate?: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
-  const productName = useProductName();
   const [query, setQuery] = useState("");
   const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
   const results = useMemo(() => searchSettings(entries, query), [entries, query]);
@@ -305,7 +300,7 @@ function SettingsRail({
           ) : (
             <LinkShell
               link={home}
-              aria-label={`${productName} home`}
+              aria-label="Opengeni home"
               className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
             >
               <BrandMark className="w-5" />

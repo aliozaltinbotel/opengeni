@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { CapabilityCatalogRow } from "@opengeni/react/connect";
+import { CapabilityCatalogIndicator, CapabilityCatalogRow } from "@opengeni/react/connect";
 
 import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
 import {
@@ -51,6 +51,23 @@ export function IntegrationChipView({ chip }: { chip: IntegrationChip }) {
       {tone.dot ? <span className={cn("size-1.5 rounded-full", tone.dot)} aria-hidden /> : null}
       {chip.label}
     </span>
+  );
+}
+
+export function IntegrationStateIndicator({
+  chip,
+  busy = false,
+}: {
+  chip: IntegrationChip;
+  busy?: boolean;
+  /** @deprecated Catalog rows now have one action, on their whole body. */
+  onQuickConnect?: () => void;
+}) {
+  return (
+    <CapabilityCatalogIndicator
+      status={busy ? "loading" : catalogStatusForChip(chip)}
+      label={busy ? "Working" : chip.label}
+    />
   );
 }
 

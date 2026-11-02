@@ -2,14 +2,7 @@
 // host page's URL and history stay untouched. Session routes render in place;
 // app-only pages (settings, billing, schedules) open the full web app beside
 // the host page.
-import {
-  createElement,
-  forwardRef,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-  type MouseEvent,
-} from "react";
+import { createElement, useMemo, useState, useSyncExternalStore, type MouseEvent } from "react";
 
 import type {
   LinkProps,
@@ -171,66 +164,61 @@ function createMemoryNavigation(options: MemoryNavigationOptions): NavigationHos
 
   const useLocation = () => useSyncExternalStore(subscribe, snapshot, snapshot);
 
-  const Link = /* @__PURE__ */ forwardRef<HTMLAnchorElement, Omit<LinkProps, "ref">>(
-    function MemoryLink(
+  const Link = ({
+    to,
+    from: _from,
+    params,
+    search,
+    hash,
+    state,
+    replace: _replace,
+    resetScroll: _resetScroll,
+    ignoreBlocker: _ignoreBlocker,
+    reloadDocument: _reloadDocument,
+    href: hrefOption,
+    preload: _preload,
+    disabled,
+    children,
+    onClick,
+    ref,
+    target: linkTarget,
+    ...anchor
+  }: LinkProps) => {
+    const current = useLocation();
+    const next = target({ to, params, search, hash, state, href: hrefOption });
+    const internal = options.handles(next.pathname);
+    const isActive = next.pathname === current.pathname;
+    return createElement(
+      "a",
       {
-        to,
-        from: _from,
-        params,
-        search,
-        hash,
-        state,
-        replace: _replace,
-        resetScroll: _resetScroll,
-        ignoreBlocker: _ignoreBlocker,
-        reloadDocument: _reloadDocument,
-        href: hrefOption,
-        preload: _preload,
-        activeOptions: _activeOptions,
-        disabled,
-        children,
-        onClick,
-        target: linkTarget,
-        ...anchor
-      },
-      ref,
-    ) {
-      const current = useLocation();
-      const next = target({ to, params, search, hash, state, href: hrefOption });
-      const internal = options.handles(next.pathname);
-      const isActive = next.pathname === current.pathname;
-      return createElement(
-        "a",
-        {
-          ...anchor,
-          ref,
-          href: internal ? next.href : absolute(next.href),
-          target: internal ? linkTarget : "_blank",
-          rel: internal ? anchor.rel : "noopener noreferrer",
-          "aria-disabled": disabled || undefined,
-          "data-status": isActive ? "active" : undefined,
-          onClick: (event: MouseEvent<HTMLAnchorElement>) => {
-            onClick?.(event);
-            if (event.defaultPrevented || disabled) {
-              if (disabled) event.preventDefault();
-              return;
-            }
-            if (!isPlainClick(event)) return;
-            if (!internal) {
-              // Leaves through the host (the Office pane opens its own browser window).
-              event.preventDefault();
-              openUrl(absolute(next.href));
-              return;
-            }
-            if (linkTarget === "_blank") return;
+        ...anchor,
+        ref,
+        href: internal ? next.href : absolute(next.href),
+        target: internal ? linkTarget : "_blank",
+        rel: internal ? anchor.rel : "noopener noreferrer",
+        "aria-disabled": disabled || undefined,
+        "data-status": isActive ? "active" : undefined,
+        onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+          onClick?.(event);
+          if (event.defaultPrevented || disabled) {
+            if (disabled) event.preventDefault();
+            return;
+          }
+          if (!isPlainClick(event)) return;
+          if (!internal) {
+            // Leaves through the host (the Office pane opens its own browser window).
             event.preventDefault();
-            commit(next);
-          },
+            openUrl(absolute(next.href));
+            return;
+          }
+          if (linkTarget === "_blank") return;
+          event.preventDefault();
+          commit(next);
         },
-        typeof children === "function" ? children({ isActive, isTransitioning: false }) : children,
-      );
-    },
-  );
+      },
+      typeof children === "function" ? children({ isActive, isTransitioning: false }) : children,
+    );
+  };
 
   const page: PageHost = {
     href: () => absolute(location.href),

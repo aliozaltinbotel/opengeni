@@ -55,8 +55,6 @@ export type SecretExecUse = {
   surface: SecretUseSurface;
   toolName: string;
   sourceCallId?: string;
-  /** Where the value goes (a machine's name), shown to a person approving the use. */
-  destination?: string;
 };
 
 /**
@@ -262,7 +260,6 @@ export async function prepareSecretExec(
     surface: options.use.surface,
     toolName: options.use.toolName,
     ...(options.use.sourceCallId ? { sourceCallId: options.use.sourceCallId } : {}),
-    ...(options.use.destination ? { destination: options.use.destination } : {}),
   });
   assertDeliverableText([...values.values()]);
   return {
@@ -311,7 +308,6 @@ export async function prepareSecretStdin(
     surface: options.use.surface,
     toolName: options.use.toolName,
     ...(options.use.sourceCallId ? { sourceCallId: options.use.sourceCallId } : {}),
-    ...(options.use.destination ? { destination: options.use.destination } : {}),
   });
   assertDeliverableText([...values.values()]);
   return { text: chars, carry: { kind: "stdin", chars, tokens, values } };
@@ -523,7 +519,6 @@ async function resolveTokens(
     surface: options.use.surface,
     toolName: options.use.toolName,
     ...(options.use.sourceCallId ? { sourceCallId: options.use.sourceCallId } : {}),
-    ...(options.use.destination ? { destination: options.use.destination } : {}),
   });
   const scope = secretScopeFor(options.resolver);
   const files: Array<{ path: string; content: Uint8Array }> = [];

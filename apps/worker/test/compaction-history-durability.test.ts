@@ -7,9 +7,14 @@ import {
   type ModelRequest,
   type StreamEvent,
 } from "@openai/agents";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  ScriptedModel,
+  assistantMessage,
+  functionCall,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   appendSessionHistoryItems,
   bootstrapWorkspace,

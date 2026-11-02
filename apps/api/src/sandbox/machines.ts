@@ -20,7 +20,6 @@
 // active pointer.
 
 import type { Settings } from "@opengeni/config";
-import { stableAgentVersion } from "./agent-release";
 import {
   enrollmentMacPermissions,
   getSession,
@@ -82,15 +81,14 @@ export function compareAgentVersions(left: string, right: string): number | null
   return a.prerelease.localeCompare(b.prerelease);
 }
 
-/** The build promoted for a machine's update channel, or null when this
- * deployment cannot name one (see stableAgentVersion). */
+/** The build the operator promoted for a machine's update channel. */
 export function promotedAgentVersion(
   settings: Pick<Settings, "agentStableVersion" | "agentBetaVersion">,
   channel: string | null,
-): string | null {
+): string {
   return channel === "beta"
-    ? (settings.agentBetaVersion ?? stableAgentVersion(settings))
-    : stableAgentVersion(settings);
+    ? (settings.agentBetaVersion ?? settings.agentStableVersion)
+    : settings.agentStableVersion;
 }
 
 /** Older Mac updaters replace a single file inside a sealed app. They must

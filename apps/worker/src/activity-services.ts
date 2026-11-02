@@ -10,7 +10,6 @@ import {
   configureChildLifecycleNotices,
   configureCodeSearchDeploymentPolicy,
   createDb,
-  databasePoolOptions,
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -51,7 +50,9 @@ export function createSharedActivityServices(
         : createDb(settings.databaseUrl, {
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
-            ...databasePoolOptions(settings),
+            ...(settings.databasePreparedStatements === undefined
+              ? {}
+              : { preparedStatements: settings.databasePreparedStatements }),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;
@@ -81,7 +82,6 @@ export function createSharedActivityServices(
       // Compute sandboxes reach their agent over this process's bus and database.
       installComputeAgentPlane({ db, bus, settings });
       return {
-        sessionAuthorization: dependencies.sessionAuthorization,
         settings: resolvedSettings,
         catalogSourceSettings: settings,
         db,
@@ -95,7 +95,6 @@ export function createSharedActivityServices(
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
         startRealtimeUsageWorkflow: dependencies.startRealtimeUsageWorkflow ?? null,
-        startRecordingWorkflow: dependencies.startRecordingWorkflow ?? null,
         // Independent title operations do not yet carry an attempt-bound host source receipt.
         // Keep the existing native parallel producer, which supplies that receipt, for these hosts.
         startSessionTitleWorkflow: !dependencies.authorizeModelCallSource && environmentsEncryptionKeyBytes(settings)

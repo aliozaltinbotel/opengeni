@@ -426,23 +426,11 @@ describe("settings rail", () => {
       await openMenu(picker);
       const labels = menuItems().map((item) => item.textContent ?? "");
       expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
-      // Every workspace open to the person, grouped by organization (#5508).
-      expect(
-        Array.from(
-          document.body.querySelectorAll('[role="group"][aria-label^="Workspaces in"]'),
-        ).map((group) => group.getAttribute("aria-label")),
-      ).toEqual([
-        "Workspaces in Acme Robotics",
-        "Workspaces in Beta Partners",
-        "Workspaces in Northwind Labs",
-      ]);
-      expect(labels.some((label) => label.includes("Launch room"))).toBe(true);
+      expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
       // Admins get the one quiet "New workspace" row; everyone else does not (see the picker tests).
       expect(labels.filter((label) => label.startsWith("New workspace"))).toHaveLength(1);
       expect(labels).not.toContain("Organization settings");
-      // Organizations are headings now, not rows that pick a workspace for you.
-      expect(labels).not.toContain("Beta Partners");
-      expect(labels).not.toContain("Northwind Labs");
+      expect(labels.slice(-2)).toEqual(["Beta Partners", "Northwind Labs"]);
       // Switching workspace keeps the settings page.
       await act(async () =>
         menuItems()
@@ -460,17 +448,13 @@ describe("settings rail", () => {
     }
   });
 
-  test("picking a workspace in another organization keeps the organization page", async () => {
+  test("switching organization from the picker keeps the organization page", async () => {
     const view = await renderShell({ kind: "organization", section: "people" });
     try {
       await openMenu(view.rail().querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
       await act(async () =>
-        Array.from(
-          document.body
-            .querySelector('[role="group"][aria-label="Workspaces in Northwind Labs"]')!
-            .querySelectorAll<HTMLElement>('[role="menuitem"]'),
-        )
-          .find((item) => item.textContent?.includes("General"))!
+        menuItems()
+          .find((item) => item.textContent === "Northwind Labs")!
           .click(),
       );
       expect(navigate).toHaveBeenCalledWith({
@@ -483,23 +467,17 @@ describe("settings rail", () => {
     }
   });
 
-  test("another organization's personal workspace opens directly, whatever was last used there", async () => {
-    // The picker lists the workspace itself now (#5508), so a remembered workspace
-    // in that organization no longer decides where the pick lands.
+  test("switching organization returns to the workspace last used there", async () => {
     localStorage.setItem(
       "og.workspace.navigation.organizations:v1:user%3Aalex",
-      JSON.stringify({ [northwind]: northwindWorkspaceId }),
+      JSON.stringify({ [northwind]: northwindPersonalId }),
     );
     const view = await renderShell({ kind: "organization", section: "people" });
     try {
       await openMenu(view.rail().querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
       await act(async () =>
-        Array.from(
-          document.body
-            .querySelector('[role="group"][aria-label="Workspaces in Northwind Labs"]')!
-            .querySelectorAll<HTMLElement>('[role="menuitem"]'),
-        )
-          .find((item) => item.textContent?.includes("Personal workspace"))!
+        menuItems()
+          .find((item) => item.textContent === "Northwind Labs")!
           .click(),
       );
       expect(navigate).toHaveBeenCalledWith({

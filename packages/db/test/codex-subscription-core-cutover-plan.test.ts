@@ -227,6 +227,14 @@ describe("Codex cutover dedupe and scope planning", () => {
             excludedModelIds: [],
             refreshGeneration: 1,
             quota: null,
+            ...(isPersonal
+              ? {}
+              : {
+                  assignmentPolicies: migrated.policies.map((p) => ({
+                    ...p,
+                    inferencePool: p.pool,
+                  })),
+                }),
           };
           const world: PlacementInput = {
             now: Date.now(),
@@ -269,6 +277,7 @@ describe("Codex cutover dedupe and scope planning", () => {
             cacheFacts: {},
           };
           const sourceConnection = { ...connection };
+          delete sourceConnection.assignmentPolicies;
           for (const model of world.models) {
             const previouslyEligible = rows.some((source) =>
               canServe(
@@ -466,9 +475,7 @@ describe("Codex cutover dedupe and scope planning", () => {
       allocatorEnabled: migrated.allocatorEnabled,
       entitledModelIds: null,
       excludedModelIds: [],
-      // Migration 0907 moves the admitting policies' model list onto the
-      // connection (D-50).
-      allowedModelIds: migrated.policies[0]!.allowedModelIds,
+      allowedModelIds: migrated.allowedModelIds,
       refreshGeneration: 1,
       quota: null,
       ownership: {
@@ -480,6 +487,10 @@ describe("Codex cutover dedupe and scope planning", () => {
           allowPersonalWorkspaces: false,
         },
       },
+      assignmentPolicies: migrated.policies.map((policy) => ({
+        ...policy,
+        inferencePool: policy.pool,
+      })),
     };
     const world: PlacementInput = {
       now: Date.now(),

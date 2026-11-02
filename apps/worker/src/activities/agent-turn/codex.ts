@@ -6,23 +6,16 @@ export function codexWorkspaceMetricKey(workspaceId: string): string {
   return createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
 }
 
-/**
- * Stable across sessions, retries and workers, without hashing mutable prompts.
- *
- * `scopeSubjectId` must be frozen for the whole session (the session's scope
- * subject), never the subject that started one turn: the key routes requests
- * to a cache, so a key that changed with the turn initiator (a person, an
- * agent, a schedule) lost the cached history on the next request.
- */
+/** Stable across sessions, retries and workers, without hashing mutable prompts. */
 export function codexCacheAffinityKey(
   workspaceId: string,
-  scopeSubjectId: string | null,
+  humanSubjectId: string | null,
   sessionId: string,
 ): string {
   // Do not combine unrelated service-only or legacy sessions into one cohort.
-  if (!scopeSubjectId) return sessionId;
+  if (!humanSubjectId) return sessionId;
   return createHash("sha256")
-    .update(JSON.stringify(["opengeni-codex-affinity-v1", workspaceId, scopeSubjectId]))
+    .update(JSON.stringify(["opengeni-codex-affinity-v1", workspaceId, humanSubjectId]))
     .digest("hex");
 }
 

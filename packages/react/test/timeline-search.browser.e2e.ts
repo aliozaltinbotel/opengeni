@@ -4,8 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { freePort } from "@opengeni/testing/compose";
-import { runCommand } from "@opengeni/testing/process";
+import { freePort, runCommand } from "@opengeni/testing";
 
 let browser: Browser;
 let baseUrl: string;

@@ -3,8 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const fixturePath = "/test/session-capability-cards.html";

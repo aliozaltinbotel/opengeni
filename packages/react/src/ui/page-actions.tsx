@@ -1,10 +1,5 @@
 import { MoreHorizontalIcon } from "lucide-react";
-import {
-  forwardRef,
-  type ComponentPropsWithoutRef,
-  type ComponentRef,
-  type ReactNode,
-} from "react";
+import type { ComponentProps, ReactNode } from "react";
 
 import { Button } from "./button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "./dropdown-menu";
@@ -52,13 +47,9 @@ export function MoreMenu({
 }
 
 /** An outlined small button, 44px on coarse pointers, the shape every row action uses. */
-export const RowButton = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof Button>,
-  ComponentPropsWithoutRef<typeof Button>
->(function RowButton({ children, className, ...props }, ref) {
+export function RowButton({ children, className, ...props }: ComponentProps<typeof Button>) {
   return (
     <Button
-      ref={ref}
       type="button"
       variant="outline"
       size="sm"
@@ -68,4 +59,4 @@ export const RowButton = /* @__PURE__ */ forwardRef<
       {children}
     </Button>
   );
-});
+}

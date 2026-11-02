@@ -49,7 +49,6 @@ import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { subscriptionStore } from "../billing-subscription-store";
 import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
 import { serializedStripeCustomer } from "../billing-stripe-customer";
-import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerSubscriptionRoutes(app, deps);
@@ -87,36 +86,40 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing/usage-summary", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    const parsed = parseRequestQuery(OrganizationUsageQuery, c.req.query(), {
-      status: 400,
-      message: "invalid usage query",
-    });
+    const parsed = OrganizationUsageQuery.safeParse(c.req.query());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid usage query",
+      });
+    }
     return await withBillingUsageActor(deps, context, accountId, async () =>
-      c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed })),
+      c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed.data })),
     );
   });
 
   app.get("/v1/billing/usage-workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    const parsed = parseRequestQuery(OrganizationUsageWorkspacePageQuery, c.req.query(), {
-      status: 400,
-      message: "invalid usage page query",
-    });
+    const parsed = OrganizationUsageWorkspacePageQuery.safeParse(c.req.query());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid usage page query",
+      });
     return await withBillingUsageActor(deps, context, accountId, async () =>
-      c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed })),
+      c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed.data })),
     );
   });
 
   app.get("/v1/billing/usage-models", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    const parsed = parseRequestQuery(OrganizationModelUsageQuery, c.req.query(), {
-      status: 400,
-      message: "invalid model usage query",
-    });
+    const parsed = OrganizationModelUsageQuery.safeParse(c.req.query());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid model usage query",
+      });
     return await withBillingUsageActor(deps, context, accountId, async () =>
-      c.json(await getOrganizationModelUsage(deps.db, { accountId, ...parsed })),
+      c.json(await getOrganizationModelUsage(deps.db, { accountId, ...parsed.data })),
     );
   });
 
@@ -135,11 +138,13 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }
     const context = await requireAccessContext(c, deps);
-    const parsed = parseRequestBody(CreateCheckoutRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid checkout request",
-    });
-    const body = parsed;
+    const parsed = CreateCheckoutRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid checkout request",
+      });
+    }
+    const body = parsed.data;
     const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
     const stripe = stripeClient(deps);
     const promotion = body.promotionCode
@@ -288,11 +293,13 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }
     const context = await requireAccessContext(c, deps);
-    const parsed = parseRequestBody(CreateBillingPortalRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid billing portal request",
-    });
-    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const parsed = CreateBillingPortalRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid billing portal request",
+      });
+    }
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
     const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     const session = await stripe.billingPortal.sessions.create(
@@ -300,7 +307,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         customerId,
         publicBaseUrl: deps.settings.publicBaseUrl,
         webBaseUrl: deps.settings.webBaseUrl,
-        returnUrl: parsed.returnUrl,
+        returnUrl: parsed.data.returnUrl,
       }),
     );
     if (!session.url) {
@@ -388,30 +395,31 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/billing/subscription/checkout", async (c) => {
     requireSubscriptionsEnabled(deps);
     const context = await requireAccessContext(c, deps);
-    const parsed = parseRequestBody(CreateSubscriptionCheckoutRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid subscription checkout request",
-    });
-    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const parsed = CreateSubscriptionCheckoutRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid subscription checkout request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
     const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     return c.json(
       CreateSubscriptionCheckoutResponse.parse(
         await subscriptions(deps, stripe).checkout({
-          ...parsed,
+          ...parsed.data,
           accountId,
           customerId,
           successUrl: checkoutReturnUrl(
             deps.settings.publicBaseUrl,
             deps.settings.webBaseUrl,
-            parsed.successUrl,
+            parsed.data.successUrl,
             "/billing?subscription=success",
             "successUrl",
           ),
           cancelUrl: checkoutReturnUrl(
             deps.settings.publicBaseUrl,
             deps.settings.webBaseUrl,
-            parsed.cancelUrl,
+            parsed.data.cancelUrl,
             "/billing?subscription=cancelled",
             "cancelUrl",
           ),
@@ -422,13 +430,16 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const changeSubscription = (action: "upgrade" | "change") => async (c: Context) => {
     requireSubscriptionsEnabled(deps);
     const context = await requireAccessContext(c, deps);
-    const parsed = parseRequestBody(ChangeBillingSubscriptionRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid subscription change request",
-    });
-    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const parsed = ChangeBillingSubscriptionRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid subscription change request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
     return c.json(
-      BillingSubscriptionChange.parse(await subscriptions(deps)[action]({ ...parsed, accountId })),
+      BillingSubscriptionChange.parse(
+        await subscriptions(deps)[action]({ ...parsed.data, accountId }),
+      ),
     );
   };
   app.post("/v1/billing/subscription/upgrade", changeSubscription("upgrade"));
@@ -436,23 +447,27 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/billing/subscription/cancel", async (c) => {
     requireSubscriptionsEnabled(deps);
     const context = await requireAccessContext(c, deps);
-    const parsed = parseRequestBody(CancelBillingSubscriptionRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid subscription cancellation request",
-    });
-    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const parsed = CancelBillingSubscriptionRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid subscription cancellation request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
     return c.json(
-      BillingSubscriptionChange.parse(await subscriptions(deps).cancel({ ...parsed, accountId })),
+      BillingSubscriptionChange.parse(
+        await subscriptions(deps).cancel({ ...parsed.data, accountId }),
+      ),
     );
   });
   app.post("/v1/billing/subscription/portal", async (c) => {
     requireSubscriptionsEnabled(deps);
     const context = await requireAccessContext(c, deps);
-    const parsed = parseRequestBody(CreateBillingPortalRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid billing portal request",
-    });
-    const accountId = requireSelectedAccount(context, parsed.accountId, "billing:manage");
+    const parsed = CreateBillingPortalRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid billing portal request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
     const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     const session = await stripe.billingPortal.sessions.create(
@@ -460,7 +475,7 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
         customerId,
         publicBaseUrl: deps.settings.publicBaseUrl,
         webBaseUrl: deps.settings.webBaseUrl,
-        returnUrl: parsed.returnUrl,
+        returnUrl: parsed.data.returnUrl,
       }),
     );
     return c.json(

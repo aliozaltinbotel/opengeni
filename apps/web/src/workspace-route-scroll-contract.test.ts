@@ -32,7 +32,6 @@ const workspaceRouteContracts = {
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
-  workspaceComputerUseRoute: { kind: "page", source: "routes/computer-use.tsx" },
   workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
@@ -41,21 +40,10 @@ const workspaceRouteContracts = {
     source: "routes/capabilities.tsx",
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
-  workspaceAutomationsRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceAutomationNewRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceAutomationTemplatesRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },
-  // The old Schedules URLs redirect to Automations.
-  workspaceLegacySchedulesRoute: { kind: "redirect" },
-  workspaceLegacyScheduleNewRoute: { kind: "redirect" },
-  workspaceLegacyScheduleDetailRoute: { kind: "redirect" },
-  workspaceLegacyScheduleEditRoute: { kind: "redirect" },
-  workspaceMeetingsRoute: { kind: "page", source: "routes/meetings.tsx" },
-  workspaceMeetingDetailRoute: { kind: "page", source: "routes/meetings.tsx" },
+  workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleNewRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleDetailRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleEditRoute: { kind: "page", source: "routes/schedules.tsx" },
   workspaceDocumentsRoute: { kind: "redirect" },
   workspaceMemoryRoute: { kind: "redirect" },
   workspaceStateRoute: {
@@ -74,11 +62,6 @@ const workspaceRouteContracts = {
   workspaceRetainedArtifactRoute: {
     kind: "page",
     source: "../../../packages/react/src/app/routes/retained-artifact.tsx",
-  },
-  // The Site fills the canvas beside its conversations column; each pane scrolls itself.
-  workspaceSiteViewRoute: {
-    kind: "self-managed",
-    source: "../../../packages/react/src/app/routes/site-view.tsx",
   },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
@@ -104,11 +87,7 @@ async function source(path: string): Promise<string> {
 describe("workspace route scroll ownership", () => {
   test("classifies every route mounted inside the fixed app canvas", async () => {
     const app = await source("App.tsx");
-    // The children sit in `visibleNativeRoutes([...])`, which drops the
-    // destinations a host extension hides.
-    const workspaceChildren = app.match(
-      /workspaceRoute\.addChildren\(\s*visibleNativeRoutes\(\s*\[([\s\S]*?)\n {6}\],/,
-    );
+    const workspaceChildren = app.match(/workspaceRoute\.addChildren\(\[([\s\S]*?)\n  \]\),/);
     const workspaceChildrenSource = workspaceChildren?.[1];
     expect(workspaceChildrenSource).toBeDefined();
     if (!workspaceChildrenSource) throw new Error("Workspace route children were not found");
@@ -121,19 +100,6 @@ describe("workspace route scroll ownership", () => {
     ).sort();
 
     expect(registeredRoutes).toEqual(Object.keys(workspaceRouteContracts).sort());
-
-    // Host extension pages come last, after every classified native route.
-    const lines = workspaceChildrenSource.split("\n").filter((line) => line.trim() !== "");
-    expect(lines.at(-1)?.trim()).toBe(
-      "...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),",
-    );
-  });
-
-  test("host extension rail pages use the default ContentPage scroll contract", async () => {
-    // Rail pages are framed in ContentPage when they load. Settings pages render
-    // bare, inside the settings shell's own ContentPage scroller.
-    expect(await source("host-extension/routes.tsx")).toContain('import("./route-frame")');
-    expect(await source("host-extension/route-frame.tsx")).toContain("<ContentPage");
   });
 
   test("ordinary pages use ContentPage and workbenches declare self-managed overflow", async () => {
@@ -190,7 +156,7 @@ describe("workspace route scroll ownership", () => {
     const legacyWrapper =
       'className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8"';
     for (const path of [
-      "routes/automations.tsx",
+      "routes/schedules.tsx",
       "routes/rigs.tsx",
       "routes/rig-detail.tsx",
       "routes/machines.tsx",

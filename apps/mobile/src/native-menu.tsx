@@ -8,18 +8,11 @@ export type { MenuAction } from "@expo/ui/community/menu";
 export function NativeMenu(props: {
   actions: MenuAction[];
   onPressAction?: MenuComponentProps["onPressAction"];
-  /** Fires as the menu opens (Android; SwiftUI menus have no open hook). */
-  onOpenMenu?: () => void;
   children: ReactNode;
 }) {
   const scheme = useColorScheme();
   return (
-    <MenuView
-      actions={props.actions}
-      colorScheme={scheme}
-      onPressAction={props.onPressAction}
-      {...(props.onOpenMenu ? { onOpenMenu: props.onOpenMenu } : {})}
-    >
+    <MenuView actions={props.actions} colorScheme={scheme} onPressAction={props.onPressAction}>
       {props.children}
     </MenuView>
   );

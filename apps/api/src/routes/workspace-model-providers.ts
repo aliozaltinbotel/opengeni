@@ -24,7 +24,6 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { parseRequestBody, requestValidationError } from "../http/request-body";
 
 const Kind = z.enum(["anthropic", "claude_subscription"]);
 function requestHash(value: unknown): string {
@@ -76,12 +75,11 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
   });
   app.post(path, async (c) => {
     const input = await scope(c, true);
-    const parsed = parseRequestBody(
-      CreateWorkspaceGatewayCustomModelRequest,
+    const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
-      { status: 422, message: "Invalid custom model" },
     );
-    const payload = parsed;
+    if (!parsed.success) throw new HTTPException(422, { message: "Invalid custom model" });
+    const payload = parsed.data;
     if (
       `${claudeProviderId(input.providerKind, "workspace")}/${payload.upstreamModelId}`.length > 256
     )
@@ -128,12 +126,8 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
     const parsed = DeleteWorkspaceGatewayCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
-    if (!id.success) throw new HTTPException(422, { message: "Invalid custom model deletion" });
-    if (!parsed.success)
-      throw requestValidationError(parsed.error, "body", {
-        status: 422,
-        message: "Invalid custom model deletion",
-      });
+    if (!id.success || !parsed.success)
+      throw new HTTPException(422, { message: "Invalid custom model deletion" });
     const customModelId = id.data;
     const removed = await deleteWorkspaceProviderCustomModel(deps.db, {
       ...input,

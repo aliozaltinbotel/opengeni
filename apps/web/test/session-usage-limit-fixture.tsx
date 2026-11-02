@@ -418,7 +418,7 @@ function OpenChat() {
             onToggleInspector={() => undefined}
             onRename={async () => null}
             onPin={async () => null}
-            onOpenUsageLimit={() => requestSessionUsageLimitEditor(document)}
+            onOpenUsageLimit={requestSessionUsageLimitEditor}
           />
         </div>
         <AgentTab testId="scenario-main" caption="Agent tab · within the limit">

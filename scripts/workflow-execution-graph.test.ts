@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-import { readRetiredWorkflow, retiredWorkflowNames } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import {
   appendFile,
@@ -13,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { stringify } from "yaml";
 import {
   GRAPH_MANIFEST_PATH,
@@ -28,40 +26,10 @@ import {
   type WorkflowExecutionGraphManifest,
 } from "./workflow-execution-graph";
 
+const root = resolve(import.meta.dir, "..");
 const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
 const discoveryActionPath = ".github/actions/probe/action.yaml";
-
-test("Batch plan no longer has a five-hour priority timeout exemption", () => {
-  const source = (timeout: number) =>
-    `name: Batch CI\non: push\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority batch\n`;
-  expect(
-    inspectWorkflowExecutionSources({
-      ".github/workflows/batch-ci.yml": source(320),
-    }).violations.join("\n"),
-  ).toContain("job timeout-minutes must be a static integer in 1..120");
-  expect(
-    inspectWorkflowExecutionSources({ ".github/workflows/batch-ci.yml": source(20) }).violations,
-  ).toEqual([]);
-});
-
-test("PR CI plan has no five-hour priority timeout exemption", () => {
-  const source = (timeout: number) =>
-    `name: PR CI\non: pull_request\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
-  expect(
-    inspectWorkflowExecutionSources({
-      ".github/workflows/pr-ci.yml": source(320),
-    }).violations.join("\n"),
-  ).toContain("job timeout-minutes must be a static integer in 1..120");
-  expect(
-    inspectWorkflowExecutionSources({ ".github/workflows/pr-ci.yml": source(15) }).violations,
-  ).toEqual([]);
-  // Version validation keeps its single bounded admission yield.
-  const version = `name: CI\non: workflow_dispatch\njobs:\n  automation-admission:\n    timeout-minutes: 320\n    steps:\n      - name: Yield fixture\n        run: bun scripts/ci/github-pr-ci.ts priority pr\n`;
-  expect(
-    inspectWorkflowExecutionSources({ ".github/workflows/ci.yml": version }).violations,
-  ).toEqual([]);
-});
 
 const minimalWorkflow = [
   "name: Fixture",
@@ -233,6 +201,35 @@ function actionDigest(manifest: WorkflowExecutionGraphManifest): string {
 }
 
 describe("workflow execution graph manifest", () => {
+  test("the checked-in manifest exactly describes the repository graph", async () => {
+    const inspection = await inspectWorkflowExecutionRepository(root);
+    const committed = JSON.parse(
+      await readFile(resolve(root, GRAPH_MANIFEST_PATH), "utf8"),
+    ) as unknown;
+
+    expect(inspection.violations).toEqual([]);
+    expect(compareWorkflowExecutionManifest(committed, inspection.manifest)).toEqual([]);
+    // Complete manifest comparison covers the inventory; aggregate totals are not invariants.
+    const workflows = new Set(inspection.manifest.workflows.map((record) => record.path));
+    const runIdentities = inspection.manifest.uncappedRuns.map((record) =>
+      canonicalJson([record.workflow, record.job, record.step]),
+    );
+    expect(new Set(runIdentities).size).toBe(runIdentities.length);
+    for (const record of [
+      ...inspection.manifest.uncappedRuns,
+      ...inspection.manifest.generatedLocalTargets,
+    ]) {
+      expect(workflows.has(record.workflow)).toBe(true);
+    }
+    for (const record of [
+      ...inspection.manifest.workflows,
+      ...inspection.manifest.actions,
+      ...inspection.manifest.uncappedRuns,
+    ]) {
+      expect(record.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    }
+  });
+
   test("restricted YAML rejects malformed or identity-ambiguous constructs", () => {
     const rejected = [
       "a: 1\na: 2\n",
@@ -1392,6 +1389,65 @@ describe("workflow execution graph manifest", () => {
     ).not.toEqual([]);
   });
 
+  test("browserd gives headless and headed suites independent bounded steps", async () => {
+    const sources = await loadWorkflowExecutionSources(root);
+    const workflow = Bun.YAML.parse(sources[".github/workflows/ci.yml"]!) as {
+      jobs: Record<
+        string,
+        { "timeout-minutes": number; steps: Array<{ run?: string; "timeout-minutes"?: number }> }
+      >;
+    };
+    const job = workflow.jobs["browserd-real-e2e"]!;
+    const headless = job.steps.find((step) =>
+      step.run?.includes("bun run --cwd packages/browserd test:e2e"),
+    )!;
+    const headed = job.steps.find((step) => step.run?.includes("OPENGENI_BROWSERD_HEADED_E2E=1"))!;
+    expect(headless).toBeDefined();
+    expect(headed).toBeDefined();
+    expect(headed).not.toBe(headless);
+    expect(headless["timeout-minutes"]).toBe(6);
+    expect(headed["timeout-minutes"]).toBe(5);
+    expect(headed.run).toContain("streams a mobile headed tab continuously");
+    const stepBudget = job.steps.reduce((sum, step) => sum + (step["timeout-minutes"] ?? 0), 0);
+    expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(stepBudget + 3);
+  });
+
+  test("removing any one of the 54 approved caps invalidates the committed graph", async () => {
+    type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
+    type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
+    const sources = await loadWorkflowExecutionSources(root);
+    const committed = JSON.parse(
+      await readFile(resolve(root, GRAPH_MANIFEST_PATH), "utf8"),
+    ) as unknown;
+    const capped: Array<readonly [string, number, number]> = [];
+    for (const [path, source] of Object.entries(sources)) {
+      if (!path.startsWith(".github/workflows/")) continue;
+      const workflow = Bun.YAML.parse(source) as MutableWorkflow;
+      for (const [jobIndex, job] of Object.values(workflow.jobs ?? {}).entries()) {
+        for (const [stepIndex, step] of (job.steps ?? []).entries()) {
+          if (step["timeout-minutes"] !== undefined) capped.push([path, jobIndex, stepIndex]);
+        }
+      }
+    }
+    expect(capped).toHaveLength(54);
+
+    for (const [path, jobIndex, stepIndex] of capped) {
+      const mutatedSources = { ...sources };
+      const workflow = Bun.YAML.parse(mutatedSources[path] ?? "") as MutableWorkflow;
+      const job = Object.values(workflow.jobs ?? {})[jobIndex];
+      const step = job?.steps?.[stepIndex];
+      expect(step).toBeDefined();
+      delete step?.["timeout-minutes"];
+      mutatedSources[path] = stringify(workflow);
+      const inspection = inspectWorkflowExecutionSources(mutatedSources);
+      expect(inspection.violations, `${path}:${jobIndex}:${stepIndex}`).toEqual([]);
+      expect(
+        compareWorkflowExecutionManifest(committed, inspection.manifest),
+        `${path}:${jobIndex}:${stepIndex}`,
+      ).not.toEqual([]);
+    }
+  });
+
   test("diagnostics disclose identities but never command or environment content", () => {
     const sentinelCommand = "SECRET_COMMAND_SENTINEL";
     const sentinelEnvironment = "SECRET_ENV_SENTINEL";
@@ -1411,21 +1467,5 @@ describe("workflow execution graph manifest", () => {
     expect(diagnostics).toContain(workflowPath);
     expect(diagnostics).not.toContain(sentinelCommand);
     expect(diagnostics).not.toContain(sentinelEnvironment);
-  });
-});
-
-describe("historical workflow fixture reader", () => {
-  test("loads every retained definition from exact Git history", () => {
-    const names = retiredWorkflowNames();
-    expect(names).toHaveLength(44);
-    for (const name of names) expect(readRetiredWorkflow(name).length).toBeGreaterThan(0);
-    expect(createHash("sha256").update(readRetiredWorkflow("ci.yml")).digest("hex")).toBe(
-      "97124076c0024dcb46e81cd043965bdd65bb8ede73941acd2f066ea36bf58133",
-    );
-  });
-  test("rejects paths and revision expressions instead of reading outside the fixture", () => {
-    for (const name of ["", "../ci.yml", "/ci.yml", "HEAD:ci.yml", "ci.yml\n", "ci.yml/other"]) {
-      expect(() => readRetiredWorkflow(name)).toThrow("RETIRED_WORKFLOW_NAME_INVALID");
-    }
   });
 });

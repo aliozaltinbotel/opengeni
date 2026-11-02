@@ -8,9 +8,12 @@ import {
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
 
 // A file has the same two audiences as a Site: Only me or the workspace.

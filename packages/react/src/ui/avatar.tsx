@@ -5,12 +5,13 @@ import { Avatar as AvatarPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
 
-const Avatar = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof AvatarPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Root> & {
-    size?: "default" | "sm" | "lg" | undefined;
-  }
->(function Avatar({ className, size = "default", ...props }, ref) {
+function Avatar({
+  className,
+  size = "default",
+  ...props
+}: React.ComponentProps<typeof AvatarPrimitive.Root> & {
+  size?: "default" | "sm" | "lg" | undefined;
+}) {
   return (
     <AvatarPrimitive.Root
       data-slot="avatar"
@@ -19,30 +20,25 @@ const Avatar = /* @__PURE__ */ React.forwardRef<
         "group/avatar relative flex size-8 shrink-0 overflow-hidden rounded-full select-none data-[size=lg]:size-10 data-[size=sm]:size-6",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const AvatarImage = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof AvatarPrimitive.Image>,
-  React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
->(function AvatarImage({ className, ...props }, ref) {
+function AvatarImage({ className, ...props }: React.ComponentProps<typeof AvatarPrimitive.Image>) {
   return (
     <AvatarPrimitive.Image
       data-slot="avatar-image"
       className={cn("aspect-square size-full", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const AvatarFallback = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof AvatarPrimitive.Fallback>,
-  React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Fallback>
->(function AvatarFallback({ className, ...props }, ref) {
+function AvatarFallback({
+  className,
+  ...props
+}: React.ComponentProps<typeof AvatarPrimitive.Fallback>) {
   return (
     <AvatarPrimitive.Fallback
       data-slot="avatar-fallback"
@@ -50,16 +46,12 @@ const AvatarFallback = /* @__PURE__ */ React.forwardRef<
         "flex size-full items-center justify-center rounded-full bg-muted text-sm text-muted-foreground group-data-[size=sm]/avatar:text-xs",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const AvatarBadge = /* @__PURE__ */ React.forwardRef<
-  HTMLSpanElement,
-  React.ComponentPropsWithoutRef<"span">
->(function AvatarBadge({ className, ...props }, ref) {
+function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
       data-slot="avatar-badge"
@@ -70,16 +62,12 @@ const AvatarBadge = /* @__PURE__ */ React.forwardRef<
         "group-data-[size=lg]/avatar:size-3 group-data-[size=lg]/avatar:[&>svg]:size-2",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const AvatarGroup = /* @__PURE__ */ React.forwardRef<
-  HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div">
->(function AvatarGroup({ className, ...props }, ref) {
+function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="avatar-group"
@@ -87,33 +75,22 @@ const AvatarGroup = /* @__PURE__ */ React.forwardRef<
         "group/avatar-group flex -space-x-2 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-background",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-/**
- * Pass the same `size` as the group's avatars. (It is not inferred with a
- * `group-has-*` selector: those make the browser restyle the whole page on
- * every DOM change.)
- */
-const AvatarGroupCount = /* @__PURE__ */ React.forwardRef<
-  HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div"> & { size?: "default" | "sm" | "lg" | undefined }
->(function AvatarGroupCount({ className, size = "default", ...props }, ref) {
+function AvatarGroupCount({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="avatar-group-count"
-      data-size={size}
       className={cn(
-        "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground ring-2 ring-background data-[size=lg]:size-10 data-[size=sm]:size-6 [&>svg]:size-4 data-[size=lg]:[&>svg]:size-5 data-[size=sm]:[&>svg]:size-3",
+        "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground ring-2 ring-background group-has-data-[size=lg]/avatar-group:size-10 group-has-data-[size=sm]/avatar-group:size-6 [&>svg]:size-4 group-has-data-[size=lg]/avatar-group:[&>svg]:size-5 group-has-data-[size=sm]/avatar-group:[&>svg]:size-3",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 export { Avatar, AvatarImage, AvatarFallback, AvatarBadge, AvatarGroup, AvatarGroupCount };

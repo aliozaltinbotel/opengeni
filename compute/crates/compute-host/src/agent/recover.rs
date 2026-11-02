@@ -17,7 +17,7 @@ use crate::protocol::{
     Id, MAX_MEMORY_MIB, MAX_VCPUS, MIN_CPU_REQUEST_MILLIS, MIN_MEMORY_MIB, SandboxConfig,
 };
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
-use crate::step::{Base, DiskWatch, LiveMemory, Reconnected};
+use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
 use super::holds::{Holds, UNREADABLE, hold_id};
@@ -67,7 +67,6 @@ fn loose_config(loose: Option<&serde_json::Value>) -> SandboxConfig {
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
-        let began = tokio::time::Instant::now();
         self.recover_strays(strays).await;
         let mut recovering = Vec::new();
         for (record, settled) in self.settle_records().await {
@@ -107,8 +106,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             recovering.push(record);
         }
-        let settle_ms = began.elapsed().as_millis();
-        self.recover_recorded(recovering, settle_ms).await;
+        self.recover_recorded(recovering).await;
     }
 
     /// Tidies the sandboxes whose records are missing, and blocks those
@@ -176,10 +174,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Takes back or blocks every sandbox whose record is durable, after
-    /// `settle_ms` spent settling records and tidying strays.
-    async fn recover_recorded(&mut self, recovering: Vec<Record>, settle_ms: u128) {
-        let began = tokio::time::Instant::now();
+    /// Takes back or blocks every sandbox whose record is durable.
+    async fn recover_recorded(&mut self, recovering: Vec<Record>) {
         // Finding VMs and checking networks touch only their own sandbox,
         // so they run for every sandbox at once; the results are taken in
         // one by one.
@@ -187,7 +183,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.find_vms(&recovering),
             self.ensure_networks(&recovering)
         );
-        let find_ms = began.elapsed().as_millis();
         let mut adopted = 0_usize;
         for record in recovering {
             let id = record.id;
@@ -224,9 +219,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandboxes = self.slots.len(),
             adopted,
             blocked = self.blocked.len(),
-            settle_ms,
-            find_ms,
-            take_ms = began.elapsed().as_millis() - find_ms,
             "recovered"
         );
     }
@@ -541,16 +533,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             _ => self.now(),
         };
         let adopted = vm.is_some();
-        let taken_back = match &vm {
-            Some((vm, _)) => Some(self.take_back(id, &paths, vm).await),
+        // Taken back before the agent can ask the VMM to sync the disk, so
+        // it sees what the disk lost while no agent watched; see
+        // `DiskWatch`.
+        let watch = match &vm {
+            Some((vm, _)) => {
+                let held = self.engine.held(vm).await.unwrap_or_else(|error| {
+                    tracing::warn!(%id, %error, "could not take back the disk watch");
+                    None
+                });
+                Some(DiskWatch::adopt(&paths, held))
+            }
             None => None,
         };
-        let unsavable = taken_back.as_ref().is_some_and(|(watch, _)| watch.failed());
+        let unsavable = watch.as_ref().is_some_and(DiskWatch::failed);
         self.insert(id, paths, spec);
-        if let (Some((vm, pager)), Some((watch, base))) = (vm, taken_back) {
+        if let (Some((vm, pager)), Some(watch)) = (vm, watch) {
+            // What its memory was based on is unknown, so its next save
+            // holds every page.
             let memory = match pager {
-                Some(pager) => LiveMemory::reconnected(watch, pager, base),
-                None => LiveMemory::adopted(watch, base),
+                Some(pager) => LiveMemory::reconnected(watch, pager),
+                None => LiveMemory::adopted(watch),
             };
             let live = self.own(id, vm, memory);
             if let Some(slot) = self.slots.get_mut(&id.0) {
@@ -561,23 +564,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // The core plans once it has all of these: a sandbox added alone
         // could start a step its holds or an unsavable VM rule out, such
         // as forgetting the memory of one a caller holds awake.
-        let mut inputs = Vec::new();
-        // A new sandbox whose first wake the agent before booked and that
-        // has not woken since keeps that room booked until its deadline,
-        // so what this agent admits first cannot take it, even after a
-        // failed try at that wake.
-        if state.level != Level::Running
-            && let Some(by_ms) = record.first_wake_by_ms.filter(|by| *by > unix_ms_now())
-        {
-            inputs.push(self.first_wake(id, size, record.disk == Disk::Remote, by_ms));
-        }
-        inputs.push(Input::Add {
+        let mut inputs = vec![Input::Add {
             sandbox: id.0,
             state,
             policy,
             size,
             last_activity,
-        });
+        }];
         if unsavable {
             // It still runs and wakes, but is never saved.
             inputs.push(Input::Unsavable { sandbox: id.0 });
@@ -585,32 +578,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         inputs.extend(self.restore_holds(id));
         self.inputs(inputs);
         Ok(adopted)
-    }
-
-    /// Takes back what the agent before kept for `vm`, found running after
-    /// an agent restart: the watch on its disk, before the agent can ask the
-    /// VMM to sync the disk, so it sees what the disk lost while no agent
-    /// watched (see [`DiskWatch`]), and what its memory is based on as its
-    /// record shows, so its next save holds only what changed since (see
-    /// [`crate::step::recorded_base`]).
-    async fn take_back(&self, id: Id, paths: &Paths, vm: &E::Vm) -> (DiskWatch, Base) {
-        let held = self.engine.held(vm).await.unwrap_or_else(|error| {
-            tracing::warn!(%id, %error, "could not take back the disk watch");
-            None
-        });
-        let watch = DiskWatch::adopt(paths, held);
-        let process = self
-            .engine
-            .process_identity(vm)
-            .inspect_err(|error| tracing::debug!(%id, %error, "the VM's process is not named"))
-            .ok();
-        let paths = paths.clone();
-        let base = tokio::task::spawn_blocking(move || {
-            crate::step::recorded_base(&paths, process.as_deref(), &crate::step::images_of(&paths))
-        })
-        .await
-        .unwrap_or(Base::Unknown);
-        (watch, base)
     }
 
     /// Takes back the named holds sandbox `id` had, less those that lapsed

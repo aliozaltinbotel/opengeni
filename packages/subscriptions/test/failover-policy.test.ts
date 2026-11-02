@@ -393,7 +393,7 @@ describe("placement over the derived order", () => {
       decideChecked(
         input({
           settings: {
-            providers: { beta: { enabled: false } },
+            providers: { beta: { useOrganizationAccounts: true, enabled: false } },
           },
         }),
       ),

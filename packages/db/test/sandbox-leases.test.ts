@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";

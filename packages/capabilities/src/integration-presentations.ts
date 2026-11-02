@@ -31,46 +31,30 @@ export type IntegrationPresentationCopy = {
 export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
   Record<string, IntegrationPresentationCopy>
 > = {
-  "microsoft-teams": {
-    providerName: "Microsoft",
-    introduction:
-      "Let agents read Teams conversations and send messages as the work or school account you connect.",
+  "google-drive": {
+    providerName: "Google",
+    icon: "files",
+    introduction: "Let agents work with files in the Google Drive account you choose.",
     capabilities: [
       {
-        title: "Read conversations",
-        description:
-          "Find your teams, channels and chats, then read messages and replies you can access.",
+        title: "Find files and folders",
+        description: "Browse and search content in My Drive and shared drives.",
       },
       {
-        title: "Send messages",
-        description:
-          "Post chat and channel messages or reply to a channel thread as your connected account.",
+        title: "Create and update content",
+        description: "Work with files and folders through the reviewed Drive tools.",
+      },
+      {
+        title: "Manage sharing",
+        description: "Review and update links, permissions, and shared-drive content.",
       },
     ],
     permissionSummary:
-      "Microsoft asks for delegated Teams access. Reading channel messages requires tenant administrator consent. This does not install the Teams bot.",
+      "Google asks for access to the Drive account you approve, including files shared with that account.",
     scopeLabels: {
-      "Team.ReadBasic.All": {
-        label: "List teams",
-        description: "Read basic team details available to your account.",
-      },
-      "Channel.ReadBasic.All": {
-        label: "List channels",
-        description: "Read channel names and basic details.",
-      },
-      "ChannelMessage.Read.All": {
-        label: "Read channel messages",
-        description:
-          "Read messages in channels your account can access; administrator consent is required.",
-      },
-      "ChannelMessage.Send": {
-        label: "Send channel messages",
-        description: "Post messages and replies as your account.",
-      },
-      "Chat.Read": { label: "Read chats", description: "Read your chats and their messages." },
-      "ChatMessage.Send": {
-        label: "Send chat messages",
-        description: "Send messages in your chats as your account.",
+      "https://www.googleapis.com/auth/drive": {
+        label: "Work with Google Drive files",
+        description: "See, create, edit, organize, and share files available to this account.",
       },
     },
   },

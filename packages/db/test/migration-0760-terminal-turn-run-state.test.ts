@@ -6,7 +6,7 @@ import {
   acquireOwnerMigratedTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,

@@ -29,9 +29,6 @@ function createTurnActivityServices(
         ...(dependencies.authorizeModelCallSource
           ? { authorizeModelCallSource: dependencies.authorizeModelCallSource }
           : {}),
-        ...(dependencies.organizationGovernance
-          ? { organizationGovernance: dependencies.organizationGovernance }
-          : {}),
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
       };

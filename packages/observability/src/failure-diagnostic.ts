@@ -12,11 +12,7 @@ const CODES = [
   "db_failure",
   "retained_process_fenced",
   "retained_process_proof_failed",
-  "retained_process_observation_failed",
   "mcp_orchestration_failed",
-  "governed_session_policy_default_failed",
-  "governed_session_policy_backfill_failed",
-  "host_webhook_delivery_start_failed",
 ] as const;
 const STAGES = [
   "observability.error",
@@ -29,12 +25,9 @@ const STAGES = [
   "session_attempts.claim",
   "failure_settlement",
   "sandbox_retained_processes.proof",
-  "sandbox_retained_processes.observation",
   "mcp.session_create",
   "mcp.session_send_message",
   "mcp.session_steer",
-  "governed_session_policy.startup_pass",
-  "host_webhook.delivery_start",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;
 // Reviewed schema names, never a syntactic allowlist for arbitrary driver strings.
@@ -57,8 +50,6 @@ const ERROR_NAMES = new Set([
   "DrizzleQueryError",
   "SessionEventPersistenceError",
   "SandboxWorkspaceMutationFencedError",
-  "ProviderCommandObservationUnavailableError",
-  "ClientError",
 ]);
 
 // Human-reviewed code locations, not a regex permission to publish any path.
@@ -68,9 +59,6 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/api/src/fatal-process-boundary.ts",
   "apps/api/src/mcp/server.ts",
   "apps/api/src/mcp/orchestration-failure-diagnostic.ts",
-  "apps/api/src/governed-session-policy-backfill.ts",
-  "apps/api/src/http/host-webhooks.ts",
-  "packages/core/src/application/organization-session-policy.ts",
   "apps/api/dist/process/index.js",
   "apps/worker/src/activities/agent-turn/run.ts",
   "apps/worker/src/activities/agent-turn/claim.ts",
@@ -92,7 +80,6 @@ export const DIAGNOSTIC_POSTGRES_FUNCTIONS = [
   "admit_session_attempt_personal_machine_v1",
   "admit_session_attempt_personal_documents",
   "bind_session_attempt_machine_consent",
-  "carry_session_attempt_machine_authorization",
   "guard_session_admission_block",
   "workspace_instruction_policy_get_or_create_snapshot",
   "preference_registry_get_or_create_snapshot",
@@ -153,12 +140,6 @@ export type FailureDiagnosticInput = {
   parentSessionId?: string;
   processId?: string;
   turnId?: string;
-  /** The organization (managed account) a tenant-wide operation failed for. */
-  organizationId?: string;
-  /** The MCP connection a host webhook delivery is about. */
-  connectionId?: string;
-  /** The host webhook delivery that could not be started. */
-  deliveryId?: string;
   executionGeneration?: number;
   attempts?: number;
   sqlState?: string | null;
@@ -194,7 +175,6 @@ function errorKind(error: unknown): string {
 export function failureDiagnostic(input: FailureDiagnosticInput, revision?: string) {
   const causes: Array<{
     kind: string;
-    providerStatus?: number;
     frames: Array<{ locationHash: string; source?: string; line: number; column: number }>;
   }> = [];
   const pgContext: Array<{ functionName: string; line: number }> = [];
@@ -206,15 +186,6 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
   while (error && typeof error === "object" && !seen.has(error) && causes.length < 4) {
     seen.add(error);
     const kind = errorKind(error);
-    const numericCode = own(error, "code");
-    // Only numeric gRPC status codes; no provider details, URLs or command text.
-    const providerStatus =
-      typeof numericCode === "number" &&
-      Number.isInteger(numericCode) &&
-      numericCode >= 0 &&
-      numericCode <= 16
-        ? numericCode
-        : undefined;
     const driverCode = kind === "PostgresError" ? own(error, "code") : undefined;
     if (!causeSqlState && typeof driverCode === "string" && /^[0-9A-Z]{5}$/.test(driverCode)) {
       causeSqlState = driverCode;
@@ -255,7 +226,6 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
         : [];
     causes.push({
       kind,
-      ...(providerStatus === undefined ? {} : { providerStatus }),
       frames,
     });
     error = own(error, "cause");
@@ -279,9 +249,6 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     parentSessionId: uuid(input.parentSessionId),
     processId: uuid(input.processId),
     turnId: uuid(input.turnId),
-    organizationId: uuid(input.organizationId),
-    connectionId: uuid(input.connectionId),
-    deliveryId: uuid(input.deliveryId),
     executionGeneration:
       Number.isSafeInteger(input.executionGeneration) &&
       input.executionGeneration! >= 1 &&

@@ -23,7 +23,7 @@ import {
   type SubscriptionQuota,
 } from "@opengeni/subscriptions";
 import { checkPlacementDecision } from "@opengeni/subscriptions/reference";
-import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import {
   classifyFakeApiKeyError,

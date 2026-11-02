@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
 import * as runAdmission from "../src/billing/agent-run-admission";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { withClaudeConnectionCatalog } from "@opengeni/config";
 import {
   assertGoalResumeAllowed,
@@ -80,9 +80,7 @@ test("Resume uses only promotional credits eligible for the chosen model", async
   const policy = spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue(null);
   const codex = spyOn(db, "isCodexBilledTurn").mockResolvedValue(false);
   const allowance = spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null);
-  // This test owns Resume's model selection and funding gate; retain the real
-  // promotional projection while the database admission transaction is stubbed.
-  const ledgerBalance = {
+  const balance = spyOn(db, "getBillingBalance").mockResolvedValue({
     accountId,
     balanceMicros: 100,
     generalBalanceMicros: 0,
@@ -96,13 +94,7 @@ test("Resume uses only promotional credits eligible for the chosen model", async
         eligibleModelIds: ["gpt-6-luna"],
       },
     ],
-  };
-  const balance = spyOn(db, "getSpendableCreditBalance").mockImplementation(
-    async (_db, _accountId, usage) => ({
-      ...ledgerBalance,
-      balanceMicros: db.spendableCreditMicros(ledgerBalance, usage),
-    }),
-  );
+  });
   restores.push(
     ...[scoped, policy, codex, allowance, balance].map((spy) => () => spy.mockRestore()),
   );
@@ -114,7 +106,6 @@ test("Resume uses only promotional credits eligible for the chosen model", async
     );
     if (model === "gpt-6-luna") await expect(resume).resolves.toBeUndefined();
     else await expect(resume).rejects.toMatchObject({ pausedReason: "credits" });
-    expect(balance).toHaveBeenLastCalledWith(database, accountId, model);
   }
 });
 

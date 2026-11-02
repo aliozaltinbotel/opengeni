@@ -32,18 +32,14 @@ export function Button({
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  // A disabled primary loses its fill: the pale wash alone would look the
-  // same enabled or not.
   const palette =
-    disabled && variant === "primary"
-      ? { bg: c["surface-2"], border: c.border, fg: c["fg-subtle"] }
-      : variant === "primary"
-        ? { bg: c.primary, border: c["primary-border"], fg: c["primary-fg"] }
-        : variant === "destructive"
-          ? { bg: c["danger-fill"], border: c["danger-fill"], fg: c["danger-fg"] }
-          : variant === "ghost"
-            ? { bg: "transparent", border: "transparent", fg: c["fg-muted"] }
-            : { bg: c["surface-2"], border: c.border, fg: c["fg-muted"] };
+    variant === "primary"
+      ? { bg: c.primary, border: c["primary-border"], fg: c["primary-fg"] }
+      : variant === "destructive"
+        ? { bg: c["danger-fill"], border: c["danger-fill"], fg: c["danger-fg"] }
+        : variant === "ghost"
+          ? { bg: "transparent", border: "transparent", fg: c["fg-muted"] }
+          : { bg: c["surface-2"], border: c.border, fg: c["fg-muted"] };
   return (
     <Pressable
       accessibilityRole="button"

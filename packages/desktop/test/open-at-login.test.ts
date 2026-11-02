@@ -166,11 +166,9 @@ describe.skipIf(process.platform === "win32")("running the app's own agent", () 
     });
     try {
       await machine.boot();
-      // The shell creates the file before it writes the folder, so wait for the content.
-      const seenConfigDir = () => (existsSync(seen) ? readFileSync(seen, "utf8").trim() : "");
-      for (let i = 0; i < 250 && !seenConfigDir(); i++) await Bun.sleep(20);
+      for (let i = 0; i < 50 && !existsSync(seen); i++) await Bun.sleep(20);
       // Not the default folder, where another agent on this computer may hold the lock.
-      expect(seenConfigDir()).toBe(configDir);
+      expect(readFileSync(seen, "utf8").trim()).toBe(configDir);
       const running = await machine.status("https://server.example", "w1");
       expect(running.state).toBe("connected");
       expect(running.reconnecting).toBeUndefined();

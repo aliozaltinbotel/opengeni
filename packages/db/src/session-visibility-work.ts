@@ -320,7 +320,6 @@ export async function settleSessionVisibilityWorkInTransaction(
           eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
           inArray(schema.sessionHumanInputRequests.turnId, turnIds),
           eq(schema.sessionHumanInputRequests.status, "pending"),
-          eq(schema.sessionHumanInputRequests.origin, "tool_call"),
         ),
       )
       .returning({

@@ -18,7 +18,7 @@ import {
   deferSiteAuthMaintenance,
   type SiteAuthMaintenanceClaim,
 } from "@opengeni/db";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 import type { ControlActivityServices } from "./types";
 
 export const SITE_AUTH_MAINTENANCE_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -153,16 +153,6 @@ async function dispatchMaintenanceSession(
     latencyModeSource: "deployment",
   });
   const created = await dependencies.createSession({
-    ...(service.sessionAuthorization
-      ? {
-          sessionCreateHost: {
-            port: service.sessionAuthorization,
-            creator: { principalKind: "service" as const },
-            actor: { kind: "subject" as const, subjectId: "site-auth-maintenance" },
-            configuredServers: catalogSettings.mcpServers,
-          },
-        }
-      : {}),
     requestedSessionId: maintenance.sessionId,
     db: service.db,
     bus: service.bus,

@@ -1,4 +1,3 @@
-import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import { sql } from "drizzle-orm";
 import { stableJson, type ScheduledTask } from "@opengeni/contracts";
 import { ExternalLinkWorkSnapshot } from "@opengeni/contracts/external-identities";
@@ -38,7 +37,7 @@ export async function externalLinkWorkSnapshotIsLive(db: Database, raw: unknown)
       resolved.link.nativeSubjectId === snapshot.actor.effectiveSubjectId &&
       snapshot.permissions.every(
         (permission) =>
-          permissionSetCovers(resolved.link.permissions, permission) ||
+          resolved.link.permissions.includes(permission) ||
           (permission !== "secrets:read" && resolved.link.permissions.includes("workspace:admin")),
       )
     );

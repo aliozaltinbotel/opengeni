@@ -4,7 +4,7 @@ import type {
   McpConnectionAccountBinding,
   TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { seedSenderConnections } from "./sender-connection-fixture";
 import {
   createDb,
@@ -463,7 +463,7 @@ test("provider-delegated human turn keeps informational input pending in preview
 
 test("receiving request retains its metadata-only developer credential ceiling", async () => {
   const { resolveTurnExecutionPolicyV1 } = await import("@opengeni/config");
-  const { testSettings } = await import("@opengeni/testing/settings");
+  const { testSettings } = await import("@opengeni/testing");
   const g = await fixture(),
     receiver = await session(g),
     source = await session(g);

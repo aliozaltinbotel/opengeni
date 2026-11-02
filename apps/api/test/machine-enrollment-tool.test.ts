@@ -4,8 +4,7 @@ import {
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing/settings";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings, MemoryEventBus } from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 

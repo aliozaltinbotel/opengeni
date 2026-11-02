@@ -1,9 +1,4 @@
-import type {
-  Session,
-  SessionListEntry,
-  SessionListTotals,
-  SiteConversationGroup,
-} from "@opengeni/sdk";
+import type { Session, SessionListEntry, SessionListTotals } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
@@ -28,11 +23,6 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   archivedOnly?: boolean | undefined;
   sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus?: "active" | "archived" | "all" | undefined;
-  /**
-   * Conversations that run inside a Site: `include` lists them as rows,
-   * `group` (root pages) returns them as `siteGroups` instead.
-   */
-  siteConversations?: "include" | "group" | undefined;
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -51,10 +41,6 @@ export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Se
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated: boolean;
   totals: SessionListTotals | null;
-  /** Complete Site rows for a `group` page; null when not requested or unsupported. */
-  siteGroups: SiteConversationGroup[] | null;
-  /** True when the server omitted Site rows beyond its bound. */
-  siteGroupsTruncated: boolean;
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
@@ -93,7 +79,6 @@ export function useWorkspaceSessions(
   const archivedOnly = options.archivedOnly;
   const sortBy = options.sortBy;
   const archiveStatus = options.archiveStatus;
-  const siteConversations = options.siteConversations;
   const enabled = options.enabled ?? true;
   const nextReadRevision = useRef(0);
   const nextReadGeneration = useRef(0);
@@ -114,7 +99,6 @@ export function useWorkspaceSessions(
     archivedOnly ? "archived" : "active",
     sortBy ?? "",
     archiveStatus ?? "",
-    siteConversations ?? "",
   ].join("\u0000");
   const previousQueryKey = useRef(queryKey);
   const queryKeyTransition = previousQueryKey.current !== queryKey;
@@ -138,7 +122,6 @@ export function useWorkspaceSessions(
         ...(archivedOnly ? { archivedOnly: true } : {}),
         ...(sortBy ? { sortBy } : {}),
         ...(archiveStatus ? { archiveStatus } : {}),
-        ...(siteConversations ? { siteConversations } : {}),
         signal,
       };
       const page =
@@ -179,7 +162,6 @@ export function useWorkspaceSessions(
       archivedOnly,
       sortBy,
       archiveStatus,
-      siteConversations,
       queryKey,
     ],
   );
@@ -201,8 +183,6 @@ export function useWorkspaceSessions(
     pinned,
     pinnedTruncated: page?.pinnedTruncated ?? false,
     totals: page?.totals ?? null,
-    siteGroups: page?.siteGroups ?? null,
-    siteGroupsTruncated: page?.siteGroupsTruncated === true,
     nextCursor: page?.nextCursor ?? null,
     // `usePolledValue` clears the old data and starts the new request in an
     // effect. During that query-key transition render, its old loading flag

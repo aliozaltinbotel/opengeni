@@ -66,20 +66,6 @@ test("viewport protocol failures remain errors rather than unavailable metrics",
   }
 });
 
-test("a page with no JavaScript context yet is observed without viewport metrics", async () => {
-  // A tab a relaunched browser restored can still be between documents.
-  const fixture = await captureFixture();
-  try {
-    await fixture.driver.start();
-    fixture.failViewport("Cannot find default execution context");
-    const observation = await fixture.driver.observe("target-1");
-    expect(observation.viewport).toBeNull();
-    expect(observation.semantic?.kind).toBe("snapshot");
-  } finally {
-    await fixture.driver.close();
-  }
-});
-
 test("bounded mobile frames keep one scale across rounded raster captures and viewport changes", async () => {
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
@@ -343,30 +329,6 @@ test("a closed browser connection still authorizes runtime recovery", async () =
   }
 });
 
-test("the connection state tells an answering browser from a silent or lost one", async () => {
-  const fixture = await captureFixture();
-  try {
-    await fixture.driver.start();
-    expect(await fixture.driver.connectionState()).toBe("connected");
-    // A browser that does not answer in time is not shown to be connected.
-    fixture.stallNext("Browser.getVersion");
-    jest.useFakeTimers();
-    const silent = fixture.driver.connectionState();
-    await fixture.waitUntilStalled();
-    jest.advanceTimersByTime(2_000);
-    await settle();
-    expect(await silent).toBe("unresponsive");
-    fixture.replyToStalled();
-    await settle();
-    jest.useRealTimers();
-    fixture.disconnect();
-    expect(await fixture.driver.connectionState()).toBe("lost");
-  } finally {
-    jest.useRealTimers();
-    await fixture.driver.close();
-  }
-});
-
 test("the supervisor preserves target authority when a failed capture has a slow liveness probe", async () => {
   const reference = { browserSessionId: randomUUID(), controllerGeneration: randomUUID() };
   const fixture = await captureFixture(reference);
@@ -374,6 +336,7 @@ test("the supervisor preserves target authority when a failed capture has a slow
   let driverLifecycles = 0;
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
+    socketRootDirectory: join(directory, "s"),
     createDriver: async () => {
       driverLifecycles += 1;
       return fixture.driver;
@@ -484,6 +447,7 @@ test("a fully fenced action preserves a frame timeout before dispatch", async ()
   const directory = await mkdtemp("/tmp/ogb-frame-timeout-");
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
+    socketRootDirectory: join(directory, "s"),
     createDriver: async () => fixture.driver,
   });
   try {
@@ -574,7 +538,7 @@ async function captureFixture(
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
-  let viewportFailure: string | null = null;
+  let viewportFailure = false;
   let stalledMethod: string | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
   let reachedStall = () => {};
@@ -618,7 +582,7 @@ async function captureFixture(
               new MessageEvent("message", {
                 data: JSON.stringify({
                   id: command.id,
-                  error: { code: -32000, message: viewportFailure },
+                  error: { code: -32000, message: "synthetic viewport failure" },
                 }),
               }),
             ),
@@ -712,8 +676,8 @@ async function captureFixture(
     setViewport(value: unknown) {
       viewport = value;
     },
-    failViewport(message = "synthetic viewport failure") {
-      viewportFailure = message;
+    failViewport() {
+      viewportFailure = true;
     },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {

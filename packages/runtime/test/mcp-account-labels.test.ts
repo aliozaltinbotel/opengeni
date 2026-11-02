@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import { PrefixedMcpServer, prepareAgentTools } from "../src/index";
-import { startTestMcpServer } from "@opengeni/testing/mcp";
-import { testSettings } from "@opengeni/testing/settings";
+import { startTestMcpServer, testSettings } from "@opengeni/testing";
 
 test("account routes expose labels with independent tool snapshots and dispatch", async () => {
   const calls: string[] = [];

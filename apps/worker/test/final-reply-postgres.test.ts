@@ -21,10 +21,15 @@ import * as schema from "@opengeni/db/schema";
 import { tool } from "@openai/agents";
 import { z } from "zod";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  assistantMessage,
+  functionCall,
+  MemoryEventBus,
+  ScriptedModel,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createActivityTestHarness } from "../src/activities";
 import { finalReplyNudge, hasFinalReplyNudge } from "../src/activities/agent-turn/final-reply";
 

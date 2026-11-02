@@ -29,8 +29,6 @@ import {
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
-import { parseRequestBody, requestValidationError } from "../http/request-body";
-import { requireOrganizationCreate } from "../http/organization-governance";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -61,15 +59,12 @@ export function registerManagedOnboardingRoutes(
 
   app.post("/v1/auth/organization-onboarding", async (context) => {
     const session = await requireManagedHuman(context, deps);
-    // Self-service setup creates an organization: the governing host decides.
-    await requireOrganizationCreate(deps, `user:${session.user.id}`);
     const parsed = CompleteSelfServiceOrganizationSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
     if (!parsed.success) {
       recordOrganizationSetupOutcome(deps.observability, "failed");
-      throw requestValidationError(parsed.error, "body", {
-        status: 422,
+      throw new HTTPException(422, {
         message: "invalid organization setup request",
       });
     }
@@ -136,16 +131,17 @@ export function registerManagedOnboardingRoutes(
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
     enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
-    const parsed = parseRequestBody(
-      PreviewOrganizationUserSetupRequest,
+    const parsed = PreviewOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
-      { status: 422, message: "invalid account setup preview request" },
     );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid account setup preview request" });
+    }
     return context.json(
       OrganizationUserSetupPreview.parse(
         await previewOrganizationUserSetup(
           deps.db,
-          await organizationUserSetupTokenDigest(parsed.token),
+          await organizationUserSetupTokenDigest(parsed.data.token),
         ),
       ),
     );
@@ -156,13 +152,16 @@ export function registerManagedOnboardingRoutes(
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
     enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
-    const parsed = parseRequestBody(
-      CompleteOrganizationUserSetupRequest,
+    const parsed = CompleteOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
-      { status: 422, message: "invalid account setup request" },
     );
-    const name = parsed.name.trim();
-    const tokenDigest = await organizationUserSetupTokenDigest(parsed.token);
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid account setup request",
+      });
+    }
+    const name = parsed.data.name.trim();
+    const tokenDigest = await organizationUserSetupTokenDigest(parsed.data.token);
     const preflight = await preflightOrganizationUserSetup(deps.db, tokenDigest);
     if (preflight === "unavailable") {
       throw new HTTPException(404, {
@@ -172,18 +171,18 @@ export function registerManagedOnboardingRoutes(
     const requestFingerprint = await organizationUserSetupRequestFingerprint(deps.settings, {
       tokenDigest,
       name,
-      password: parsed.password,
+      password: parsed.data.password,
     });
     const passwordHash =
       preflight === "completed"
         ? completedSetupReplayPasswordHash
-        : await hashPassword(parsed.password);
+        : await hashPassword(parsed.data.password);
     try {
       return context.json(
         CompleteOrganizationUserSetupResponse.parse(
           await completeOrganizationUserSetup(deps.db, {
             tokenDigest,
-            operationId: parsed.operationId,
+            operationId: parsed.data.operationId,
             requestFingerprint,
             authUserId: crypto.randomUUID(),
             name,

@@ -2,9 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { organizationAccessPresetPermissions } from "@opengeni/contracts";
 import { createDb, createManagedOrganization, type DbClient } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createApp } from "../src/app";
 
 /* End to end through the real app and PostgreSQL: a person signs in, an agent

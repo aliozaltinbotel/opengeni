@@ -41,7 +41,7 @@ import {
 /* ----------------------------------------------------------------------------
    Connections: the password manager accounts connected in this workspace
    (1Password service accounts, Proton Pass tokens, Keeper applications,
-   Bitwarden accounts and your own vault service). On the Secrets list they are
+   Bitwarden bridges and your own vault service). On the Secrets list they are
    one flat section of rows, the tile marking the provider; each row opens the
    connection's page, where its vaults are linked, its access is renewed and
    it is disconnected. A connection carries no status while it is healthy.
@@ -62,7 +62,11 @@ function capitalized(text: string): string {
 
 /** Where a connection reads from, for "can't reach …" sentences. */
 function reachTarget(provider: VaultProviderId): string {
-  return provider === "external" ? "your vault service" : PROVIDERS[provider].name;
+  return provider === "bitwarden"
+    ? "your Bitwarden bridge"
+    : provider === "external"
+      ? "your vault service"
+      : PROVIDERS[provider].name;
 }
 
 /** The row's status: null while the connection is healthy, so the row shows none. */
@@ -105,7 +109,17 @@ function attentionBadge(connection: VaultConnection, attention: ConnectionAttent
         />
       );
     case "locked":
-      return <StatusBadge status="locked" variant="dot" reason={`${info.name} is locked.`} />;
+      return (
+        <StatusBadge
+          status="locked"
+          variant="dot"
+          reason={
+            provider === "bitwarden"
+              ? "Bitwarden is locked on the bridge. Unlock it there."
+              : `${info.name} is locked.`
+          }
+        />
+      );
     case "unavailable":
       return (
         <StatusBadge
@@ -206,7 +220,7 @@ export function ConnectionsSection({
 export interface ConnectionPageActions {
   back: () => void;
   chooseVaults: () => void;
-  /** Replace token, Reconnect, Update service: the provider's renewal page. */
+  /** Replace token, Reconnect, Update bridge: the provider's renewal page. */
   renew: () => void;
   /** Checks a pending connection again with its saved access (never a spent setup token). */
   finish: () => Promise<void>;
@@ -293,7 +307,7 @@ function renewHow(provider: VaultProviderId): string {
     case "keeper":
       return "Reconnect with a one-time access token from a new device; the linked folders keep their links.";
     case "bitwarden":
-      return "Reconnect with the account's API key and master password; the linked vaults and collections keep their links.";
+      return "Update the bridge's address or signing secret; the linked vaults keep their links.";
     case "external":
       return "Update the service's address or signing secret; the linked vaults keep their links.";
   }
@@ -301,7 +315,9 @@ function renewHow(provider: VaultProviderId): string {
 
 /** Where values stay, as the end of the page's audience sentence. */
 function valuesStay(provider: VaultProviderId): string {
-  return `Values stay in ${PROVIDERS[provider].home}; agents read them when they run.`;
+  return provider === "bitwarden"
+    ? "Values stay in Bitwarden on your bridge; agents read them when they run."
+    : `Values stay in ${PROVIDERS[provider].home}; agents read them when they run.`;
 }
 
 /** One connection's page: who can use it, its linked vaults, and what to do. */
@@ -424,7 +440,9 @@ export function ConnectionPage({
     case "locked":
       notice = (
         <Notice tone="waiting" title="Locked" actionLayout="responsive" action={checkAgain}>
-          {`${info.name} is locked, so agents can't read its items. Unlock it; syncing picks up on its own.`}
+          {provider === "bitwarden"
+            ? "Bitwarden is locked on the bridge, so agents can't read its items. Unlock it there; syncing picks up on its own."
+            : `${info.name} is locked, so agents can't read its items. Unlock it; syncing picks up on its own.`}
         </Notice>
       );
       break;
@@ -487,7 +505,11 @@ export function ConnectionPage({
   );
   meta.push(
     <span key="checked">
-      {provider === "onepassword" || provider === "protonpass" ? "token checked" : "checked"}{" "}
+      {provider === "onepassword" || provider === "protonpass"
+        ? "token checked"
+        : provider === "bitwarden"
+          ? "bridge checked"
+          : "checked"}{" "}
       <RelativeTime date={connection.verifiedAt} inSentence />
     </span>,
   );

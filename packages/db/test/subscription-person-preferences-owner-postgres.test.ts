@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   createDb,

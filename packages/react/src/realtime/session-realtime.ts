@@ -55,10 +55,6 @@ export type RealtimeModelOption = {
   voiceDefaults?: RealtimeVoiceSettings | undefined;
   /** The workspace's saved voice settings for this model. */
   workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
-  /** True on the model the workspace chose to start voice conversations with. */
-  workspaceDefault?: boolean | undefined;
-  /** True on the model the organization chose; the workspace's own choice wins. */
-  organizationDefault?: boolean | undefined;
 };
 
 export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
@@ -294,7 +290,7 @@ export type SessionRealtimeControllerFactory = (
 type PrestartedSessionRealtime = {
   model: SessionRealtimeModel;
   controller: Promise<SessionRealtimeController>;
-  /** Supplied at prestart; the adopting session view takes it over. */
+  /** Filled in by the session view that adopts the call. */
   modelContext: { current: (() => string | undefined) | undefined };
   /** The conversation language; the adopting view takes it over. */
   language: { current: () => string | undefined };
@@ -335,8 +331,6 @@ export function prestartSessionRealtime(input: {
    * workspace's saved settings for the model.
    */
   voiceSettings?: RealtimeVoiceSettings | undefined;
-  /** Per-message context, available before the session view adopts the call. */
-  getModelContext?: (() => string | undefined) | undefined;
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }): () => void {
   const key = prestartKey(input.workspaceId, input.sessionId);
@@ -344,7 +338,7 @@ export function prestartSessionRealtime(input: {
   // A retried handoff keeps the call already starting for the same model.
   if (existing?.model === input.model) return abandonPrestarted(key, existing);
   if (existing) abandonPrestarted(key, existing)();
-  const modelContext: PrestartedSessionRealtime["modelContext"] = { current: input.getModelContext };
+  const modelContext: PrestartedSessionRealtime["modelContext"] = { current: undefined };
   const language: PrestartedSessionRealtime["language"] = { current: () => input.language };
   const voiceSettings: PrestartedSessionRealtime["voiceSettings"] = {
     current: () => input.voiceSettings,
@@ -707,28 +701,6 @@ function fallbackRealtimeModelId(
   );
 }
 
-/**
- * The model a voice conversation starts with: the person's own pick when they
- * can use it, else the model the workspace (or else its organization) chose,
- * else Codex Live, else the first model they can use.
- */
-function startingRealtimeModelId(
-  t: OpenGeniText,
-  models: readonly RealtimeModelOption[],
-  picked: SessionRealtimeModel | null,
-): SessionRealtimeModel {
-  const usable = (id: SessionRealtimeModel) =>
-    models.some((model) => model.id === id && model.available);
-  if (picked && usable(picked)) return picked;
-  const chosen =
-    models.find((model) => model.workspaceDefault) ??
-    models.find((model) => model.organizationDefault);
-  if (chosen?.available) return chosen.id;
-  // A pick the person can no longer use falls to the first usable model.
-  if (!picked && usable(CODEX_LIVE_MODEL(t).id)) return CODEX_LIVE_MODEL(t).id;
-  return fallbackRealtimeModelId(t, models);
-}
-
 export function useRealtimeModelSelection(options: {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
@@ -756,20 +728,14 @@ export function useRealtimeModelSelection(options: {
     client: unknown;
     workspaceId: string;
   } | null>(null);
-  // A pick made here, for when browser storage can't keep it.
-  const pickedRef = useRef<{ workspaceId: string; model: SessionRealtimeModel } | null>(null);
-  // The model of a call already running here: a catalog that arrives later must
-  // not swap it for a default.
-  const activeModelRef = useRef<SessionRealtimeModel | null>(activeModel ?? null);
   const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
-    const picked = readRealtimeModelPreference(workspaceId);
-    if (!initialCachedCatalog) return picked ?? CODEX_LIVE_MODEL(t).id;
-    return startingRealtimeModelId(t, initialCachedCatalog, picked);
+    const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL(t).id;
+    if (!initialCachedCatalog) return preferred;
+    if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
+      return preferred;
+    }
+    return fallbackRealtimeModelId(t, initialCachedCatalog);
   });
-
-  useEffect(() => {
-    activeModelRef.current = activeModel ?? null;
-  }, [activeModel]);
 
   useEffect(() => {
     let disposed = false;
@@ -777,14 +743,10 @@ export function useRealtimeModelSelection(options: {
     const applyCatalog = (models: RealtimeModelOption[]) => {
       catalogScopeRef.current = { client, workspaceId, source: "cache" };
       setCatalog(models);
-      if (activeModelRef.current) {
-        setSelectedModelId(activeModelRef.current);
-        return;
-      }
-      const picked =
-        readRealtimeModelPreference(workspaceId) ??
-        (pickedRef.current?.workspaceId === workspaceId ? pickedRef.current.model : null);
-      setSelectedModelId(startingRealtimeModelId(t, models, picked));
+      setSelectedModelId((current) => {
+        if (models.some((model) => model.id === current && model.available)) return current;
+        return fallbackRealtimeModelId(t, models);
+      });
     };
     const cached = readCachedRealtimeModelCatalog(client, workspaceId);
     if (cached) {
@@ -833,7 +795,6 @@ export function useRealtimeModelSelection(options: {
       const model = catalog.find((candidate) => candidate.id === value);
       if (!model || !model.available || activeModel) return;
       setSelectedModelId(model.id);
-      pickedRef.current = { workspaceId, model: model.id };
       writeRealtimeModelPreference(workspaceId, model.id);
     },
     [activeModel, catalog, workspaceId],

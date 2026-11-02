@@ -1,10 +1,5 @@
-import { beginWorkspaceMcpHostHandler } from "@opengeni/observability/internal/workspace-mcp-timing";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  bindMcpTelemetry,
-  withMcpCallIdentity,
-  measureMcpPhase,
-} from "@opengeni/observability";
+import { bindMcpTelemetry, withMcpCallIdentity, measureMcpPhase } from "@opengeni/observability";
 import Ajv, {
   _,
   str,
@@ -46,12 +41,10 @@ import {
   ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
 } from "./errors";
-import { summarizeToolGatewayInputErrors, type ToolGatewayInputIssueSummary } from "./input-issues";
+import { summarizeToolGatewayInputErrors } from "./input-issues";
 
 export type ToolGatewayExecutionContext = import("@opengeni/contracts").NativeModelSourceContext & {
   operationId: string;
-  /** Verified native API provenance, never parsed from caller arguments or metadata. */
-  nativeHostSource?: Readonly<{ context: import("@opengeni/contracts").NativeHostSourceContext; reauthorize(): Promise<void> }>;
   caller: ToolGatewayCaller;
   /** Trusted in-process SDK correlation; not operation identity or approval authority. */
   sourceCallId?: string;
@@ -63,7 +56,7 @@ export type ToolGatewayExecutionContext = import("@opengeni/contracts").NativeMo
 
 export type ToolGatewayCallContext = Pick<
   ToolGatewayExecutionContext,
-  "sourceCallId" | "nativeModelSourceKey" | "nativeHostSource" | "transportMeta" | "signal"
+  "sourceCallId" | "nativeModelSourceKey" | "transportMeta" | "signal"
 >;
 
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
@@ -389,23 +382,20 @@ export class ToolGateway {
             await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
             let result: ToolGatewayResultValue;
             try {
-              const executionContext: Parameters<ToolGatewayDefinition["execute"]>[1] = {
-                operationId,
-                caller,
-                ...(context.nativeHostSource === undefined ? {} : { nativeHostSource: context.nativeHostSource }),
-                ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
-                ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
-                ...(context.transportMeta === undefined ? {} : { transportMeta: context.transportMeta }),
-                ...(context.signal === undefined ? {} : { signal: context.signal }),
-              };
-              const hostTiming = beginWorkspaceMcpHostHandler();
-              let invocationResult: Awaited<ReturnType<ToolGatewayDefinition["execute"]>>;
-              try {
-                invocationResult = await definition.execute(executeArguments, executionContext);
-              } finally {
-                hostTiming?.end();
-              }
-              result = ToolGatewayResult.parse(invocationResult);
+              result = ToolGatewayResult.parse(
+                await definition.execute(executeArguments, {
+                  operationId,
+                  caller,
+                  ...(context.sourceCallId === undefined
+                    ? {}
+                    : { sourceCallId: context.sourceCallId }),
+                  ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
+                  ...(context.transportMeta === undefined
+                    ? {}
+                    : { transportMeta: context.transportMeta }),
+                  ...(context.signal === undefined ? {} : { signal: context.signal }),
+                }),
+              );
               if (!result.isError && definition.validateOutput) {
                 const outputMatchesSchema =
                   result.structuredContent !== undefined &&
@@ -757,47 +747,6 @@ function compileCatalogSchema(
   }
   compiledCatalogSchemaCache.set(cacheKey, compiled);
   return compiled;
-}
-
-let argumentValidators: SchemaValidators | undefined;
-let argumentDiagnosticValidators: SchemaValidators | undefined;
-
-/**
- * Check arguments against a remote server's input schema (for example an MCP
- * event type's `inputSchema`) with the validators tool calls use. Returns the
- * problems as value-free sentences, or none when the arguments fit. A schema
- * that cannot be compiled is not enforced here: the server still validates
- * its own input.
- */
-export function inputSchemaArgumentIssues(
-  schema: Record<string, unknown>,
-  args: Record<string, unknown>,
-): ToolGatewayInputIssueSummary {
-  const fits = { issues: [], omittedIssueCount: 0 };
-  let validate: ValidateFunction<unknown>;
-  try {
-    validate = compileCatalogSchema(
-      (argumentValidators ??= createSchemaValidators("first_error")),
-      schema as ToolGatewayCatalogEntryValue["inputSchema"],
-    );
-  } catch {
-    return fits;
-  }
-  if (validate(args)) return fits;
-  let errors = validate.errors;
-  if (repairableInputSize(args)) {
-    try {
-      const diagnose = compileCatalogSchema(
-        (argumentDiagnosticValidators ??= createSchemaValidators("all_errors")),
-        schema as ToolGatewayCatalogEntryValue["inputSchema"],
-      );
-      diagnose(args);
-      errors = diagnose.errors ?? errors;
-    } catch {
-      // The first-error result already decided the rejection.
-    }
-  }
-  return summarizeToolGatewayInputErrors(errors, { schema, arguments: args });
 }
 
 function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {

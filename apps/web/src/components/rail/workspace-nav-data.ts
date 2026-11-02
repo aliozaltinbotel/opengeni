@@ -1,9 +1,5 @@
 // Workspace destination catalog (routes, labels, icon keys). Rendering lives in
 // `workspace-config-link.tsx`.
-import {
-  isWorkspaceSegmentHidden,
-  type NativeDestination,
-} from "@opengeni/react/app/host-extension";
 
 export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/insights"
@@ -11,8 +7,7 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
-  | "/workspaces/$workspaceId/automations"
-  | "/workspaces/$workspaceId/meetings"
+  | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
@@ -25,8 +20,7 @@ export type WorkspaceConfigIcon =
   | "laptop"
   | "brain-circuit"
   | "plug"
-  | "zap"
-  | "audio-lines"
+  | "calendar-clock"
   | "panels-top-left"
   | "settings";
 
@@ -60,16 +54,10 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     description: "Knowledge, instructions, and agent learning",
   },
   {
-    to: "/workspaces/$workspaceId/automations",
-    icon: "zap",
-    label: "Automations",
-    description: "Run agents on a schedule or when something happens",
-  },
-  {
-    to: "/workspaces/$workspaceId/meetings",
-    icon: "audio-lines",
-    label: "Meetings",
-    description: "Record meetings and read who said what",
+    to: "/workspaces/$workspaceId/schedules",
+    icon: "calendar-clock",
+    label: "Schedules",
+    description: "Run agents on a schedule",
   },
   {
     to: "/workspaces/$workspaceId/artifacts",
@@ -135,23 +123,6 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
 export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GROUPS.flatMap(
   (group) => group.items,
 ).filter((item) => item.to !== "/workspaces/$workspaceId/settings");
-
-const WORKSPACE_TARGET_PREFIX = "/workspaces/$workspaceId/";
-
-/**
- * The items whose destination the host extension does not hide, in order. An
- * item is hidden by the segment after `$workspaceId/` in its `to`.
- */
-export function visibleNativeItems<T extends { to: string }>(
-  items: readonly T[],
-  hidden: readonly NativeDestination[],
-): T[] {
-  return items.filter((item) => {
-    if (!item.to.startsWith(WORKSPACE_TARGET_PREFIX)) return true;
-    const segment = item.to.slice(WORKSPACE_TARGET_PREFIX.length).split("/")[0] ?? "";
-    return !isWorkspaceSegmentHidden(segment, hidden);
-  });
-}
 
 export function filterWorkspaceConfigGroups(
   groups: WorkspaceConfigGroup[],

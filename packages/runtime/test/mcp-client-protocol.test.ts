@@ -63,21 +63,8 @@ afterEach(() => {
   for (const server of started.splice(0)) server.stop();
 });
 
-function startLegacyServer(
-  options: { probeStatus?: number; answersDiscover?: boolean } = {},
-): Started {
+function startLegacyServer(options: { probeStatus?: number } = {}): Started {
   const methods: string[] = [];
-  // Like some hosted servers: it answers the 2026-07-28 `server/discover`
-  // probe but every other result is 2025-shaped (no `resultType`).
-  const discover = options.answersDiscover
-    ? createMcpHandler(() => {
-        const mcp = new ModernMcpServer({ name: "discover-only", version: "1.0.0" });
-        mcp.registerTool("unused", { description: "Advertises tools." }, async () => ({
-          content: [],
-        }));
-        return mcp;
-      })
-    : null;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -93,13 +80,6 @@ function startLegacyServer(
       if (method) methods.push(method);
       if (method === "server/discover" && options.probeStatus) {
         return new Response("upstream failure", { status: options.probeStatus });
-      }
-      if (method === "server/discover" && discover) return await discover.fetch(request);
-      if (discover && request.headers.get("mcp-protocol-version") === "2026-07-28") {
-        // It accepts the new revision's requests and answers them the 2025 way.
-        const headers = new Headers(request.headers);
-        headers.set("mcp-protocol-version", "2025-11-25");
-        request = new Request(request, { headers });
       }
       const mcp = new LegacyServer(
         { name: "legacy-fixture", version: "1.0.0" },
@@ -168,16 +148,11 @@ function startModernServer(): Started {
   return entry;
 }
 
-function connectV2(
-  url: string,
-  firstParty = false,
-  timeout?: number,
-  codexApps = false,
-): MCPServerStreamableHttp {
+function connectV2(url: string, firstParty = false, timeout?: number): MCPServerStreamableHttp {
   return new MCPServerStreamableHttp({
     url,
     name: "fixture",
-    ...mcpStreamableHttpClientOptions({ firstParty, codexApps }),
+    ...mcpStreamableHttpClientOptions({ firstParty }),
     ...(timeout ? { timeout } : {}),
   });
 }
@@ -225,24 +200,6 @@ test("first-party servers skip the era probe", async () => {
   expect(fixture.methods).not.toContain("server/discover");
 });
 
-test("the ChatGPT apps server skips the era probe and lists its tools", async () => {
-  // ChatGPT's apps server answers server/discover but returns 2025-era tool
-  // lists without resultType, which a 2026-07-28 client rejects.
-  expect(
-    mcpStreamableHttpClientOptions({ firstParty: false, codexApps: true }).versionNegotiation,
-  ).toEqual({ mode: "legacy" });
-  const fixture = startLegacyServer();
-  const server = connectV2(fixture.url, false, undefined, true);
-  await server.connect();
-  try {
-    expect((await server.listTools()).map((tool) => tool.name)).toEqual(["search", "fail", "slow"]);
-  } finally {
-    await server.close();
-  }
-  expect(fixture.methods[0]).toBe("initialize");
-  expect(fixture.methods).not.toContain("server/discover");
-});
-
 test("a remembered legacy verdict skips the probe on the next connect", async () => {
   const fixture = startLegacyServer();
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -263,40 +220,6 @@ test("a server that answers the probe with a 5xx still connects over the 2025 ha
   } finally {
     await server.close();
   }
-});
-
-test("a server that answers the probe but sends 2025-era results falls back to the 2025 handshake", async () => {
-  const fixture = startLegacyServer({ answersDiscover: true });
-  const expected = JSON.stringify(
-    await withLegacyClient(fixture.url, async (client) => (await client.listTools()).tools),
-  );
-  fixture.methods.length = 0;
-  const server = connectV2(fixture.url);
-  await server.connect();
-  try {
-    expect(JSON.stringify(await server.listTools())).toBe(expected);
-    const result = await server.callToolResult("search", { query: "cats" });
-    expect(result.content).toEqual([{ type: "text", text: "hits for cats" }]);
-  } finally {
-    await server.close();
-  }
-  expect(fixture.methods.slice(0, 4)).toEqual([
-    "server/discover",
-    "tools/list",
-    "initialize",
-    "notifications/initialized",
-  ]);
-
-  // The verdict is remembered: the next connect skips the probe.
-  fixture.methods.length = 0;
-  const again = connectV2(fixture.url);
-  await again.connect();
-  try {
-    expect((await again.listTools()).map((tool) => tool.name)).toEqual(["search", "fail", "slow"]);
-  } finally {
-    await again.close();
-  }
-  expect(fixture.methods).not.toContain("server/discover");
 });
 
 test("server errors and timeouts keep their v1 shapes and model-visible text", async () => {

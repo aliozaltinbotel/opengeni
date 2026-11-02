@@ -1,7 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 describe("Appearance in Chromium", () => {

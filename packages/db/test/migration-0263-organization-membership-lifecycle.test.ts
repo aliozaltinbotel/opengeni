@@ -5,7 +5,7 @@ import {
   acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -813,9 +813,7 @@ describe("migration 0263 organization membership lifecycle", () => {
         membershipId: member.id,
         transition: {
           kind: "change_role",
-          // Two real changes: a role the member already holds is a no-op
-          // that leaves the revision alone (0995).
-          role: "owner",
+          role: "member",
           expectedAuthorizationRevision: member.authorizationRevision,
           operationId: crypto.randomUUID(),
         },

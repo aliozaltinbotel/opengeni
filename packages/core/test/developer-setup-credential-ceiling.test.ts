@@ -7,7 +7,7 @@ import {
   type AccessContext,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import {
   accessGrantAuthorizationFromContext,

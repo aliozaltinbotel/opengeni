@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { LOSSLESS_JSON_STRING_PREFIX } from "../src/lossless-json";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   appendSessionEventsAndUpdateSession,
   bootstrapWorkspace,

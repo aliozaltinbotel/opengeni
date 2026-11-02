@@ -1,4 +1,4 @@
-import { type OwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
+import type { OwnerMigratedTestDatabase } from "@opengeni/testing";
 import { MANAGED_BROWSER_SESSION_CAPABILITIES } from "@opengeni/db";
 
 export async function seedBrowserDeadlineCheckpoint(owned: OwnerMigratedTestDatabase, options: { checkpoint?: boolean; rotation?: string } = {}) {

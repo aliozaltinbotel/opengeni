@@ -41,5 +41,5 @@ export {
   type OpenKeeperConnectionOptions,
   type PersistKeeperConfigurationRecord,
 } from "./connection";
-export { restrictToOperations } from "@opengeni/vaults";
+export { restrictToOperations } from "./operations";
 export { KEEPER_DEFINITE_REJECTION_STATUSES } from "./errors";

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { createDb, createSession, type DbClient } from "../src";
 import { executeMigrationFile, migrate } from "../src/migrate";

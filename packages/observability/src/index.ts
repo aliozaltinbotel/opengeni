@@ -11,17 +11,12 @@ import {
   currentTraceContext,
   validTraceContext,
   admissionTraceContext,
-  withoutTraceContext,
-  type ChildSpanRecorder,
-  type SpanKind,
   type TraceContext,
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 import { projectErrorCauseAttributes } from "./error-cause";
 import { operationalErrorDiagnostic } from "./operational-error";
-import { subscribeWorkspaceMcpTiming } from "./internal/workspace-mcp-timing";
-import type { WorkspaceMcpTimingObserver } from "./mcp-timing";
 export {
   errorCauseAttributes,
   PUBLIC_ERROR_CAUSE_NAMES,
@@ -57,25 +52,16 @@ export {
   measureMcpPhase,
   recordToolApproval,
   MCP_EXECUTION_PHASES,
-  type WorkspaceMcpTimingObservation,
-  type WorkspaceMcpTimingObserver,
 } from "./mcp-timing";
 export {
   currentTraceContext,
   withTraceContext,
-  withoutTraceContext,
-  startChildSpan,
-  childSpanRecordingActive,
   parseTraceparent,
   traceparent,
   admissionTraceContext,
   linkCurrentSpanToAdmission,
-  type ChildSpan,
-  type ChildSpanAttributes,
-  type SpanKind,
   type TraceContext,
 } from "./trace-context";
-export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
 export {
   analyzeCpuSamples,
   captureCpuSamplingProfile,
@@ -117,8 +103,6 @@ export type Span = {
   spanId: string;
   traceFlags?: string;
   addLink?: (context: TraceContext) => void;
-  /** Present on roots started with `childSpanLimit`; scoped by withTraceContext. */
-  childSpans?: ChildSpanRecorder;
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
 
@@ -404,10 +388,6 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "opengeni.finalization_duration_ms",
   "opengeni.trigger_kind",
   "opengeni.status",
-  // Child spans under API requests (trace-context.ts startChildSpan): how many
-  // the request's span budget dropped, and a query's returned row count.
-  "opengeni.child_spans_dropped",
-  "db.response.returned_rows",
   "error.type",
   "error.status_code",
   "method",
@@ -419,10 +399,6 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "examined",
   "registered",
   "failed",
-  // Counts of the API's startup session-policy pass (governed organizations
-  // visited and defaults stored); never identifiers.
-  "governed",
-  "stored",
   "delayMs",
   "provider",
   "providerApi",
@@ -473,10 +449,6 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
-  [
-    "writerKinds",
-    /^(?:tool_call|shell_session|pending_shell_start|remote_operation)(?:,(?:tool_call|shell_session|pending_shell_start|remote_operation)){0,3}$/,
-  ],
   // Rejected-request classification (apps/api/src/http/rejection-telemetry.ts):
   // the public ErrorEnvelope code enum, a catalog permission or typed detail
   // code, and a one-way message hash. Never message text or identifiers.
@@ -498,17 +470,6 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["cpuProfilePath", /^\/[\w./-]{1,255}$/],
   ["cpuProfileTopSelf", CPU_PROFILE_FRAMES_PATTERN],
   ["cpuProfileLongestBlockTopStack", CPU_PROFILE_FRAMES_PATTERN],
-  // Database query spans (packages/db database-spans.ts): the statement's
-  // leading keyword and first table or routine name, read from the SQL text,
-  // and the SQLSTATE of a failure. Never SQL text or bound parameters.
-  ["db.system.name", /^postgresql$/],
-  ["db.operation.name", /^[A-Z]{2,16}$/],
-  ["db.collection.name", /^[a-z_][a-z0-9_]{0,62}$/],
-  ["db.response.status_code", /^[0-9A-Z]{5}$/],
-  // Instrumented clients (client-spans.ts): a code-chosen client name and the
-  // method called on it.
-  ["opengeni.client", /^[a-z][a-z0-9_]{0,31}$/],
-  ["opengeni.client.operation", /^[A-Za-z][A-Za-z0-9_]{0,63}$/],
 ]);
 
 /**
@@ -635,7 +596,6 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 ]);
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
-  "action_timeout",
   "agent_command_wake_failed",
   "api_startup_failed",
   "api_uncaught_exception",
@@ -657,13 +617,10 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "control_wake_dispatch_failed",
   "fenced_event_live_publish_failed",
   "forbidden",
-  "governed_session_policy_backfill_failed",
-  "governed_session_policy_default_failed",
   "host_export_batch_delivery_failed",
   "host_export_failure_settlement_stale",
   "host_export_pump_iteration_failed",
   "host_export_retention_prune_failed",
-  "host_webhook_delivery_start_failed",
   "idempotency_conflict",
   "incompatible_exposed_ports",
   "internal_error",
@@ -798,11 +755,6 @@ type MetricRegistration = {
 };
 
 export class Observability {
-  /** Optional content-free gateway timing stream. No subscriber means no measurement. */
-  onWorkspaceMcpTiming(observer: WorkspaceMcpTimingObserver): () => void {
-    return subscribeWorkspaceMcpTiming(this, observer);
-  }
-
   private spanBatch: unknown[] = [];
   private spanBatchScheduled = false;
   private readonly diagnosticQueue = new ExportQueue((outcome) => {
@@ -843,10 +795,7 @@ export class Observability {
     private readonly options: ObservabilityOptions,
   ) {
     this.now = options.now ?? Date.now;
-    const exporter = options.exporter ?? defaultExporter;
-    // Export runs outside the trace that produced the data, or an outbound-call
-    // span would record (and then export) the export request itself.
-    this.exporter = (url, body, headers) => withoutTraceContext(() => exporter(url, body, headers));
+    this.exporter = options.exporter ?? defaultExporter;
     this.resourceAttributes = {
       "service.name": settings.serviceName,
       "service.instance.id": serviceInstanceId,
@@ -1037,19 +986,7 @@ export class Observability {
   startSpan(
     name: string,
     attributes: Attributes = {},
-    options: {
-      parent?: TraceContext | null;
-      links?: TraceContext[];
-      startTimeMs?: number;
-      kind?: SpanKind;
-      /**
-       * Let code running under this span (database queries, outbound calls)
-       * record child spans through startChildSpan, at most this many for the
-       * whole tree and only until this span ends. Ignored while no OTLP
-       * endpoint is configured, so unexported spans cost nothing.
-       */
-      childSpanLimit?: number;
-    } = {},
+    options: { parent?: TraceContext | null; links?: TraceContext[]; startTimeMs?: number } = {},
   ): Span {
     const parent =
       options.parent === null
@@ -1065,36 +1002,11 @@ export class Observability {
     const startMs = Number.isFinite(options.startTimeMs)
       ? Math.min(now, Math.max(0, options.startTimeMs!))
       : now;
-    const kind = options.kind ?? "internal";
     let ended = false;
-    let childSpansDropped = 0;
-    const childSpanLimit =
-      this.settings.observabilityOtlpEndpoint &&
-      Number.isInteger(options.childSpanLimit) &&
-      options.childSpanLimit! > 0
-        ? options.childSpanLimit!
-        : 0;
-    let childSpansRemaining = childSpanLimit;
-    const childSpans: ChildSpanRecorder | undefined =
-      childSpanLimit > 0
-        ? (childName, childAttributes, childKind, childParent) => {
-            if (ended) return undefined;
-            if (childSpansRemaining <= 0) {
-              childSpansDropped++;
-              return undefined;
-            }
-            childSpansRemaining--;
-            return this.startSpan(childName, childAttributes, {
-              parent: childParent,
-              kind: childKind,
-            });
-          }
-        : undefined;
     return {
       traceId,
       spanId,
       ...(parent?.traceFlags === undefined ? {} : { traceFlags: parent.traceFlags }),
-      ...(childSpans ? { childSpans } : {}),
       addLink: (context) => {
         const valid = validTraceContext(context);
         if (
@@ -1121,16 +1033,12 @@ export class Observability {
           ...(parent ? { parentSpanId: parent.spanId } : {}),
           links,
           name: boundedOtlpString(name),
-          kind,
           startMs,
           endMs: this.now(),
           attributes: {
             ...projectPublicTelemetryAttributes({
               ...attributes,
               ...input.attributes,
-              ...(childSpansDropped > 0
-                ? { "opengeni.child_spans_dropped": childSpansDropped }
-                : {}),
               ...errorAttributes,
             }),
           },
@@ -1430,7 +1338,6 @@ export class Observability {
     parentSpanId?: string;
     links: TraceContext[];
     name: string;
-    kind?: SpanKind;
     startMs: number;
     endMs: number;
     attributes: Attributes;
@@ -1458,7 +1365,7 @@ export class Observability {
                   ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
                   links: span.links.map(({ traceId, spanId }) => ({ traceId, spanId })),
                   name: span.name,
-                  kind: OTLP_SPAN_KIND[span.kind ?? "internal"],
+                  kind: 1,
                   startTimeUnixNano: millisToNanos(span.startMs),
                   endTimeUnixNano: millisToNanos(span.endMs),
                   attributes: otlpAttributes(span.attributes),
@@ -1502,8 +1409,6 @@ export class Observability {
 
 /** Spans buffered before one OTLP request; bounded well under the collector's request body cap. */
 const SPAN_BATCH_MAX_SPANS = 256;
-/** OTLP SpanKind numbers (opentelemetry-proto trace.proto). */
-const OTLP_SPAN_KIND: Record<SpanKind, number> = { internal: 1, server: 2, client: 3 };
 /** Longest a span waits in the batch before export. */
 const SPAN_BATCH_WINDOW_MS = 250;
 

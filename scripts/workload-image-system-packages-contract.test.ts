@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,7 +66,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
 }
 
 describe("workload image system package contract", () => {
-  test("historical workflow fixture: builds web assets natively and assembles either runtime architecture without execution", async () => {
+  test("builds web assets natively and assembles either runtime architecture without execution", async () => {
     const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
     const builder = stage(dockerfile, "web-build");
     const runtime = stage(dockerfile, "web");
@@ -81,7 +80,7 @@ describe("workload image system package contract", () => {
     expect(runtime).toContain("/app/apps/web/dist ./apps/web/dist");
     expect(runtime).toContain("/app/web-server/server.ts ./apps/web/src/server.ts");
     expect(runtime).toContain("USER bun");
-    const ci = readRetiredWorkflow("ci.yml");
+    const ci = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
     const webJob = ci.slice(
       ci.indexOf("  web-image:"),
       ci.indexOf("  artifact-materializer-image:"),
@@ -147,13 +146,11 @@ describe("workload image system package contract", () => {
   test("keeps upload conversion on the existing control worker and voice decoding local", async () => {
     const api = await readFile(resolve(root, "apps/api/src/index.ts"), "utf8");
     expect(api).toContain('temporal.workflow.start("documentIndexWorkflow"');
-    expect(api).toContain(
-      'documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal")',
-    );
+    expect(api).toContain("documentIndexer: workflowClient.documentIndexer");
     const control = await readFile(resolve(root, "apps/worker/src/activities-control.ts"), "utf8");
     expect(control).toContain("createDocumentActivities(services, resolveDocumentServices)");
     const segmenter = await readFile(
-      resolve(root, "packages/core/src/transcription-service/segmenter.ts"),
+      resolve(root, "apps/api/src/transcription/segmenter.ts"),
       "utf8",
     );
     expect(segmenter).toContain("input.ffmpegPath");

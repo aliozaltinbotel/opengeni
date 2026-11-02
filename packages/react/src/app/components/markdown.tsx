@@ -1,5 +1,5 @@
 import { Markdown, type MarkdownProps } from "../../components/markdown";
-import { useAppLinkResolver } from "../lib/session-artifact-navigation";
+import { consoleLinkResolver } from "../lib/session-artifact-navigation";
 import { cn } from "../lib/utils";
 
 /**
@@ -31,11 +31,10 @@ export function MarkdownText({
   streaming?: boolean | undefined;
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
 }) {
-  const resolveLink = useAppLinkResolver();
   return (
     <Markdown
       artifactHref={artifactHref}
-      resolveLink={resolveLink}
+      resolveLink={consoleLinkResolver}
       searchTarget={searchTarget}
       softLineBreaks={softLineBreaks}
       streaming={streaming}

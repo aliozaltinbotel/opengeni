@@ -37,6 +37,7 @@ import {
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import {
   planSubscriptionCoreCutover,
+  type SubscriptionCutoverConnection,
   type SubscriptionCutoverDecodedIdentity,
   type SubscriptionCutoverPlan,
   type SubscriptionCutoverRules,
@@ -138,6 +139,10 @@ export const XAI_CUTOVER_RULES: SubscriptionCutoverRules<LegacyXaiCredentialRow,
   Object.freeze({ statusRank: STATUS_RANK, source: xaiCutoverSource });
 
 export type XaiCutoverPlan = SubscriptionCutoverPlan<LegacyXaiCredentialRow, XaiCutoverStatus>;
+export type XaiCutoverConnection = SubscriptionCutoverConnection<
+  LegacyXaiCredentialRow,
+  XaiCutoverStatus
+>;
 
 function time(value: Date | null | undefined): number | null {
   if (!value) return null;

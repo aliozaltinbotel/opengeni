@@ -40,7 +40,6 @@ import {
   SandboxProviderReadLockUnavailableError,
   SandboxRigConflictError,
   SandboxPaidComputeAdmissionError,
-  waitWhileLeaseWarming,
   withSandboxProviderReadLock,
   type Database,
   type EnrollmentRecord,
@@ -677,8 +676,6 @@ async function channelAMachineAuthority(
 
 /** How often a direct operation that is still running reports itself. */
 const DIRECT_OPERATION_SLOW_REPORT_MS = 60_000;
-/** How often a request that joined a box still starting reads its lease. */
-const WARMING_POLL_INTERVAL_MS = 250;
 
 async function withChannelAOperation<T>(
   services: ChannelAServices,
@@ -1226,27 +1223,13 @@ async function withChannelAOperation<T>(
         });
       }
     } else {
-      // ATTACHED / REARMED: read the lease to get the authoritative
-      // resume_state, then resume by id for this op. A request can join a box
-      // another holder is still starting, as a fresh chat's first Browser or
-      // Computer open does while its first turn brings the sandbox up: it
-      // waits for that start, as a turn joining it does.
-      let live = await readLease(db, workspaceId, sandboxGroupId);
-      let expectedEpoch = acquired.lease.leaseEpoch;
-      if (live?.liveness === "warming" && live.leaseEpoch === expectedEpoch) {
-        live = await waitWhileLeaseWarming(db, workspaceId, sandboxGroupId, {
-          timeoutMs: settings.sandboxWarmingTimeoutMs,
-          pollMs: WARMING_POLL_INTERVAL_MS,
-          signal: ctx.waitSignal,
-        });
-        // The spawner's commit to warm raises the epoch by one: that box is
-        // the one this request joined.
-        expectedEpoch += 1;
-      }
+      // ATTACHED / REARMED: the box is live. Read the lease to get the
+      // authoritative resume_state, then resume by id for this op.
+      const live = await readLease(db, workspaceId, sandboxGroupId);
       if (
         !live ||
         live.liveness !== "warm" ||
-        live.leaseEpoch !== expectedEpoch ||
+        live.leaseEpoch !== acquired.lease.leaseEpoch ||
         live.instanceId === null
       ) {
         throw new HTTPException(409, {

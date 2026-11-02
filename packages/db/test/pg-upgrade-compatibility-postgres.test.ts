@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 
 // pg_upgrade refuses a cluster whose user tables store any of these types,
 // directly or through an array, domain or composite type: they hold catalog

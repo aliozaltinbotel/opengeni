@@ -30,8 +30,7 @@ export type ProviderConnectChoice = {
 export function providerPaymentSummary(id: ModelProviderId, title: string): string {
   if (id === "codex") return "Pay with your ChatGPT plan";
   if (id === "supergrok") return "Pay with your SuperGrok plan";
-  // "OpenAI API" pays through OpenAI.
-  return `Pay per token through ${title.replace(/ API$/, "")}`;
+  return `Pay per token through ${title}`;
 }
 
 export function ProviderConnectList({

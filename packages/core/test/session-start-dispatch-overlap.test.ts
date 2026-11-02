@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
-import { normalizeMessageTimeZone } from "@opengeni/contracts";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { measureSessionStartPhase } from "../src/domain/session-start-timing";
 
@@ -20,8 +19,7 @@ function productionDispatch() {
         node.type === "VariableDeclaration" &&
         node.declarations.some((d) => d.id.type === "Identifier" && d.id.name === name),
     );
-  // Start at the first statement the atomic initialization depends on.
-  const first = declaration("initialTimeZone") ?? declaration("started")!;
+  const first = declaration("started")!;
   const last = statements.at(-1)!;
   const code = new Bun.Transpiler({ loader: "ts" }).transformSync(
     `const dispatch = async () => { ${source.slice(first.start, last.end)} };`,
@@ -33,7 +31,7 @@ function productionDispatch() {
     "input",
     "session",
     `return (async () => {
-    const { initializeSessionStartAtomically, publishDurableSessionEvents, requireSession, listSessionTurns, measureSessionStartPhase, normalizeMessageTimeZone } = ports;
+    const { initializeSessionStartAtomically, publishDurableSessionEvents, requireSession, listSessionTurns, measureSessionStartPhase } = ports;
     const initialAutomaticTitleForSessionStart = () => null;
     ${code}
     return dispatch();
@@ -78,7 +76,6 @@ function fixture(
   };
   const ports = {
     measureSessionStartPhase,
-    normalizeMessageTimeZone,
     initializeSessionStartAtomically: () => {
       calls.push("initialize");
       return holds.initialize.promise;

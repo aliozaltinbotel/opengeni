@@ -149,6 +149,8 @@
     "check:subscription-core-neutral": "bun scripts/check-subscription-core-neutral.ts",
     "check:no-legacy-subscription-runtime": "bun scripts/check-no-legacy-subscription-runtime.ts",
     "check:no-legacy-codex-runtime": "bun run check:no-legacy-subscription-runtime",
+    "check:workflow-graph": "bun scripts/workflow-execution-graph.ts",
+    "workflow-graph:refresh": "bun scripts/workflow-execution-graph.ts --write",
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
     "check:migration-lock-order": "bun scripts/check-migration-lock-order.ts",
@@ -246,7 +248,7 @@
     "vite": "8.1.4",
     "ws": "8.21.1"
   },
-  "packageManager": "bun@1.4.4",
+  "packageManager": "bun@1.4.3",
   "patchedDependencies": {
     "modal@0.9.0": "patches/modal@0.9.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",

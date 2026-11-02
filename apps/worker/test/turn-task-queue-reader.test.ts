@@ -9,7 +9,7 @@ import {
   type ConnectionOptions,
 } from "@temporalio/client";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { startTurnCapacityMonitor } from "../src/observability-metrics";
 import { createWorkerWorkflowSignaler } from "../src";
 import {

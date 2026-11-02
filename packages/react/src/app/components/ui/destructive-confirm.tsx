@@ -8,7 +8,6 @@ import {
   MessageSquareIcon,
   UserIcon,
   XIcon,
-  ZapIcon,
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "../../lib/toast";
@@ -38,7 +37,6 @@ import { cn } from "../../lib/utils";
 export type DestructiveConfirmVariant = "consequences" | "type-to-confirm" | "blocked";
 
 export type DependencyKind =
-  | "automation"
   | "schedule"
   | "chat"
   | "environment"
@@ -51,8 +49,6 @@ export type DependencyKind =
 // chunk that loads after this one, and a table would capture undefined.
 function dependencyIcon(kind: DependencyKind): LucideIcon {
   switch (kind) {
-    case "automation":
-      return ZapIcon;
     case "schedule":
       return CalendarClockIcon;
     case "chat":

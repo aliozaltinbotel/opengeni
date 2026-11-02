@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -134,7 +133,7 @@ test("controller cannot be a tag, PR workflow, foreign repo or substituted scrip
     expect(() => verifyCanaryController({ ...env, ...patch }, controller)).toThrow();
 });
 
-test("historical workflow fixture: source is an ancestor of the frozen controller, which stays checked out", async () => {
+test("source is an ancestor of the frozen controller, which stays checked out", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "canary-source-"));
   const git = (...args: string[]) => canaryGit(cwd, args);
   try {
@@ -164,7 +163,7 @@ test("historical workflow fixture: source is an ancestor of the frozen controlle
     );
     expect(git("rev-parse", "HEAD")).toBe(head);
     const workflow = Bun.YAML.parse(
-      readRetiredWorkflow("publish-canary.yml"),
+      readFileSync(new URL("../.github/workflows/publish-canary.yml", import.meta.url), "utf8"),
     ) as any;
     const step = workflow.jobs.publish.steps.find(
       (candidate: any) => candidate.name === "Admit protected main source",

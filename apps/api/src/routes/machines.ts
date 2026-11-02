@@ -16,7 +16,6 @@
 
 import {
   ChangeMachineAudienceRequest,
-  ContinueSessionWaitingWorkResponse,
   MachineAudiencePreviewRequest,
   OpenMachinePrivacySettingsRequest,
   MachineMetricsSeriesResponse,
@@ -29,8 +28,6 @@ import {
 } from "@opengeni/contracts";
 import {
   changeMachineAudience,
-  continueSessionWaitingWork,
-  nestedPostgresSqlState,
   getLiveEnrollmentConnection,
   listEnrollments,
   previewMachineAudienceChange,
@@ -53,11 +50,6 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import {
-  isAgentAttemptOnOwnSession,
-  machineSubjectForCaller,
-  sessionFleetContextForCaller,
-} from "../sandbox/agent-fleet-context";
-import {
   enableMachineScreenControl,
   enrollmentAccess,
   MachineNotActiveError,
@@ -72,7 +64,7 @@ import {
   machineAudienceRequestFor,
 } from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
-import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
@@ -115,24 +107,16 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── GET /workspaces/:ws/machines (the dashboard list) ───────────────────────
   app.get("/v1/workspaces/:workspaceId/machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    assertSelfhostedEnabled();
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
-    // An agent attempt lists the machines of its own chat with the session
-    // read permission its sandboxes_list tool needs; everyone else needs
-    // enrollments:read.
-    const sessionGrant = sessionId
-      ? await requireAccessGrant(c, deps, workspaceId, "sessions:read")
-      : null;
-    const grant =
-      sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)
-        ? sessionGrant
-        : await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
-    assertSelfhostedEnabled();
     if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "sessionId must be a UUID" });
     }
     if (sessionId) {
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
       try {
         await requireSessionAuthorization(deps, grant, {
           sessionId,
@@ -157,11 +141,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         accountId: grant.accountId,
         workspaceId,
-        // An agent sees the machines of the person who started its turn, as
-        // its sandboxes_list tool does.
-        subjectId: sessionId
-          ? await machineSubjectForCaller(deps, grant, sessionId, grant.subjectId)
-          : grant.subjectId,
+        subjectId: grant.subjectId,
         sessionId,
       },
     );
@@ -213,10 +193,13 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "operation policy body must be valid JSON",
       });
     }
-    const body = parseRequestBody(UpdateMachineOperationPolicyRequest, json, {
-      status: 400,
-      message: "invalid machine operation policy",
-    });
+    const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "invalid machine operation policy",
+      });
+    }
+    const body = parsed.data;
     const current = await requireScopedEnrollment(grant, enrollmentId);
     if (
       current.scope === "organization" &&
@@ -376,11 +359,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
-    const parsed = parseRequestBody(
-      OpenMachinePrivacySettingsRequest,
+    const parsed = OpenMachinePrivacySettingsRequest.safeParse(
       await c.req.json().catch(() => null),
-      { status: 400, message: "invalid privacy settings request" },
     );
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid privacy settings request" });
+    }
     const enrollment = await requireScopedEnrollment(grant, enrollmentId);
     if (
       enrollment.scope === "organization" &&
@@ -394,7 +378,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       await openMachinePrivacySettings(
         { db, settings, bus, observability: deps.observability },
-        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.pane },
+        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.data.pane },
       ),
     );
   });
@@ -484,17 +468,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     const body = await parseRequestJson(c, SwapActiveSandboxRequest);
-    // An agent moves its own chat for the person who started its turn, exactly
-    // as its sandbox_swap tool does. Any other caller, including an agent
-    // repointing another chat it may control, moves it as its own subject.
-    const ctx = isAgentAttemptOnOwnSession(grant, sessionId)
-      ? await sessionFleetContextForCaller(deps, grant, sessionId, grant.subjectId)
-      : await buildFleetContextForSession(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          subjectId: grant.subjectId,
-        });
+    const ctx = await buildFleetContextForSession(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      subjectId: grant.subjectId,
+    });
     ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {
@@ -518,61 +497,5 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       body.target,
     );
     return c.json(SwapActiveSandboxResponse.parse(result));
-  });
-
-  // ── POST /workspaces/:ws/sessions/:sessionId/waiting-work/continue ─────────
-  // The personal machine's owner lets the agent continue, under their own
-  // authority, with results other people's work left waiting in this chat.
-  // Only that person may; the database enforces it. The caller then resumes
-  // the blocked chat with its usual fenced Resume.
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    if (grantHasAgentAttemptAuthority(grant)) {
-      // A person decides this; an agent cannot lend itself the owner's machine.
-      throw new HTTPException(403, { message: "only the machine's owner can continue this work" });
-    }
-    const sessionId = c.req.param("sessionId");
-    // Registered before the session route module, so its authorization
-    // middleware does not cover this path: the person must be able to control
-    // this exact chat (its audience included) before deciding for it.
-    try {
-      await requireSessionAuthorization(deps, grant, {
-        sessionId,
-        operation: "session.control",
-        surface: "http",
-      });
-    } catch (error) {
-      if (error instanceof SessionAuthorizationDeniedError) {
-        throw new HTTPException(404, { message: "session not found", cause: error });
-      }
-      if (error instanceof SessionAuthorizationUnavailableError) {
-        throw new HTTPException(503, {
-          message: "session authorization is unavailable",
-          cause: error,
-        });
-      }
-      throw error;
-    }
-    try {
-      const continued = await continueSessionWaitingWork(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        subjectId: grant.subjectId,
-      });
-      return c.json(ContinueSessionWaitingWorkResponse.parse({ continued }));
-    } catch (error) {
-      const sqlState = nestedPostgresSqlState(error);
-      if (sqlState === "42501")
-        throw new HTTPException(403, {
-          message: "only the machine's owner can continue this work",
-        });
-      if (sqlState === "55000")
-        throw new HTTPException(409, {
-          message: "the chat is not continuing the machine owner's own work right now",
-        });
-      throw error;
-    }
   });
 }

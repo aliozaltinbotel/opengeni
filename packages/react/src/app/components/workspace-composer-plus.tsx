@@ -13,7 +13,6 @@ import { composerConnectorOptions } from "../lib/composer-connectors";
 import { capabilityReconnectPlan, connectionHealth } from "../lib/capabilities";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { usePage } from "../lib/navigation";
-import { useHiddenNativeSections } from "../lib/app-host";
 
 type ConnectorCatalog = {
   items: CapabilityCatalogItem[];
@@ -46,20 +45,12 @@ function cacheConnectorCatalog(
   else byWorkspace.delete(workspaceId);
 }
 
-type WorkspaceComposerPlusProps = ComposerPlusProps & {
-  workspaceId: string;
-  openRequest?: { panel: ComposerPlusPanel; nonce: number } | undefined;
-};
-
-export function WorkspaceComposerPlus(props: WorkspaceComposerPlusProps) {
-  const hiddenSections = useHiddenNativeSections();
-  // A host may supply its own governed tools without exposing native connector discovery.
-  return hiddenSections.includes("capabilities.integrations")
-    ? <ComposerMobilePlus {...props} />
-    : <WorkspaceConnectorComposerPlus {...props} />;
-}
-
-function WorkspaceConnectorComposerPlus(props: WorkspaceComposerPlusProps) {
+export function WorkspaceComposerPlus(
+  props: ComposerPlusProps & {
+    workspaceId: string;
+    openRequest?: { panel: ComposerPlusPanel; nonce: number } | undefined;
+  },
+) {
   const page = usePage();
   const context = useAppContext();
   const { client } = context;

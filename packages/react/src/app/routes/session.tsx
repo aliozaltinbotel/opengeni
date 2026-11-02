@@ -1,4 +1,3 @@
-import { HostSessionIndicatorFrame } from "../components/session-indicator";
 import { t } from "../lib/console-text";
 import { Fragment } from "react";
 import {
@@ -7,12 +6,13 @@ import {
   createWorkspaceRetainedVideoLoader,
 } from "../../timeline";
 import { isModelUnavailableSubmissionError } from "../../lib/format";
-import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
-import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
-import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
+import {
+  attachSessionCapability,
+  completeSessionCapabilityOAuth,
+} from "../components/capabilities/attach-session-capability";
 import { loadSessionFeedback } from "../../session-feedback-model";
 import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
@@ -23,23 +23,15 @@ import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
 import { useMessageSenderRenderer } from "../components/session/message-senders";
-import { useHostToolRegistry } from "../lib/host-tool-registry";
 import {
   createFailedSessionRetry,
   type FailedSessionRetryInput,
 } from "../lib/failed-session-retry";
-import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
-import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
+import { useSessionStartupTimeline } from "../lib/session-startup-timeline";
 import { failedSessionCopy } from "../lib/failed-session-copy";
-import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
-import { isPaymentRequiredError } from "../lib/model-access";
+import { coveredModelChoice, freeCreditGap } from "../lib/free-credit-gap";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
-import { waitingDescendants } from "../lib/descendant-requests";
-import {
-  useDescendantRequestsRefresh,
-  useLineagePollInterval,
-} from "../lib/use-descendant-requests-refresh";
 import { useStreamHealthTelemetry } from "../lib/stream-health";
 import { markIntegrationConnectRedirect } from "../lib/integration-connect-redirect";
 import { noteTurnFailureAction } from "../lib/turn-failure-actions";
@@ -52,10 +44,6 @@ import {
   SessionAdmissionNotice,
 } from "../components/session/session-admission-notice";
 import {
-  sessionAdmissionNeedsDifferentMachine,
-  sessionAdmissionReason,
-} from "../../session-admission-model";
-import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
   sessionConnectorPolicyIsCustomized,
@@ -64,10 +52,8 @@ import {
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
-import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
-import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
 import {
   SessionSecretsMenuBody,
@@ -82,7 +68,6 @@ import {
   SessionChrome,
   KnowledgeActivityProvider,
   LearningRefusalActionsProvider,
-  OpenGeniLinkProvider,
   type LearningRefusalPlace,
   type TimelineSearchTarget,
 } from "../../session-ui";
@@ -144,9 +129,8 @@ import {
 } from "react";
 import { toast } from "../lib/toast";
 
-import { useAppApi } from "../lib/app-api";
-import { useSessionFailureToasts } from "../lib/session-failure-toasts";
-import { apiErrorFacts, userErrorText } from "../../ui/api-error";
+import { isApiErrorStatus, useAppApi } from "../lib/app-api";
+import { userErrorText } from "../../ui/api-error";
 import { ConsoleComposer } from "../components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "../lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "../components/workspace-composer-plus";
@@ -160,11 +144,7 @@ import {
   SessionMachineAccessNotice,
 } from "../components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "../components/common";
-import {
-  useHostMessageContext,
-  useNativeDestinationVisible,
-  useReportSessionState,
-} from "../lib/app-host";
+import { useHostMessageContext } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { useSessionOpening } from "../lib/session-opening";
 import { creationHandoffReconciled } from "../lib/session-creation-handoff";
@@ -184,17 +164,23 @@ import { useRail } from "../components/rail/rail-context";
 import { sessionComputeLabel } from "../../sandbox-label-model";
 import { useBackgroundAttentionTitle } from "../lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "../components/session/chat-viewport-file-drop-target";
-import { sessionInputWait } from "../lib/session-rail";
 import { SessionWorkspace } from "../components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "../components/session/artifact-link-boundary";
 import { Button } from "../../ui/button";
 import { EmptyState } from "../../ui/empty-state";
 import { useAppContext } from "../app-context";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
+import type { SessionArtifactSourceCache } from "../lib/session-artifact-discovery";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
 } from "../components/session/editable-artifacts-workspace";
+import {
+  normalizeProviderDomain,
+  oauthConnectionOwnership,
+  oauthConnectionRef,
+  catalogConnectionAccountSelection,
+} from "../lib/capabilities";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
 import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
@@ -230,8 +216,8 @@ import { UnavailableModelNotice } from "../components/session/unavailable-model-
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
-  focusSessionComposerWhenReady,
   sessionComposerFocusIntentIsEligible,
+  shouldFocusSessionComposer,
   type SessionComposerFocusIntent,
 } from "../lib/session-focus";
 import {
@@ -252,7 +238,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { useWorkspaceAppLinkResolver } from "../lib/session-artifact-navigation";
+import { consoleLinkResolver } from "../lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -281,9 +267,7 @@ import type {
 } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
-import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
-import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -297,7 +281,6 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
-const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
     default: module.SessionSkillReviews,
@@ -315,6 +298,11 @@ const SessionCapabilityCard = lazy(async () => ({
 const NativeConnectSetup = lazy(() =>
   import("../components/capabilities/native-connect-setup").then((module) => ({
     default: module.NativeConnectSetup,
+  })),
+);
+const LazySessionWaitStatus = lazy(() =>
+  import("../components/session/session-wait-status").then((module) => ({
+    default: module.SessionWaitStatus,
   })),
 );
 
@@ -335,13 +323,6 @@ const SubagentTree = lazy(() =>
 const LazyFailedSessionBanner = lazy(() =>
   import("../components/session/failed-session-banner").then((module) => ({
     default: module.FailedSessionBanner,
-  })),
-);
-
-// Only a refused Send shows it, so it stays out of the direct session bundle.
-const LazyCreditRefusalNotice = lazy(() =>
-  import("../components/credits/credit-refusal-notice").then((module) => ({
-    default: module.CreditRefusalNotice,
   })),
 );
 
@@ -374,33 +355,25 @@ const LazySessionRouteAuxiliary = lazy(
   () => import("../components/session/session-tenancy-control"),
 );
 
-type SessionRouteProps = {
-  workspaceId: string;
-  sessionId: string;
-  launch?: ComposerLaunchSearch | undefined;
-  realtimeAutostartModel?: SessionRealtimeModel | undefined;
-  searchTarget?: SessionSearchRoute | undefined;
-};
-
-export function SessionRoute(props: SessionRouteProps) {
-  return <HostSessionIndicatorFrame workspaceId={props.workspaceId} sessionId={props.sessionId}><SessionRouteContent {...props} /></HostSessionIndicatorFrame>;
-}
-
-function SessionRouteContent({
+export function SessionRoute({
   workspaceId,
   sessionId,
   launch = EMPTY_COMPOSER_LAUNCH,
   realtimeAutostartModel,
   searchTarget = EMPTY_SEARCH_TARGET,
-}: SessionRouteProps) {
+}: {
+  workspaceId: string;
+  sessionId: string;
+  launch?: ComposerLaunchSearch | undefined;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  searchTarget?: SessionSearchRoute | undefined;
+}) {
   const uiEvents = useUiEventTarget("document");
   const dockEnabled = useSessionUiFeature("dock");
   useReadSessionInbox(sessionId);
   const context = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();
-  const pluginsVisible = useNativeDestinationVisible("plugins");
-  const knowledgeVisible = useNativeDestinationVisible("state");
   const page = usePage();
   const consumeRealtimeAutostart = useCallback(() => {
     void navigate({
@@ -448,8 +421,6 @@ function SessionRouteContent({
   // Consented funnel telemetry: a session this page started reached its first
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
-  // The embedding host follows the open chat from this stream.
-  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -874,7 +845,18 @@ function SessionRouteContent({
     },
     [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
   );
-  useSessionFailureToasts(loadError, streamError);
+  useEffect(() => {
+    if (streamError && !isApiErrorStatus(streamError, 404)) {
+      toast.error("Event stream disconnected", {
+        description: streamError.message,
+      });
+    }
+  }, [streamError]);
+  useEffect(() => {
+    if (loadError && !isApiErrorStatus(loadError, 404)) {
+      toast.error("Failed to load session", { description: String(loadError) });
+    }
+  }, [loadError]);
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
   // the original tool call was settled as an error and is never replayed. Strip
@@ -912,19 +894,39 @@ function SessionRouteContent({
       return;
     }
     void (async () => {
-      const finished = await finishMcpCapabilityOAuthReturn({
-        client: capabilityClient,
-        workspaceId,
-        sessionId,
-        capabilityId,
-        params,
-        catalog: capabilityCatalog,
-        refreshCatalog: refreshCapabilityCatalog,
+      const item = capabilityCatalog.find((candidate) => candidate.id === capabilityId);
+      const connectionId = params.get("connectionId");
+      const providerDomain = params.get("providerDomain");
+      const ownership = oauthConnectionOwnership(params.get("ownership"));
+      if (!item || item.kind !== "mcp" || !connectionId || !providerDomain || !ownership) {
+        throw new Error("The authorized capability could not be resolved from the live catalog.");
+      }
+      await capabilityClient.enableCapability(workspaceId, item.id, {
+        connectionRef: oauthConnectionRef(
+          ownership,
+          connectionId,
+          providerDomain,
+          catalogConnectionAccountSelection(item),
+        ),
       });
-      toast.success(`${finished.name} connected`, {
-        description: finished.needsPersonalReview
-          ? "Review its connection card to allow your personal account in this conversation."
-          : "It is available to new tool calls in this session.",
+      await refreshCapabilityCatalog(workspaceId);
+      const connected = (await capabilityClient.listCapabilities(workspaceId)).items.find(
+        (candidate) => candidate.id === item.id,
+      );
+      if (!connected?.enabled)
+        throw new Error(
+          "The connection was authorized, but enabling its tools could not be verified.",
+        );
+      if (connected.connectionRef?.subjectScope === "subject") {
+        toast.success(`${item.name} connected`, {
+          description:
+            "Review its connection card to allow your personal account in this conversation.",
+        });
+        return;
+      }
+      await attachSessionCapability(t, capabilityClient, workspaceId, sessionId, connected);
+      toast.success(`${item.name} connected`, {
+        description: "It is available to new tool calls in this session.",
       });
     })().catch((error) => {
       toast.error("Connection succeeded, but setup needs attention", {
@@ -1154,41 +1156,32 @@ function SessionRouteContent({
   // The workspace shell already needs the capability catalog for session tool
   // policy. Reuse that authoritative read for timeline logos instead of
   // downloading the same large catalog again from the session route.
-  const providerLogos = useMemo(
-    () =>
-      connectorLogoIndex(context.workspaceCapabilityCatalog, (path) =>
-        context.client.catalogAssetUrl(path ?? null),
-      ),
-    [context.client, context.workspaceCapabilityCatalog],
-  );
+  const providerLogos = useMemo(() => {
+    const logos = new Map<string, string>();
+    for (const capability of context.workspaceCapabilityCatalog) {
+      const domain = capability.providerDomain ?? capability.connectionRef?.providerDomain ?? null;
+      const url = context.client.catalogAssetUrl(capability.logoAssetPath);
+      if (domain && url) {
+        const key = normalizeProviderDomain(domain);
+        if (!logos.has(key)) logos.set(key, url);
+      }
+    }
+    return logos;
+  }, [context.client, context.workspaceCapabilityCatalog]);
   const resolveProviderLogo = useCallback(
-    (domain: string) => connectorLogo(providerLogos, domain),
+    (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
     [providerLogos],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
-  // refresh it instantly on spawn/worker-completion, list hints on child-side
-  // status changes, and a poll (faster when hints are unavailable) ensures the
-  // pill's "running" count doesn't go stale on CHILD-side status changes that
-  // emit no event on this parent's feed. Must sit above the loading/error
-  // early-returns — it's a hook, so it has to run unconditionally on every render.
-  const lineagePoll = useLineagePollInterval(workspaceId);
+  // refresh it instantly on spawn/worker-completion, and a 30s poll ensures the pill's
+  // "running" count doesn't go stale on CHILD-side status changes that emit no
+  // event on this parent's feed. Must sit above the loading/error early-returns
+  // — it's a hook, so it has to run unconditionally on every render.
   const lineage = useSessionLineage(sessionId, {
     events,
-    pollIntervalMs: lineagePoll.pollIntervalMs,
+    pollIntervalMs: 30_000,
   });
-  const agentNodes = useMemo(() => lineage.lineage?.children ?? [], [lineage.lineage]);
-  const observeLineageTree = lineagePoll.observeTree;
-  useEffect(() => observeLineageTree(agentNodes), [agentNodes, observeLineageTree]);
-  // Sub-sessions waiting on the person surface on this page: list hints that
-  // name one, and this agent answering one, re-read the tree.
-  const descendantRefreshSignal = useDescendantRequestsRefresh({
-    client: context.client,
-    workspaceId,
-    sessionId,
-    events,
-    nodes: agentNodes,
-    refreshLineage: lineage.refresh,
-  });
+  const agentNodes = lineage.lineage?.children ?? [];
   // The same lineage read names the agents the timeline spawns, messages, and
   // hears from (parent and descendants), following renames.
   const lineageTitles = useMemo(() => {
@@ -1271,7 +1264,6 @@ function SessionRouteContent({
             workspaceId={workspaceId}
             sessionId={sessionId}
             loadError={loadError}
-            onRetry={() => void refreshSession()}
           />
         </Suspense>
       );
@@ -1334,9 +1326,6 @@ function SessionRouteContent({
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
-      pendingWake={sessionHasPendingWake(withLineageAutomationFacts(session, lineage.lineage))}
-      descendantRefreshSignal={descendantRefreshSignal}
-      onDescendantResolved={() => void lineage.refresh()}
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
@@ -1354,28 +1343,13 @@ function SessionRouteContent({
           params: { workspaceId, sessionId: nextSessionId },
         })
       }
-      onMemoryClick={
-        knowledgeVisible
-          ? (memoryId) =>
-              void navigate({
-                to: "/workspaces/$workspaceId/memory",
-                params: { workspaceId },
-                search: { memory: memoryId },
-              })
-          : undefined
+      onMemoryClick={(memoryId) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/memory",
+          params: { workspaceId },
+          search: { memory: memoryId },
+        })
       }
-      canOpenLearningRefusal={(place) => {
-        switch (place.kind) {
-          case "skill":
-          case "skills":
-            return pluginsVisible;
-          case "instructions":
-          case "knowledge":
-            return knowledgeVisible;
-          case "learning-settings":
-            return true;
-        }
-      }}
       onLearningRefusalOpen={(place) => {
         switch (place.kind) {
           case "skill":
@@ -1591,9 +1565,7 @@ function SessionDockPanel(props: SessionDockProps) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
-  // Tool output may have published a file or Site, here or in a sub-session;
-  // the end of a turn settles everything. Either re-reads the chat's artifacts.
-  const artifactRefreshSequence = useMemo(() => {
+  const artifactRefresh = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index];
       if (
@@ -1603,12 +1575,16 @@ function SessionDockPanel(props: SessionDockProps) {
           event.type === "turn.failed" ||
           event.type === "turn.cancelled")
       ) {
-        return event.sequence;
+        // Tool output re-reads the chat and only sub-sessions with new
+        // activity; the end of a turn re-reads everything once.
+        return { sequence: event.sequence, complete: event.type !== "agent.toolCall.output" };
       }
     }
-    return 0;
+    return { sequence: 0, complete: true };
   }, [props.events]);
-  // Let the Artifacts page show its cached rows on the next visit but refetch them.
+  const artifactRefreshSequence = artifactRefresh.sequence;
+  // Tool output may have published a file or Site: let the Artifacts page show
+  // its cached rows on the next visit but refetch them.
   useEffect(() => {
     if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
   }, [artifactRefreshSequence, context.client, props.workspaceId]);
@@ -1616,6 +1592,7 @@ function SessionDockPanel(props: SessionDockProps) {
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
+    completeRefresh: artifactRefresh.complete,
   });
   const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
     context.client,
@@ -1816,6 +1793,8 @@ function useSessionEditableArtifactSummaries(input: {
   workspaceId: string;
   sessionId: string;
   refreshSequence: number;
+  /** Re-read every sub-session instead of only those with new activity. */
+  completeRefresh: boolean;
 }): Readonly<{
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
@@ -1825,14 +1804,11 @@ function useSessionEditableArtifactSummaries(input: {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
   const [retrySequence, setRetrySequence] = useState(0);
-  // One discovery at a time per view. A refresh asked for while one is in
-  // flight runs once after it, so a busy chat never stacks overlapping reads.
-  const discovery = useRef<{
+  const sourceCache = useRef<{
     key: string;
     client: typeof context.client;
     retrySequence: number;
-    running: boolean;
-    again: boolean;
+    cache: SessionArtifactSourceCache;
   } | null>(null);
   const [loaded, setLoaded] = useState<{
     key: string;
@@ -1841,27 +1817,21 @@ function useSessionEditableArtifactSummaries(input: {
     artifacts: readonly SessionEditableArtifactSummary[];
   } | null>(null);
 
-  useEffect(
-    () => () => {
-      discovery.current = null;
-    },
-    [],
-  );
-
   useEffect(() => {
+    let current = true;
     if (
-      discovery.current?.key !== authorityKey ||
-      discovery.current.client !== context.client ||
-      discovery.current.retrySequence !== retrySequence
+      input.completeRefresh ||
+      sourceCache.current?.key !== authorityKey ||
+      sourceCache.current.client !== context.client ||
+      sourceCache.current.retrySequence !== retrySequence
     )
-      discovery.current = {
+      sourceCache.current = {
         key: authorityKey,
         client: context.client,
         retrySequence,
-        running: false,
-        again: false,
+        cache: new Map(),
       };
-    const run = discovery.current;
+    const cache = sourceCache.current.cache;
     setLoaded((previous) =>
       previous?.key === authorityKey &&
       previous.client === context.client &&
@@ -1877,50 +1847,49 @@ function useSessionEditableArtifactSummaries(input: {
                 : [],
           },
     );
-    if (run.running) {
-      run.again = true;
-      return;
-    }
-    const workspaceId = input.workspaceId;
-    const sessionId = input.sessionId;
-    const client = context.client;
-    // The stale-result fence is sufficient for this bounded metadata GET.
-    // Aborting Chrome fetch during React StrictMode cleanup surfaced an
-    // unhandled AbortError from the SDK/fetch boundary on every mount.
-    const live = () => discovery.current === run;
-    const previousArtifacts = (previous: typeof loaded) =>
-      previous?.key === authorityKey && previous.client === client ? previous.artifacts : [];
-    const start = () => {
-      run.running = true;
-      run.again = false;
-      void import("../lib/session-artifact-discovery")
-        .then(async ({ discoverSessionArtifacts }) => {
-          const reconcile = await discoverSessionArtifacts(workspaceId, sessionId, live, client);
-          if (live())
-            setLoaded((previous) => ({
-              key: authorityKey,
-              client,
-              ...reconcile(previousArtifacts(previous)),
-            }));
-        })
-        .catch(() => {
-          if (!live()) return;
+    void import("../lib/session-artifact-discovery")
+      .then(async ({ discoverSessionArtifacts }) => {
+        const reconcile = await discoverSessionArtifacts(
+          input.workspaceId,
+          input.sessionId,
+          () => current,
+          context.client,
+          cache,
+        );
+        if (current) {
           setLoaded((previous) => ({
             key: authorityKey,
-            client,
-            status: "error",
-            artifacts: previousArtifacts(previous),
+            client: context.client,
+            ...reconcile(
+              previous?.key === authorityKey && previous.client === context.client
+                ? previous.artifacts
+                : [],
+            ),
           }));
-        })
-        .finally(() => {
-          run.running = false;
-          if (run.again && live()) start();
-        });
+        }
+      })
+      .catch(() => {
+        if (!current) return;
+        setLoaded((previous) => ({
+          key: authorityKey,
+          client: context.client,
+          status: "error",
+          artifacts:
+            previous?.key === authorityKey && previous.client === context.client
+              ? previous.artifacts
+              : [],
+        }));
+      });
+    return () => {
+      // The stale-result fence is sufficient for this bounded metadata GET.
+      // Aborting Chrome fetch during React StrictMode cleanup surfaced an
+      // unhandled AbortError from the SDK/fetch boundary on every mount.
+      current = false;
     };
-    start();
   }, [
     authorityKey,
     context.client,
+    input.completeRefresh,
     input.refreshSequence,
     input.sessionId,
     input.workspaceId,
@@ -1972,12 +1941,6 @@ function SessionChatPane(props: {
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
-  /** Something will wake this session on its own (a timed wait or an automation). */
-  pendingWake: boolean;
-  /** Bumped when a sub-session in this tree changed; open request cards re-read. */
-  descendantRefreshSignal: number;
-  /** A sub-session's request was settled from this page: re-read the tree. */
-  onDescendantResolved: () => void;
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: OlderHistoryLoader;
@@ -1992,10 +1955,8 @@ function SessionChatPane(props: {
   onOpenSession: (sessionId: string) => void;
   /** Current titles for the agents this session spawns, messages, and hears from. */
   resolveSessionTitle: (sessionId: string) => string | null;
-  /** Deep-link a timeline memory step to its Knowledge record; absent when Knowledge is hidden. */
-  onMemoryClick: ((memoryId: string) => void) | undefined;
-  /** Whether the app offers the place a refused learning change links to. */
-  canOpenLearningRefusal: (place: LearningRefusalPlace) => boolean;
+  /** Deep-link a timeline memory step to its first-class workspace Memory record. */
+  onMemoryClick: (memoryId: string) => void;
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
@@ -2018,7 +1979,6 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
-  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -2156,13 +2116,6 @@ function SessionChatPane(props: {
   const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
     null,
   );
-  // The API's credit refusal of a Send: no remaining credit pays for that model.
-  // It stays above the composer until a message is accepted or it is dismissed.
-  const [creditRefusal, setCreditRefusal] = useState<{
-    sessionId: string;
-    model: string;
-    message: string;
-  } | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -2176,37 +2129,13 @@ function SessionChatPane(props: {
     focusEvents.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
     return () => focusEvents.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
   }, [focusEvents, props.session.id, props.session.workspaceId]);
-  // Opening a chat (a sidebar click, ⌘K, Control+Tab, a link or a reload)
-  // puts the cursor in its composer, since typing is what comes next. Without
-  // an explicit intent, only the first effect run for a chat may do this, and
-  // only while nothing else has focus.
-  const loadFocusSessionRef = useRef<string | null>(null);
-  // The wait outlives effect re-runs (status, approvals) but not the chat.
-  const composerFocusWaitRef = useRef<{ sessionId: string; cancel: () => void } | null>(null);
-  useEffect(
-    () => () => {
-      composerFocusWaitRef.current?.cancel();
-      composerFocusWaitRef.current = null;
-    },
-    [],
-  );
   useEffect(() => {
-    if (
-      composerFocusWaitRef.current &&
-      composerFocusWaitRef.current.sessionId !== props.session.id
-    ) {
-      composerFocusWaitRef.current.cancel();
-      composerFocusWaitRef.current = null;
-    }
     const intent = consumeSessionComposerFocusIntent(
       focusEvents,
       props.session.workspaceId,
       props.session.id,
     );
-    const firstRunForChat = loadFocusSessionRef.current !== props.session.id;
-    loadFocusSessionRef.current = props.session.id;
-    const source = intent?.source ?? (firstRunForChat ? "load" : null);
-    if (!source) return;
+    if (!intent) return;
     if (
       !sessionComposerFocusIntentIsEligible({
         viewportWidth: globalThis.innerWidth,
@@ -2219,15 +2148,25 @@ function SessionChatPane(props: {
     ) {
       return;
     }
-    composerFocusWaitRef.current?.cancel();
-    composerFocusWaitRef.current = {
-      sessionId: props.session.id,
-      cancel: focusSessionComposerWhenReady({
-        textarea: () => composerRegionRef.current?.querySelector("textarea"),
-        sessionId: props.session.id,
-        source,
-      }),
-    };
+    const frame = globalThis.requestAnimationFrame(() => {
+      const textarea = composerRegionRef.current?.querySelector("textarea");
+      if (!textarea || textarea.disabled) return;
+      const dialogOpen = Boolean(
+        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
+      );
+      if (
+        !shouldFocusSessionComposer(
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          props.session.id,
+          document.body,
+          dialogOpen,
+        )
+      ) {
+        return;
+      }
+      textarea.focus();
+    });
+    return () => globalThis.cancelAnimationFrame(frame);
   }, [
     composerFocusSignal,
     focusEvents,
@@ -2239,10 +2178,6 @@ function SessionChatPane(props: {
     terminal,
   ]);
   const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
-  const waitingSubSessions = useMemo(
-    () => waitingDescendants(props.agentNodes),
-    [props.agentNodes],
-  );
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -2499,7 +2434,6 @@ function SessionChatPane(props: {
     ],
   );
   const navigate = useNavigate();
-  const secretsVisible = useNativeDestinationVisible("secrets");
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
   const launchEffort = launch.effort;
@@ -2746,7 +2680,6 @@ function SessionChatPane(props: {
     // host-owned upload/repository queue in sync once those inputs are
     // accepted too; the immutable input snapshot preserves later additions.
     onSent: (_text, input) => {
-      setCreditRefusal(null);
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
@@ -2757,7 +2690,6 @@ function SessionChatPane(props: {
     },
     onDeliveryError: (error, input, delivery) => {
       personalAttachment.onDeliveryError(error, input, delivery);
-      connectionAccounts.onSelectionError(error);
       // Retrying cannot help: re-read the catalog so the composer offers a
       // replacement, and open the picker so the next step is visible.
       if (isModelUnavailableSubmissionError(error)) {
@@ -2766,29 +2698,7 @@ function SessionChatPane(props: {
         void modelCatalog.refresh();
         setModelPickerSession(props.session.id);
       }
-      // Re-read funding so the notice and picker name what the credit covers now.
-      if (isPaymentRequiredError(error)) {
-        setCreditRefusal({
-          sessionId: props.session.id,
-          model: refusedModelId(error, input) ?? props.session.model,
-          message: error.message,
-        });
-        void modelCatalog.refresh();
-      }
     },
-  });
-  // A dropped event stream (an update or brief outage) reads as "updating" in
-  // the composer while it reconnects.
-  const composerView = useComposerWithStreamState(
-    composer,
-    props.connectionState,
-    props.initialLoading,
-  );
-  const queuedRecall = useQueuedPromptRecall({
-    queue: props.queue,
-    composer,
-    subjectId: context.accessContext.subjectId,
-    enabled: !terminal,
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
@@ -3218,7 +3128,6 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     context.accessContext.subjectId,
   );
-  const toolRegistry = useHostToolRegistry();
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -3268,26 +3177,6 @@ function SessionChatPane(props: {
     context.authSession !== null &&
     Boolean(props.session.tenancy) &&
     mayRate;
-  // "Fork chat" from the ⌘K menu or the desktop menu bar forks from the latest
-  // message, as the fork button under that message does.
-  const forkRequests = useUiEventTarget("document");
-  const eventsRef = useRef(props.events);
-  eventsRef.current = props.events;
-  useEffect(() => {
-    if (!mayForkMessage) return;
-    const fork = () => {
-      const events = eventsRef.current;
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const event = events[index]!;
-        if (event.type === "agent.message.completed" || event.type === "user.message") {
-          setForkEventId(event.id);
-          return;
-        }
-      }
-    };
-    forkRequests.addEventListener(FORK_CURRENT_CHAT_EVENT, fork);
-    return () => forkRequests.removeEventListener(FORK_CURRENT_CHAT_EVENT, fork);
-  }, [forkRequests, mayForkMessage]);
   const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
     setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
   }, []);
@@ -3385,15 +3274,6 @@ function SessionChatPane(props: {
     ],
   );
 
-  const canBuyCredits =
-    context.clientConfig.billingMode === "stripe" &&
-    Boolean(workspaceAccountId) &&
-    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
-  const canConnectModel = hasWorkspacePermission(
-    context.accessContext,
-    props.session.workspaceId,
-    "connections:write",
-  );
   const failureRecovery =
     !props.hasNewer &&
     props.failure &&
@@ -3421,8 +3301,20 @@ function SessionChatPane(props: {
             freeCreditGap={creditGap}
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
-            canBuyCredits={canBuyCredits}
-            canConnectModel={canConnectModel}
+            canBuyCredits={
+              context.clientConfig.billingMode === "stripe" &&
+              Boolean(workspaceAccountId) &&
+              hasAccountPermission(
+                context.accessContext,
+                workspaceAccountId ?? "",
+                "billing:manage",
+              )
+            }
+            canConnectModel={hasWorkspacePermission(
+              context.accessContext,
+              props.session.workspaceId,
+              "connections:write",
+            )}
             sandboxRecovery={
               needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
                 ? {
@@ -3480,38 +3372,6 @@ function SessionChatPane(props: {
         </Suspense>
       </FailureRecoveryBoundary>
     ) : null;
-  // A refused Send names its model, the models the credit still covers, and the
-  // next step above the composer. The credit-stop banner already says this.
-  const sessionCreditRefusal =
-    creditRefusal?.sessionId === props.session.id &&
-    !terminal &&
-    !(failureRecovery && props.creditExhausted)
-      ? creditRefusal
-      : null;
-  // The plain refusal text shows while the notice chunk loads or if it fails.
-  const creditRefusalFallback = sessionCreditRefusal ? (
-    <p role="alert" className="px-1.5 text-sm text-fg-muted">
-      {apiErrorFacts(sessionCreditRefusal.message).serverMessage ?? sessionCreditRefusal.message}
-    </p>
-  ) : null;
-  const creditRefusalNotice = sessionCreditRefusal ? (
-    <FailureRecoveryBoundary key={props.session.id} fallback={creditRefusalFallback}>
-      <Suspense fallback={creditRefusalFallback}>
-        <LazyCreditRefusalNotice
-          gap={creditRefusalGap(modelCatalog.rows, sessionCreditRefusal.model, {
-            selectedModel: composerPolicy?.model,
-            preferredModel: modelCatalog.defaultSelection?.model,
-          })}
-          message={sessionCreditRefusal.message}
-          workspaceId={props.session.workspaceId}
-          canBuyCredits={canBuyCredits}
-          canConnectModel={canConnectModel}
-          onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
-          onDismiss={() => setCreditRefusal(null)}
-        />
-      </Suspense>
-    </FailureRecoveryBoundary>
-  ) : null;
 
   const modelRecovery = props.hasNewer
     ? null
@@ -3542,7 +3402,7 @@ function SessionChatPane(props: {
     reviewDetailPane,
     createElement(
       "div",
-      { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
+      { className: reviewDetails ? "hidden" : "contents", inert: reviewDetails ? true : undefined },
       createElement(
         LightboxProvider,
         null,
@@ -3583,10 +3443,7 @@ function SessionChatPane(props: {
           {
             <>
               <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-                <LearningRefusalActionsProvider
-                  onOpen={props.onLearningRefusalOpen}
-                  canOpen={props.canOpenLearningRefusal}
-                >
+                <LearningRefusalActionsProvider onOpen={props.onLearningRefusalOpen}>
                   <KnowledgeActivityProvider
                     onInspect={props.onMemoryClick}
                     onRetryFile={(fileId) =>
@@ -3607,8 +3464,7 @@ function SessionChatPane(props: {
                       onViewDetails={viewToolReviewDetails}
                     >
                       <MessageTimeline
-                        toolRegistry={toolRegistry}
-                        resolveLink={resolveLink}
+                        resolveLink={consoleLinkResolver}
                         renderMessageSender={renderMessageSender}
                         allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                         trailingState={
@@ -3772,9 +3628,17 @@ function SessionChatPane(props: {
 
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
-          {/* One slim status row above the composer: the agent's wait, queue,
-          goal and activity. Hides entirely when there are no signals. */}
-          <div className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6">
+          {props.session.inputWait &&
+          props.session.status === "idle" &&
+          admissionControl.state === "active" ? (
+            <Suspense fallback={null}>
+              <LazySessionWaitStatus session={props.session} />
+            </Suspense>
+          ) : null}
+
+          {/* Compact session chrome above the composer — incoming, queue, goal,
+          and agents as one dock. Hides entirely when there are no signals. */}
+          <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
             <div className="mx-auto w-full max-w-3xl">
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
@@ -3807,61 +3671,12 @@ function SessionChatPane(props: {
                     refresh: [props.onReloadSession, props.queue.refresh],
                   })
                 }
-                onContinueWaitingWork={async () => {
-                  await context.client.continueSessionWaitingWork(
-                    props.session.workspaceId,
-                    props.session.id,
-                  );
-                  // A chat the refusal blocked resumes with the usual fenced
-                  // Resume; a running chat picks them up at its next step.
-                  if (
-                    sessionAdmissionReason(props.session) !== null &&
-                    admissionControl.state !== "paused"
-                  )
-                    await recheckSessionAdmission({
-                      control: admissionControl,
-                      refreshOnly: admissionRefreshRequired,
-                      resume: (control) =>
-                        context.client.resumeSession(props.session.workspaceId, props.session.id, {
-                          clientEventId: crypto.randomUUID(),
-                          expectedControlEtag: control.controlEtag,
-                        }),
-                      refresh: [props.onReloadSession, props.queue.refresh],
-                    });
-                  else await props.onReloadSession();
-                  // Machines last: the notice clears once nothing waits, and a
-                  // still-blocked session read in between would flash the refusal.
-                  await runsOn.fleet.refresh();
-                }}
               />
-              {waitingSubSessions.length > 0 ? (
-                <Suspense fallback={null}>
-                  {/* Links in sub-session questions resolve like links in the timeline. */}
-                  <OpenGeniLinkProvider resolveLink={resolveLink}>
-                    <DescendantRequests
-                      client={context.client}
-                      workspaceId={props.session.workspaceId}
-                      parentSessionId={props.session.id}
-                      waiting={waitingSubSessions}
-                      onResolved={props.onDescendantResolved}
-                      refreshSignal={props.descendantRefreshSignal}
-                      loadSkillReview={loadSkillReview}
-                      allowedSaveTo={secretSaveTargets(
-                        context.accessContext,
-                        props.session.workspaceId,
-                      )}
-                    />
-                  </OpenGeniLinkProvider>
-                </Suspense>
-              ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
-                // Same rule as the header's Waiting badge, plus the merged admission control.
-                wait={admissionControl.state === "active" ? sessionInputWait(props.session) : null}
                 onOpenSession={props.onOpenSession}
                 queue={props.queue}
                 composer={terminal ? undefined : composer}
-                queuedRecall={queuedRecall}
                 goal={props.goal}
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
@@ -3893,7 +3708,7 @@ function SessionChatPane(props: {
           <div
             ref={composerRegionRef}
             data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
-            className={`shrink-0 px-4 pb-4 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+            className={`shrink-0 px-4 pb-4 pt-1 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
           >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface
@@ -3904,12 +3719,10 @@ function SessionChatPane(props: {
               <ConsoleComposer
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
-                composer={composerView}
+                composer={composer}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
-                queuedRecall={queuedRecall}
-                running={usageLimitTreeActive || props.pendingWake}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,
@@ -3920,12 +3733,12 @@ function SessionChatPane(props: {
                 header={
                   unavailableModelNotice ||
                   usageLimitNotice ||
-                  creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
                     <>
-                      {!sessionAdmissionNeedsDifferentMachine(
-                        sessionAdmissionReason(props.session),
-                        machineAccess,
+                      {!(
+                        props.session.admissionBlock?.reason === "database_claim_rejected" &&
+                        props.session.admissionBlock.sqlState === "42501" &&
+                        machineAccess?.queuedTurnBlocked
                       ) ? (
                         <SessionMachineAccessNotice
                           access={machineAccess}
@@ -3941,9 +3754,6 @@ function SessionChatPane(props: {
                       ) : null}
                       {unavailableModelNotice}
                       {usageLimitNotice}
-                      {creditRefusalNotice ? (
-                        <div className="px-2 pt-2">{creditRefusalNotice}</div>
-                      ) : null}
                     </>
                   ) : null
                 }
@@ -4036,14 +3846,11 @@ function SessionChatPane(props: {
                                     });
                                     toast.success(`Saved ${item.name} to ${target.name}`);
                                   }}
-                                  onManage={
-                                    secretsVisible
-                                      ? () =>
-                                          void navigate({
-                                            to: "/workspaces/$workspaceId/secrets",
-                                            params: { workspaceId: props.session.workspaceId },
-                                          })
-                                      : undefined
+                                  onManage={() =>
+                                    void navigate({
+                                      to: "/workspaces/$workspaceId/secrets",
+                                      params: { workspaceId: props.session.workspaceId },
+                                    })
                                   }
                                 />
                               ),
@@ -4079,7 +3886,6 @@ function SessionChatPane(props: {
                   !terminal ? (
                     <Suspense fallback={null}>
                       <LazyCodexRealtimeControl
-                        getModelContext={hostMessageContext}
                         client={realtimeClient}
                         workspaceId={props.session.workspaceId}
                         sessionId={props.session.id}
@@ -4133,9 +3939,6 @@ function SessionChatPane(props: {
                       sessionKey={props.session.id}
                       menuSide="top"
                       connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
-                      claudeSubscriptionAvailable={
-                        context.clientConfig.claudeSubscriptionEnabled === true
-                      }
                       codexOnly={props.session.codexCompactionMode === "remote_v2"}
                       onModelChange={composer.setModel}
                       onEffortChange={composer.setReasoningEffort}

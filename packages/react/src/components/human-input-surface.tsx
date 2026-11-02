@@ -22,8 +22,6 @@ export type HumanInputSurfaceProps = {
   decisionButtons?: boolean | undefined;
   /** Forwarded to the active form: where secret answers may be saved. */
   allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
-  /** Forwarded to the active form: start as its compact bar (drafts kept). */
-  defaultCollapsed?: boolean | undefined;
 };
 
 /**
@@ -43,7 +41,6 @@ export function HumanInputSurface({
   autoFocus = true,
   decisionButtons,
   allowedSaveTo,
-  defaultCollapsed,
 }: HumanInputSurfaceProps) {
   const batchTotalRef = useRef(0);
 
@@ -86,7 +83,6 @@ export function HumanInputSurface({
     autoFocus,
     decisionButtons,
     allowedSaveTo,
-    defaultCollapsed,
     ...(messages ? { messages } : {}),
     onSubmit: (response) => onSubmit(active.id, response),
   };

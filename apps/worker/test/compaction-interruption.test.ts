@@ -14,7 +14,7 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { CompactionProviderResponseError } from "@opengeni/runtime";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import type { SessionEvent } from "@opengeni/contracts";
 import {
   isContextCompactionInterruption,

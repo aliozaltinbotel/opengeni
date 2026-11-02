@@ -1,19 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import type postgres from "postgres";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { createDb, type DbClient } from "../src/database";
 import {
   assertRuntimeDatabasePosture,
-  DEFERRED_RUNTIME_PRIVATE_ROUTINES,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 import {
-  deferredRuntimeRoutinesDueForGrant,
   loadRuntimePostureBaseline,
   PRE_COMPATIBILITY_PRODUCTION_SOURCE,
   readRuntimePostureBaseline,
@@ -52,40 +49,6 @@ afterAll(async () => {
 }, 180_000);
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
-
-// A withheld definer waits only for a
-// previous release that knows it. Once the pin advances past it, this fails
-// until a rolling migration grants it and it leaves the deferred list.
-realTest("no withheld runtime definer is already known to the pinned release", () => {
-  expect(
-    deferredRuntimeRoutinesDueForGrant(baseline!.module, DEFERRED_RUNTIME_PRIVATE_ROUTINES),
-  ).toEqual([]);
-});
-
-realTest("readiness inspects both namespaces once without caching posture", async () => {
-  const driver = (client!.db as unknown as { $client: postgres.Sql }).$client;
-  const originalDebug = driver.options.debug;
-  try {
-    // Warm the driver before counting protocol statements.
-    await assertRuntimeDatabasePosture(client!.db, options);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const statements: string[] = [];
-      driver.options.debug = (_connection, query) => statements.push(query);
-      const posture = await assertRuntimeDatabasePosture(client!.db, options);
-      expect(posture.tables.length).toBeGreaterThan(0);
-      expect(posture.privateTables.length).toBeGreaterThan(0);
-      expect(posture.targetRoutines.length).toBeGreaterThan(0);
-      expect(posture.privateRoutines.length).toBeGreaterThan(0);
-      expect(statements).toHaveLength(13);
-      expect(
-        statements.filter((query) => query.includes("row_security_active(c.oid)")),
-      ).toHaveLength(1);
-      expect(statements.filter((query) => query.includes("as trigger_callable"))).toHaveLength(1);
-    }
-  } finally {
-    driver.options.debug = originalDebug;
-  }
-});
 
 realTest(
   "pinned previous inspector AND evaluator accept all current migrations and role provisioning",
@@ -368,85 +331,6 @@ realTest(
       DROP FUNCTION IF EXISTS future_posture_invoker(), opengeni_private.future_posture_invoker(), opengeni_private.future_posture_definer(), opengeni_private.future_posture_trigger();
     `);
     }
-  },
-  180_000,
-);
-
-realTest(
-  "this binary requires the definer and table grants 0947 and 0950 make",
-  async () => {
-    const admin = database!.admin;
-    const current = async () =>
-      evaluateRuntimeDatabasePosture(
-        await inspectRuntimeDatabasePosture(client!.db, options),
-        options,
-      );
-    expect(await current()).toEqual([]);
-    try {
-      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
-      expect(await current()).toContain(
-        "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
-      );
-      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
-      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
-      expect(await current()).toContain(
-        "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
-      );
-      await admin`REVOKE DELETE ON TABLE event_ingress_routes FROM opengeni_app`;
-      expect(await current()).toContain(
-        "table event_ingress_routes lacks required runtime privileges: DELETE",
-      );
-    } finally {
-      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
-      await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
-      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
-    }
-    expect(await current()).toEqual([]);
-  },
-  180_000,
-);
-
-const DEFINERS_GRANTED_BY_1019 = [
-  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "rearm_unanswered_connected_commands(uuid, uuid, text)",
-  "lookup_organization_host_identity(uuid, text, uuid)",
-  "ensure_organization_host_owner(uuid, text, uuid)",
-  "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
-] as const;
-
-realTest(
-  "1019 grants the definers 0978, 0984 and 1016-1018 withheld; a missing grant fails readiness by name",
-  async () => {
-    const admin = database!.admin;
-    const current = async () =>
-      evaluateRuntimeDatabasePosture(
-        await inspectRuntimeDatabasePosture(client!.db, options),
-        options,
-      );
-    for (const name of DEFINERS_GRANTED_BY_1019) {
-      expect(DEFERRED_RUNTIME_PRIVATE_ROUTINES as readonly string[]).not.toContain(name);
-      const [row] = await admin<{ granted: boolean }[]>`
-        select has_function_privilege('opengeni_app',
-          to_regprocedure(${`opengeni_private.${name}`}), 'EXECUTE') as granted`;
-      expect(row!.granted).toBe(true);
-    }
-    expect(await current()).toEqual([]);
-    // The pinned previous release accepts them granted.
-    expect(
-      baseline!.module.evaluateRuntimeDatabasePosture(
-        await baseline!.module.inspectRuntimeDatabasePosture(client!.db, options),
-        options,
-      ),
-    ).toEqual([]);
-    for (const name of DEFINERS_GRANTED_BY_1019) {
-      await admin.unsafe(`REVOKE EXECUTE ON FUNCTION opengeni_private.${name} FROM opengeni_app`);
-      try {
-        expect(await current()).toEqual([`runtime role lacks EXECUTE on private routine ${name}`]);
-      } finally {
-        await admin.unsafe(`GRANT EXECUTE ON FUNCTION opengeni_private.${name} TO opengeni_app`);
-      }
-    }
-    expect(await current()).toEqual([]);
   },
   180_000,
 );

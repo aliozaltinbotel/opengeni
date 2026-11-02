@@ -5,8 +5,6 @@ export function startWorkspaceVoiceCapabilityRefresh(input: {
   read(signal: AbortSignal): Promise<ClientConfig>;
   ownsWorkspace(): boolean;
   apply(voiceInput: ClientConfig["voiceInput"]): void;
-  /** The workspace's attachment availability: its organization may turn uploads off. */
-  applyFileUploads?(fileUploads: ClientConfig["fileUploads"]): void;
   subscribeFocus(refresh: () => void): () => void;
 }): () => void {
   let request: AbortController | null = null;
@@ -19,9 +17,7 @@ export function startWorkspaceVoiceCapabilityRefresh(input: {
     void input
       .read(controller.signal)
       .then((config) => {
-        if (controller.signal.aborted || !input.ownsWorkspace()) return;
-        input.apply(config.voiceInput);
-        input.applyFileUploads?.(config.fileUploads);
+        if (!controller.signal.aborted && input.ownsWorkspace()) input.apply(config.voiceInput);
       })
       .catch(() => {
         // Keep unavailable state after a transition; focus retries transient reads.
@@ -33,28 +29,5 @@ export function startWorkspaceVoiceCapabilityRefresh(input: {
     disposed = true;
     request?.abort();
     unsubscribe();
-  };
-}
-
-/**
- * The app's client config for the current workspace. Voice stays unavailable
- * until the workspace read answers; uploads follow the deployment until then,
- * and the workspace's answer (its organization may turn them off) after.
- */
-export function workspaceScopedClientConfig(
-  clientConfig: ClientConfig,
-  workspace: {
-    voiceInput?: ClientConfig["voiceInput"] | undefined;
-    fileUploads?: ClientConfig["fileUploads"] | undefined;
-  },
-): ClientConfig {
-  return {
-    ...clientConfig,
-    voiceInput:
-      workspace.voiceInput ??
-      (clientConfig.voiceInput
-        ? { ...clientConfig.voiceInput, available: false, providers: [] }
-        : undefined),
-    fileUploads: workspace.fileUploads ?? clientConfig.fileUploads,
   };
 }

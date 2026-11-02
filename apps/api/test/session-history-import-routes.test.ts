@@ -7,8 +7,7 @@ import {
 } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import * as accessGrantRls from "../src/access-grant-rls";
 import { createApp, routeLabel, workspaceActorContextExempt } from "../src/app";

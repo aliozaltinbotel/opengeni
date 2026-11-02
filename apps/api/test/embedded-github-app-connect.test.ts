@@ -15,8 +15,11 @@ import {
 import { grantWorkspaceAccess, withWorkspaceSubjectRls } from "@opengeni/db";
 
 import { createSignedState, readSignedState } from "@opengeni/github";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createApp } from "../src/app";
 
 let fixture: SharedTestDatabase;

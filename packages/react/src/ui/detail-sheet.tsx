@@ -1,17 +1,14 @@
 import {
   createContext,
-  forwardRef,
   useContext,
   useId,
   useRef,
-  type ComponentPropsWithoutRef,
-  type ComponentRef,
+  type ComponentProps,
   type ReactNode,
 } from "react";
 import { ArrowLeftIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
-import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
 import { LogoTileSizeProvider } from "./logo-tile";
 import { SECTION_TITLE_CLASS } from "./section";
@@ -60,7 +57,7 @@ export function useDetailPresentation(): DetailPresentation {
    -------------------------------------------------------------------------- */
 
 /** The sheet root. Control it with `open` and `onOpenChange` (tie it to the URL). */
-export function DetailSheet(props: ComponentPropsWithoutRef<typeof Sheet>) {
+export function DetailSheet(props: ComponentProps<typeof Sheet>) {
   return <Sheet {...props} />;
 }
 
@@ -70,7 +67,7 @@ const SHEET_PANEL =
   "flex min-h-0 min-w-0 flex-col bg-surface text-fg shadow-[var(--og-shadow-lg)] @container/detail";
 
 export interface DetailSheetContentProps extends Omit<
-  ComponentPropsWithoutRef<typeof DialogPrimitive.Content>,
+  ComponentProps<typeof DialogPrimitive.Content>,
   "children"
 > {
   children: ReactNode;
@@ -82,13 +79,13 @@ export interface DetailSheetContentProps extends Omit<
  * and an optional DetailFooter. Pass `aria-describedby={undefined}` when the
  * header has no subtitle.
  */
-export const DetailSheetContent = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DialogPrimitive.Content>,
-  DetailSheetContentProps
->(function DetailSheetContent(
-  { children, className, onOpenAutoFocus, onCloseAutoFocus, ...props },
-  ref,
-) {
+export function DetailSheetContent({
+  children,
+  className,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
+  ...props
+}: DetailSheetContentProps) {
   // Sheets usually open from a list row, not a DetailSheetTrigger, so Radix
   // has nothing to return focus to. Remember what had focus as the sheet
   // opened (the row) and go back there on close.
@@ -100,7 +97,6 @@ export const DetailSheetContent = /* @__PURE__ */ forwardRef<
         className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-200 starting:opacity-0"
       />
       <DialogPrimitive.Content
-        ref={ref}
         data-slot="detail-sheet"
         {...props}
         onOpenAutoFocus={(event) => {
@@ -136,7 +132,7 @@ export const DetailSheetContent = /* @__PURE__ */ forwardRef<
       </DialogPrimitive.Content>
     </DialogContainedPortal>
   );
-});
+}
 
 /**
  * The same sheet panel without the overlay, in the page flow. For docs,
@@ -272,7 +268,6 @@ export function DetailHeader({
   showClose = true,
   className,
 }: DetailHeaderProps) {
-  const msg = useOpenGeniText();
   const presentation = usePresentation();
   const previewClose = useContext(PreviewCloseContext);
   const inDialog = presentation === "sheet";
@@ -336,7 +331,7 @@ export function DetailHeader({
         type="button"
         variant="ghost"
         size="icon-sm"
-        aria-label={msg("formDialog.close")}
+        aria-label="Close"
         className={closeButtonClass}
       >
         <XIcon />
@@ -347,7 +342,7 @@ export function DetailHeader({
       type="button"
       variant="ghost"
       size="icon-sm"
-      aria-label={msg("formDialog.close")}
+      aria-label="Close"
       onClick={previewClose}
       className={closeButtonClass}
     >
@@ -564,13 +559,12 @@ export function DetailFooterConfirm({
   title,
   description,
   confirmLabel,
-  cancelLabel,
+  cancelLabel = "Cancel",
   onConfirm,
   onCancel,
   pending = false,
   className,
 }: DetailFooterConfirmProps) {
-  const msg = useOpenGeniText();
   const presentation = usePresentation();
   const titleId = useId();
   const descriptionId = useId();
@@ -605,7 +599,7 @@ export function DetailFooterConfirm({
           autoFocus={presentation === "sheet"}
           className="pointer-coarse:h-11"
         >
-          {cancelLabel ?? msg("formDialog.cancel")}
+          {cancelLabel}
         </Button>
         <Button
           type="button"
@@ -623,15 +617,10 @@ export function DetailFooterConfirm({
 
 /** Loading placeholder with the header and fact rows in place. */
 export function DetailSkeleton({ sections = 2 }: { sections?: number }) {
-  const msg = useOpenGeniText();
   const presentation = usePresentation();
   const padded = presentation === "sheet" || presentation === "preview";
   return (
-    <div
-      role="status"
-      aria-label={msg("formDialog.loading")}
-      className="flex min-h-0 flex-1 flex-col"
-    >
+    <div role="status" aria-label="Loading details" className="flex min-h-0 flex-1 flex-col">
       <div
         className={cn(
           "flex shrink-0 items-start gap-3",

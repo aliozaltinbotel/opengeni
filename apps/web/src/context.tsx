@@ -1,5 +1,4 @@
 import { useExternalAuthRecovery } from "./lib/external-auth-recovery";
-import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -37,7 +36,7 @@ import {
   signUpEmail,
   startManagedSocialSignIn,
 } from "@/api";
-import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@opengeni/react/ui/button";
@@ -55,8 +54,6 @@ import {
 import { CreditRequiredGate } from "@opengeni/react/app/components/credit-required-gate";
 import type { PendingSlackLink } from "@opengeni/react/app/app-context";
 import type { ClientConfig, SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
-import { afterHostSignOut } from "@/host-extension/lifecycle";
-import { currentHostExtension, outsideWorkspaceRouteAt } from "@/host-extension/registry";
 import {
   clearPendingDeveloperSetup,
   pendingDeveloperSetupFor,
@@ -150,15 +147,12 @@ const webAppStateHost: AppStateHost = {
   fetchAuthSession,
   signInEmail,
   signUpEmail,
-  // Every native sign-out first waits for the host extension's onSignOut hook
-  // (bounded), after the console has unmounted its authenticated readers and
-  // while the session is still valid.
-  signOutManaged: () => afterHostSignOut(signOutManaged),
+  signOutManaged,
   startManagedSocialSignIn,
   configureManagedActorEpoch,
   getStoredAccessKey,
   hasExternalAccessTokenSource,
-  signOutExternalAccess: () => afterHostSignOut(signOutExternalAccess),
+  signOutExternalAccess,
   setStoredAccessKey,
   clearStoredAccessKey,
   slackLink: createSlackLinkPrepareController<SlackUserLinkAccessRequest>(
@@ -181,15 +175,9 @@ export function RootRouteComponent() {
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
-      pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
-      pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
-  // A host extension's page outside any workspace: public ones render with the
-  // public pages, signed-in ones once the person is signed in (below).
-  const hostOutsideRoute = outsideWorkspaceRouteAt(pathname);
   const isPublicAuthRoute =
-    hostOutsideRoute?.access === "public" ||
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
@@ -253,17 +241,6 @@ export function RootRouteComponent() {
     <LoadingPanel />
   ) : configError?.recovery === "authentication" && externalAuthRecovery ? (
     externalAuthRecovery(retryClientConfig)
-  ) : configError?.recovering ? (
-    // An update or dropped connection: startup continues by itself.
-    <WaitingPanel
-      title={configError.title}
-      description={configError.description}
-      action={
-        <Button type="button" variant="ghost" size="sm" onClick={retryClientConfig}>
-          Try again
-        </Button>
-      }
-    />
   ) : configError ? (
     <ProblemPanel
       title={configError.title}
@@ -302,11 +279,6 @@ export function RootRouteComponent() {
                     onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                     emailVerificationRequired={managedEmailVerificationRequired}
                     newSignupsEnabled={managedNewSignupsEnabled}
-                    signupChallengeSiteKey={
-                      clientConfig?.auth.mode === "managedSession"
-                        ? clientConfig.auth.signupChallengeSiteKey
-                        : undefined
-                    }
                   />
                 ) : undefined
               }
@@ -320,11 +292,6 @@ export function RootRouteComponent() {
               onSubmit={handleManagedAuth}
               emailVerificationRequired={managedEmailVerificationRequired}
               newSignupsEnabled={managedNewSignupsEnabled}
-              signupChallengeSiteKey={
-                clientConfig?.auth.mode === "managedSession"
-                  ? clientConfig.auth.signupChallengeSiteKey
-                  : undefined
-              }
               socialProviders={managedSocialProviders}
               onSocialSubmit={handleManagedSocialAuth}
             />
@@ -332,21 +299,6 @@ export function RootRouteComponent() {
         </SignedOutPage>
       </Suspense>
     </DesktopSignedOutRecovery>
-  ) : hostOutsideRoute && clientConfig && (!managedAuthRequired || authSession) ? (
-    // Before the access and onboarding gates: the person may have no
-    // workspace yet (the host's registration, not-admitted or identity pages).
-    // A signed-in person's own app context, once resolved, so a host page can
-    // read that person's workspaces (useAppContext().workspaces). It opens no
-    // workspace: workspace-scoped hooks still refuse here.
-    browserAccountsConfigured && !browserAccountsEnabled ? (
-      <LoadingPanel />
-    ) : appContext ? (
-      <AppContext.Provider value={appContext}>
-        <Outlet />
-      </AppContext.Provider>
-    ) : (
-      <Outlet />
-    )
   ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
@@ -361,13 +313,12 @@ export function RootRouteComponent() {
         <Outlet />
       </NativeSignInProvider>
     )
-  ) : /^\/(?:settings\/security|reauthenticate)\/?$/.test(pathname) &&
+  ) : /^\/settings\/security\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
-    // Personal security and confirming it's you require the selected managed
-    // human, never a workspace grant. Keep this after authentication but before
-    // access/onboarding gates.
+    // Personal security requires the selected managed human, never a workspace
+    // grant. Keep this after authentication but before access/onboarding gates.
     // The outer BrowserAccountsRuntime still owns broker actor transitions.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
@@ -384,16 +335,6 @@ export function RootRouteComponent() {
         <Outlet />
       </PersonalSecurityProvider>
     )
-  ) : accessError?.recovering ? (
-    <WaitingPanel
-      title={accessError.title}
-      description={accessError.description}
-      action={
-        <Button type="button" variant="ghost" size="sm" onClick={retryAccess}>
-          Try again
-        </Button>
-      }
-    />
   ) : accessError && !accessLoading ? (
     <ProblemPanel
       title={accessError.title}
@@ -412,7 +353,6 @@ export function RootRouteComponent() {
     !slackLinkContinuationWorkspaceId ? (
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
-        organizationRegistrationRoute={currentHostExtension().organizationRegistrationRoute}
         client={client}
         billingMode={clientConfig.billingMode ?? "disabled"}
         codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
@@ -427,7 +367,6 @@ export function RootRouteComponent() {
     ) : (
       <Suspense fallback={<LoadingPanel />}>
         <OrganizationOnboardingPanel
-          organizationRegistrationRoute={currentHostExtension().organizationRegistrationRoute}
           client={client}
           billingMode={clientConfig.billingMode ?? "disabled"}
           codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
@@ -477,17 +416,15 @@ export function RootRouteComponent() {
     </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
-      <ArchiveConfirmationProvider>
-        <Outlet />
-        <CreditRequiredGate
-          creditRequired={creditRequired}
-          setCreditRequired={setCreditRequired}
-          accessContext={accessContext}
-        />
-        {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
-          <TanStackRouterDevtools position="bottom-right" />
-        ) : null}
-      </ArchiveConfirmationProvider>
+      <Outlet />
+      <CreditRequiredGate
+        creditRequired={creditRequired}
+        setCreditRequired={setCreditRequired}
+        accessContext={accessContext}
+      />
+      {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+        <TanStackRouterDevtools position="bottom-right" />
+      ) : null}
     </AppContext.Provider>
   );
 
@@ -534,9 +471,7 @@ export function RootRouteComponent() {
             analyticsAccountId={
               routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
             }
-            analyticsAccountResolved={
-              accessContext !== null || (accessError !== null && !accessError.recovering)
-            }
+            analyticsAccountResolved={accessContext !== null || accessError !== null}
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}

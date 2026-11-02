@@ -8,7 +8,7 @@ import {
   acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { createDb, migrate, type DbClient } from "../src";

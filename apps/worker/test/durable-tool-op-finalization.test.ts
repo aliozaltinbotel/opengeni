@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import * as admission from "../src/activities/agent-turn/admission";
@@ -125,12 +125,7 @@ for (const scenario of [
             warn() {},
           },
           attempt: { turnId: crypto.randomUUID(), executionGeneration: 1 },
-          turn: {
-            id: crypto.randomUUID(),
-            executionGeneration: 1,
-            model: "scripted-model",
-            resources: [],
-          },
+          turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "scripted-model" },
           turnExecutionPolicy: { providerId: "openai" },
           trigger: { type: "user.message" },
           eventing: {
@@ -174,8 +169,6 @@ for (const scenario of [
           },
           historySink: {
             seedHistory() {},
-            seedHistoryFootprint() {},
-            historyFootprintCompactionSignal: () => null,
             reconcileConversationTruth: async () => {
               order.push("history");
             },
@@ -204,9 +197,9 @@ for (const scenario of [
           withProviderRequestContext: async (operation: () => Promise<unknown>) => operation(),
           // Cendra fork (c5bea8a03): every production attempt carries the exact-call source owner.
           beforeModelCallSourceReceipt: async () => "source-key",
-          finalizeTurnOpStreamOps: async (finalizedCallIds?: readonly string[]) => {
+          finalizeTurnOpStreamOps: async (callIds?: readonly string[]) => {
             order.push("finalize");
-            finalizations.push(finalizedCallIds);
+            finalizations.push(callIds);
           },
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
       } catch (error) {

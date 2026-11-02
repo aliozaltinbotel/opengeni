@@ -42,7 +42,6 @@ import {
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { afterHostSignOut } from "@/host-extension/lifecycle";
 
 type ManagedAuthLoginSlot = ManagedAuthSessionSetProjection["slots"][number];
 
@@ -154,13 +153,8 @@ export function BrowserAccountMenu({
 
   async function confirmLogoutOne() {
     if (!logoutTarget) return;
-    const logout = () => accounts.logoutSlot(logoutTarget.id, replacementSlotId);
     try {
-      // Signing out the account in use ends this person's session, so the host
-      // extension's onSignOut runs first; another account's leaves it as is.
-      const settled = await (logoutTarget.id === projection?.selectedSlotId
-        ? afterHostSignOut(logout)
-        : logout());
+      const settled = await accounts.logoutSlot(logoutTarget.id, replacementSlotId);
       if (settled) {
         setLogoutTarget(null);
         restoreFocus();
@@ -174,7 +168,7 @@ export function BrowserAccountMenu({
 
   async function confirmLogoutAll() {
     try {
-      const settled = await afterHostSignOut(() => accounts.logoutAll());
+      const settled = await accounts.logoutAll();
       if (settled) setLogoutAllOpen(false);
     } catch (error) {
       toast.error("Couldn't sign out all browser accounts", {

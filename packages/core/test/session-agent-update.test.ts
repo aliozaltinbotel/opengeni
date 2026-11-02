@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { resolveAgentConfig, type ResolvedAgentConfig } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { updateSessionAgent } from "../src/domain/sessions";
 
 const settings = testSettings({

@@ -159,16 +159,12 @@ export function ConnectAudienceFields({
   disabled?: boolean;
 }) {
   const personalSupported = personalWorkspacesSupported(kind);
-  const personalReason =
-    kind === "claude_subscription"
-      ? "Organization Claude subscriptions can't be used in Personal workspaces."
-      : PERSONAL_KEYS_REASON;
   const selected = value.kind === "selected" ? value : null;
   const everyoneDescription = personalSupported
     ? "Every workspace, including new ones and everyone's Personal workspace."
     : here?.personal
-      ? `Every shared workspace, including new ones. Not this one: ${personalReason}`
-      : `Every shared workspace, including new ones. ${personalReason}`;
+      ? "Every shared workspace, including new ones. Not this one: organization API keys can't be used in Personal workspaces."
+      : `Every shared workspace, including new ones. ${PERSONAL_KEYS_REASON}`;
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <ChoiceCards
@@ -237,14 +233,7 @@ export function ConnectAudienceFields({
           )}
           <CheckboxField
             label="Personal workspaces"
-            {...(personalSupported
-              ? {}
-              : {
-                  description:
-                    kind === "claude_subscription"
-                      ? "Organization Claude subscriptions can't be used there."
-                      : PERSONAL_KEYS_SHORT_REASON,
-                })}
+            {...(personalSupported ? {} : { description: PERSONAL_KEYS_SHORT_REASON })}
             disabled={disabled || !personalSupported}
             checked={personalSupported && selected.personalWorkspaces}
             onCheckedChange={(checked) => onChange({ ...selected, personalWorkspaces: checked })}

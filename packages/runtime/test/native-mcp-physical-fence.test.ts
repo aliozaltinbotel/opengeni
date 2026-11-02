@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { prepareAgentTools } from "../src";
-import { startTestMcpServer } from "@opengeni/testing/mcp";
-import { testSettings } from "@opengeni/testing/settings";
+import { startTestMcpServer, testSettings } from "@opengeni/testing";
 
 test("native connection revocation at the physical MCP fence sends no provider request", async () => {
   const mcp = startTestMcpServer();

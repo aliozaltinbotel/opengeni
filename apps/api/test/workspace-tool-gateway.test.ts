@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, test, spyOn } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import type { AccessGrant } from "@opengeni/contracts";
@@ -11,7 +11,7 @@ import {
   WorkspaceArtifactNotFoundError,
 } from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
@@ -24,9 +24,6 @@ import {
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewaySettingsForGrant,
-  narrowWorkspaceToolServerIds,
-  prepareWorkspaceToolGatewayForGrant,
-  prepareMcpOAuthWorkspaceToolGateway,
   workspaceToolGatewayDeclarations,
   type PreparedWorkspaceToolGateway,
 } from "../src/workspace-tool-gateway";
@@ -187,7 +184,6 @@ async function policyCeilingGateway(
           inputSchema: {
             type: "object",
             properties: {},
-            required: [],
             additionalProperties: false,
           },
         }));
@@ -264,7 +260,7 @@ describe("workspace tool gateway adapters", () => {
       await client.callTool({ name: "opengeni__session_get", arguments: {} });
       await expect(
         client.callTool({ name: "opengeni__session_create", arguments: {} }),
-      ).rejects.toMatchObject({ code: -32602, data: { code: "TOOL_NOT_FOUND", name: "opengeni__session_create" } });
+      ).rejects.toThrow("Tool is not present in the active gateway catalog");
 
       await callWorkspaceToolGateway(prepared, access, {
         operationId: "33333333-3333-4333-8333-333333333333",
@@ -424,7 +420,7 @@ describe("workspace tool gateway adapters", () => {
           name: "inventory__lookup",
           arguments: { sku: "SKU-1" },
         }),
-      ).rejects.toMatchObject({ code: -32602, data: { code: "TOOL_APPROVAL_REQUIRED", name: "inventory__lookup" } });
+      ).rejects.toThrow("Tool is not present in the active gateway catalog");
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }
@@ -916,64 +912,4 @@ describe("workspace tool gateway adapters", () => {
       }),
     ).toBe(true);
   });
-});
-
-test('a host narrowing intersects configured servers while absent policy preserves native docs', () => {
-  const settings = testSettings({mcpServers:[
-    {id:'opengeni',url:'https://native.invalid/mcp',cacheToolsList:false},
-    {id:'docs',url:'https://native.invalid/docs',cacheToolsList:false},
-    {id:'cendra-pms',url:'https://cendra.invalid/mcp',cacheToolsList:false},
-  ]});
-  const current = {...grant(),permissions:['workspace:read','documents:search'] as AccessGrant['permissions']};
-  expect(workspaceToolGatewaySettingsForGrant(settings,current).mcpServers.map(server=>server.id)).toEqual(['opengeni','docs','cendra-pms']);
-  expect(workspaceToolGatewaySettingsForGrant(settings,current,undefined,['opengeni','cendra-pms','invented']).mcpServers.map(server=>server.id)).toEqual(['opengeni','cendra-pms']);
-  expect(workspaceToolGatewaySettingsForGrant(settings,current,undefined,[]).mcpServers).toEqual([]);
-});
-
-test('governed narrowing calls only its current host and propagates refusal or malformed answers',async()=>{
- const input={organizationId:accountId,workspaceId,serverIds:['opengeni','docs','cendra-pms']};
- let lookups=0,calls=0;
- const governance={governs:()=>true,decide:()=>'refuse' as const,async narrowWorkspaceToolServers(value:typeof input){calls++;expect(value).toEqual(input);return ['opengeni','cendra-pms'];}};
- const governed=async()=>{lookups++;return true;};
- expect(await narrowWorkspaceToolServerIds(undefined,input,governed)).toBeUndefined();expect(lookups).toBe(0);
- expect(await narrowWorkspaceToolServerIds(governance,input,async()=>false)).toBeUndefined();expect(calls).toBe(0);
- expect(await narrowWorkspaceToolServerIds(governance,input,governed)).toEqual(['opengeni','cendra-pms']);expect(calls).toBe(1);
- await expect(narrowWorkspaceToolServerIds({...governance,async narrowWorkspaceToolServers(){throw Error('host refused');}},input,governed)).rejects.toThrow('host refused');
- for(const invalid of [null,'docs',[42]]){
-  const malformed={...governance,narrowWorkspaceToolServers:async()=>invalid};
-  // @ts-expect-error Deliberately exercise an invalid runtime host response.
-  await expect(narrowWorkspaceToolServerIds(malformed,input,governed)).rejects.toThrow('WORKSPACE_TOOL_SERVER_NARROWING_INVALID');
- }
- await expect(narrowWorkspaceToolServerIds(governance,input,async()=>{throw Error('classification unavailable');})).rejects.toThrow('classification unavailable');
-});
-
-test('real full and frozen OAuth preparation apply host narrowing before constructing docs',async()=>{
- const core=await import('@opengeni/core'),db=await import('@opengeni/db');
- const settings=testSettings({mcpServers:[{id:'docs',url:'https://native.invalid/docs',cacheToolsList:false},{id:'cendra-pms',url:'https://cendra.invalid/mcp',cacheToolsList:false}]});
- const reads=[
-  spyOn(core,'resolveWorkspaceCatalogSettings').mockImplementation(async(_db,value)=>({settings:value,source:'code',version:null,modelNotes:{}})),
-  spyOn(core,'settingsWithEnabledCapabilityMcpServers').mockImplementation(async(_db,_workspace,value)=>value),
-  spyOn(core,'availableMcpAccountBindings').mockResolvedValue([]),
-  spyOn(core,'organizationGovernedByHost').mockResolvedValue(true),
-  spyOn(db,'listConnectorToolPermissionPolicies').mockResolvedValue([]),
- ];
- const calls:unknown[]=[];
- const context={...grant(),principalKind:'human_session' as const,permissions:['workspace:read','documents:search'] as AccessGrant['permissions'],metadata:{mcpOAuth:true}};
- const route={settings,db:new Proxy({}, {get(){throw Error('unmocked database access');}}),workflowClient:{},
-  getDocumentServices(){throw Error('unsupported docs construction reached');},
-  organizationGovernance:{governs:()=>true,decide:()=>'refuse' as const,async narrowWorkspaceToolServers(input:{organizationId:string;workspaceId:string;serverIds:readonly string[]}){calls.push(input);return input.serverIds.filter(id=>id!=='docs');}},
-  async workspaceToolServers(){return[{id:'cendra-pms',toolSetVersion:'sha256:'+'a'.repeat(64),server:{name:'cendra-knowledge',cacheToolsList:false,async connect(){},async close(){},async listTools(){return[{name:'knowledge_search',inputSchema:{type:'object',properties:{},required:[],additionalProperties:false},annotations:{readOnlyHint:true}}];},async callTool(){return[];},invalidateToolsCache(){}}}];},
- };
- // This source-wiring test substitutes only read adapters. It establishes no authenticated authority.
- const deps=route as unknown as import('@opengeni/core').ApiRouteDeps;
- try{
-  const full=await prepareWorkspaceToolGatewayForGrant(deps,context);
-  let identities:ReturnType<typeof mcpOAuthConsentToolIdentities>;
-  try{identities=mcpOAuthConsentToolIdentities(full.toolGatewayCatalog);expect(identities).toEqual([{serverId:'cendra-pms',toolName:'knowledge_search'}]);}
-  finally{await full.close();}
-  const frozen=await prepareMcpOAuthWorkspaceToolGateway(deps,context,[...identities,{serverId:'docs',toolName:'knowledge_search'}],{toolSetVersions:{'cendra-pms':'sha256:'+'a'.repeat(64)}});
-  try{expect(mcpOAuthConsentToolIdentities(frozen.toolGatewayCatalog)).toEqual(identities);}
-  finally{await frozen.close();}
-  expect(calls).toEqual([0,1].map(()=>({organizationId:context.accountId,workspaceId:context.workspaceId,serverIds:['docs','cendra-pms']})));
- }finally{for(const read of reads)read.mockRestore();}
 });

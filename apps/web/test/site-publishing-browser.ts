@@ -4,8 +4,7 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Page } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess } from "@opengeni/testing/process";
+import { freePort, startProcess } from "@opengeni/testing";
 
 const port = Number(process.env.OPENGENI_SITE_PUBLISHING_PORT ?? (await freePort()));
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -162,7 +161,7 @@ const shots: Shot[] = [
   {
     name: "usage-platform-credits",
     scenario: "usage-credits",
-    ready: (page) => text(page, /charged so far/),
+    ready: (page) => text(page, "charged this month"),
   },
   {
     name: "usage-platform-brake",

@@ -333,12 +333,10 @@ describe("ordinary session Codex realtime control", () => {
 
   test("adopts a call the host started before the view mounted and flushes on turn outcomes", async () => {
     const calls: string[] = [];
-    let capturedContext: (() => string | undefined) | undefined;
     let current: SessionRealtimeControllerSnapshot = idle;
     const listeners = new Set<(snapshot: SessionRealtimeControllerSnapshot) => void>();
     const factory: SessionRealtimeControllerFactory = (options) => {
       calls.push(`create:${options.model}`);
-      capturedContext = options.getModelContext;
       return {
         snapshot: () => current,
         subscribe(listener) {
@@ -369,9 +367,7 @@ describe("ordinary session Codex realtime control", () => {
         },
       };
     };
-    const client = {
-      getWorkspaceRealtimeModelCatalog: undefined,
-    } as unknown as OpenGeniClient;
+    const client = { getWorkspaceRealtimeModelCatalog: undefined } as unknown as OpenGeniClient;
     const workspaceId = "11111111-1111-4111-8111-111111111111";
     const sessionId = "66666666-6666-4666-8666-666666666666";
     prestartSessionRealtime({
@@ -380,13 +376,7 @@ describe("ordinary session Codex realtime control", () => {
       sessionId,
       model: "gpt-live-1-boulder-alpha",
       controllerFactory: factory,
-      getModelContext: () => "before adoption",
     });
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (capturedContext) break;
-      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    }
-    expect(capturedContext?.()).toBe("before adoption");
     let consumed = 0;
     const turnCompleted = {
       id: "77777777-7777-4777-8777-777777777777",
@@ -400,7 +390,6 @@ describe("ordinary session Codex realtime control", () => {
     const render = (events: SessionEvent[]) =>
       root.render(
         <SessionRealtimeControl
-          getModelContext={() => "after adoption"}
           client={client}
           workspaceId={workspaceId}
           sessionId={sessionId}
@@ -425,7 +414,6 @@ describe("ordinary session Codex realtime control", () => {
     // One controller, started once by the host; the view's autostart is consumed.
     expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start"]);
     expect(consumed).toBe(1);
-    expect(capturedContext?.()).toBe("after adoption");
 
     await act(async () => render([turnCompleted]));
     await act(async () => render([turnCompleted]));
@@ -833,10 +821,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(localStorage.getItem("opengeni:realtime-language")).toBeNull();
 
     // Without a pick of their own, people talk in the workspace's language.
-    const elevenWithWorkspaceLanguage = {
-      ...eleven,
-      workspaceVoiceSettings: { language: "no" },
-    };
+    const elevenWithWorkspaceLanguage = { ...eleven, workspaceVoiceSettings: { language: "no" } };
     await act(async () =>
       root.render(
         <OpenGeniMessagesProvider locale="en-US">
@@ -1015,25 +1000,15 @@ describe("ordinary session Codex realtime control", () => {
       recommended: true,
     });
     const cases = [
-      {
-        workspaceId: "88888888-8888-4888-8888-888888888881",
-        models: [codex, gptLive(true)],
-      },
-      {
-        workspaceId: "88888888-8888-4888-8888-888888888882",
-        models: [codex, gptLive(false)],
-      },
+      { workspaceId: "88888888-8888-4888-8888-888888888881", models: [codex, gptLive(true)] },
+      { workspaceId: "88888888-8888-4888-8888-888888888882", models: [codex, gptLive(false)] },
     ];
     for (const { workspaceId, models } of cases) {
       const client = {
         getWorkspaceRealtimeModelCatalog: async () => ({ models }),
       } as unknown as OpenGeniClient;
       function Selection() {
-        const selection = useRealtimeModelSelection({
-          client,
-          workspaceId,
-          codexConnected: false,
-        });
+        const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
         return (
           <output>
             {selection.selectedModel.id}|{String(selection.selectedModel.available)}|
@@ -1051,197 +1026,6 @@ describe("ordinary session Codex realtime control", () => {
       // Unavailable models stay listed with their reason.
       expect(count).toBe("2");
     }
-  });
-
-  test("starts with the workspace's or organization's default voice model until the person picks one", async () => {
-    const model = (
-      id:
-        | "gpt-live-1-boulder-alpha"
-        | "workspace-elevenlabs/eleven_realtime_v1_max"
-        | "workspace-elevenlabs/eleven_realtime_v1_mini",
-      flags: {
-        available?: boolean;
-        workspaceDefault?: boolean;
-        organizationDefault?: boolean;
-      } = {},
-    ) => ({
-      id,
-      label: id,
-      provider: id.startsWith("workspace-elevenlabs") ? "Your ElevenLabs" : "Connected Codex",
-      description: "Voice",
-      available: flags.available ?? true,
-      unavailableReason: flags.available === false ? "Not available" : null,
-      recommended: false,
-      ...(flags.workspaceDefault ? { workspaceDefault: true } : {}),
-      ...(flags.organizationDefault ? { organizationDefault: true } : {}),
-    });
-    const codex = "gpt-live-1-boulder-alpha";
-    const max = "workspace-elevenlabs/eleven_realtime_v1_max";
-    const mini = "workspace-elevenlabs/eleven_realtime_v1_mini";
-    const cases = [
-      // No default: Codex Live stays the automatic choice.
-      { expected: codex, models: [model(codex), model(max)] },
-      // The organization's choice wins over the automatic Codex Live.
-      {
-        expected: max,
-        models: [model(codex), model(max, { organizationDefault: true })],
-      },
-      // The workspace's choice wins over the organization's.
-      {
-        expected: mini,
-        models: [
-          model(codex),
-          model(max, { organizationDefault: true }),
-          model(mini, { workspaceDefault: true }),
-        ],
-      },
-      // A default the person can't use falls back to the automatic choice.
-      {
-        expected: codex,
-        models: [model(codex), model(max, { organizationDefault: true, available: false })],
-      },
-      // The person's own earlier pick wins over every default.
-      {
-        expected: codex,
-        picked: codex,
-        models: [model(codex), model(max, { organizationDefault: true })],
-      },
-    ];
-    for (const [index, { expected, models, picked }] of cases.entries()) {
-      const workspaceId = `77777777-7777-4777-8777-77777777777${index}`;
-      if (picked) localStorage.setItem(`opengeni:realtime-model:${workspaceId}`, picked);
-      const client = {
-        getWorkspaceRealtimeModelCatalog: async () => ({ models }),
-      } as unknown as OpenGeniClient;
-      function Selection() {
-        const selection = useRealtimeModelSelection({
-          client,
-          workspaceId,
-          codexConnected: true,
-        });
-        return <output>{selection.catalogReady ? selection.selectedModel.id : "loading"}</output>;
-      }
-      await act(async () => root.render(<Selection key={workspaceId} />));
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-        if (container.querySelector("output")?.textContent !== "loading") break;
-      }
-      expect(container.querySelector("output")?.textContent).toBe(expected);
-    }
-  });
-
-  test("keeps a running call's model when the catalog with a different default arrives later", async () => {
-    const codex = "gpt-live-1-boulder-alpha";
-    const max = "workspace-elevenlabs/eleven_realtime_v1_max";
-    const mini = "workspace-elevenlabs/eleven_realtime_v1_mini";
-    const model = (id: typeof codex | typeof max | typeof mini, workspaceDefault = false) => ({
-      id,
-      label: id,
-      provider: id === codex ? "Connected Codex" : "Your ElevenLabs",
-      description: "Voice",
-      available: true,
-      unavailableReason: null,
-      recommended: false,
-      ...(workspaceDefault ? { workspaceDefault: true } : {}),
-    });
-    const lateCatalog = () => {
-      let resolve!: (value: { models: unknown[] }) => void;
-      const promise = new Promise<{ models: unknown[] }>((settle) => (resolve = settle));
-      const client = {
-        getWorkspaceRealtimeModelCatalog: () => promise,
-      } as unknown as OpenGeniClient;
-      return {
-        client,
-        arrive: () => resolve({ models: [model(codex), model(max), model(mini, true)] }),
-      };
-    };
-    const settle = async () => {
-      for (let attempt = 0; attempt < 10; attempt += 1) {
-        await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-      }
-    };
-
-    // The selection keeps the running call's model.
-    const selectionCatalog = lateCatalog();
-    function Selection() {
-      const selection = useRealtimeModelSelection({
-        client: selectionCatalog.client,
-        workspaceId: "81818181-8181-4181-8181-818181818181",
-        codexConnected: true,
-        activeModel: max,
-      });
-      return <output>{selection.selectedModel.id}</output>;
-    }
-    await act(async () => root.render(<Selection />));
-    await settle();
-    selectionCatalog.arrive();
-    await settle();
-    expect(container.querySelector("output")?.textContent).toBe(max);
-    await act(async () => root.unmount());
-    root = createRoot(container);
-
-    // The packaged control does not replace the running call's controller.
-    const workspaceId = "82828282-8282-4282-8282-828282828282";
-    const sessionId = "83838383-8383-4383-8383-838383838383";
-    const started: SessionEvent = {
-      id: "84848484-8484-4484-8484-848484848484",
-      workspaceId,
-      sessionId,
-      sequence: 10,
-      type: "session.realtime.started",
-      payload: {
-        realtimeId: "85858585-8585-4585-8585-858585858585",
-        operationId: "86868686-8686-4686-8686-868686868686",
-        model: max,
-        version: 1,
-        connectionEpoch: 1,
-        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-      },
-      occurredAt: new Date().toISOString(),
-    };
-    const created: string[] = [];
-    const factory: SessionRealtimeControllerFactory = (options) => {
-      created.push(options.model);
-      return {
-        snapshot: () => idle,
-        subscribe(listener) {
-          listener(idle);
-          return () => undefined;
-        },
-        start: async () => undefined,
-        observeLifecycle: async () => undefined,
-        heartbeat: async () => undefined,
-        flush: async () => undefined,
-        ingestProviderEvent: async () => undefined,
-        retry: async () => undefined,
-        retryAudibleOutput: async () => true,
-        setInputMuted: () => undefined,
-        setOutputMuted: () => undefined,
-        stop: async () => undefined,
-        close: () => undefined,
-      };
-    };
-    const controlCatalog = lateCatalog();
-    await act(async () =>
-      root.render(
-        <SessionRealtimeControl
-          client={controlCatalog.client}
-          workspaceId={workspaceId}
-          sessionId={sessionId}
-          sessionStatus="idle"
-          effectiveControl={effectiveControl}
-          events={[started]}
-          eventsReady={true}
-          codexConnected={true}
-          controllerFactory={factory}
-        />,
-      ),
-    );
-    await settle();
-    controlCatalog.arrive();
-    await settle();
-    expect(created.at(-1)).toBe(max);
-    expect(created).not.toContain(mini);
   });
 
   test("deduplicates catalog loads and reuses the settled catalog across remounts", async () => {
@@ -1268,11 +1052,7 @@ describe("ordinary session Codex realtime control", () => {
     } as unknown as OpenGeniClient;
 
     function Selection() {
-      const selection = useRealtimeModelSelection({
-        client,
-        workspaceId,
-        codexConnected: false,
-      });
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
       return <output>{selection.selectedModel.label}</output>;
     }
 
@@ -1318,11 +1098,7 @@ describe("ordinary session Codex realtime control", () => {
     } as unknown as OpenGeniClient;
 
     function Selection() {
-      const selection = useRealtimeModelSelection({
-        client,
-        workspaceId,
-        codexConnected: true,
-      });
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: true });
       return <output>{selection.selectedModel.label}</output>;
     }
 
@@ -1366,11 +1142,7 @@ describe("ordinary session Codex realtime control", () => {
     } as unknown as OpenGeniClient;
 
     function Selection() {
-      const selection = useRealtimeModelSelection({
-        client,
-        workspaceId,
-        codexConnected: false,
-      });
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
       return <output>{String(selection.catalogReady)}</output>;
     }
 
@@ -1404,11 +1176,7 @@ describe("ordinary session Codex realtime control", () => {
     } as unknown as OpenGeniClient;
 
     function Selection() {
-      const selection = useRealtimeModelSelection({
-        client,
-        workspaceId,
-        codexConnected: false,
-      });
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
       return <output>{String(selection.catalogReady)}</output>;
     }
 
@@ -1489,11 +1257,7 @@ describe("ordinary session Codex realtime control", () => {
     } as unknown as OpenGeniClient;
 
     function Selection() {
-      const selection = useRealtimeModelSelection({
-        client,
-        workspaceId,
-        codexConnected: true,
-      });
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: true });
       return <output>{selection.selectedModel.label}</output>;
     }
 
@@ -1682,11 +1446,7 @@ describe("ordinary session Codex realtime control", () => {
       root.render(
         <div className="og-composer">
           <RealtimeVoiceControl
-            snapshot={{
-              ...idle,
-              status: "error",
-              error: "Microphone access is blocked.",
-            }}
+            snapshot={{ ...idle, status: "error", error: "Microphone access is blocked." }}
             canStart={true}
             modelAvailable={true}
             audioRef={createRef<HTMLAudioElement>()}

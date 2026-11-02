@@ -40,7 +40,6 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { ToolbarSummary } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { useNativeDestinationVisible } from "@opengeni/react/app/lib/app-host";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
   canManageWorkspaceSettings,
@@ -76,8 +75,7 @@ const KIND_LABEL: Record<ReviewKind, string> = {
   skill: "Skill",
 };
 
-/** Where a change waiting in Review came from. */
-export type Origin =
+type Origin =
   | { kind: "chat"; name: string; sessionId: string; unnamed?: boolean }
   | { kind: "schedule"; name: string; taskId: string }
   | { kind: "none"; name: string };
@@ -849,34 +847,27 @@ function BodySkeleton() {
   );
 }
 
-/**
- * "From chat <Migrate billing…>" with the chat or automation as a link. An
- * automation's name is plain text when the host extension hides Automations.
- */
-export function OriginLink({ workspaceId, origin }: { workspaceId: string; origin: Origin }) {
+/** "From chat <Migrate billing…>" with the chat or schedule as a link. */
+function OriginLink({ workspaceId, origin }: { workspaceId: string; origin: Origin }) {
   const navigate = useNavigate();
-  const automationsVisible = useNativeDestinationVisible("automations");
   if (origin.kind === "none") return null;
   const href =
     origin.kind === "chat"
       ? `/workspaces/${workspaceId}/sessions/${origin.sessionId}`
-      : `/workspaces/${workspaceId}/automations?taskId=${origin.taskId}`;
+      : `/workspaces/${workspaceId}/schedules?taskId=${origin.taskId}`;
   const unnamed = origin.kind === "chat" && origin.unnamed;
-  const link =
-    origin.kind === "schedule" && !automationsVisible ? (
-      <span className="text-fg">{origin.name}</span>
-    ) : (
-      <a
-        href={href}
-        onClick={inAppClick(() => void navigate({ href }))}
-        className="rounded-[4px] text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
-      >
-        {unnamed ? "a chat" : origin.name}
-      </a>
-    );
+  const link = (
+    <a
+      href={href}
+      onClick={inAppClick(() => void navigate({ href }))}
+      className="rounded-[4px] text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
+    >
+      {unnamed ? "a chat" : origin.name}
+    </a>
+  );
   return (
     <span>
-      {unnamed ? "From " : origin.kind === "chat" ? "From chat " : "From automation "}
+      {unnamed ? "From " : origin.kind === "chat" ? "From chat " : "From schedule "}
       {link}
     </span>
   );
@@ -1177,7 +1168,7 @@ function ReviewDetail({
     item.origin.kind === "chat"
       ? " from this chat"
       : item.origin.kind === "schedule"
-        ? " from this automation"
+        ? " from this schedule"
         : "";
   const menuItems =
     record || batch.length > 1 ? (

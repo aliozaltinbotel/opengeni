@@ -1,15 +1,18 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 
-const source = readRetiredWorkflow("publish-canary-chart.yml");
+const source = readFileSync(
+  new URL("../.github/workflows/publish-canary-chart.yml", import.meta.url),
+  "utf8",
+);
 const workflow = parse(source);
 
 describe("manual canary chart publication", () => {
-  test("historical workflow fixture: retains only the exact hidden release outputs, never registry credentials", () => {
+  test("retains only the exact hidden release outputs, never registry credentials", () => {
     const step = workflow.jobs.publish.steps.find(
       (item: { name?: string }) => item.name === "Retain verified chart receipt",
     );
@@ -20,7 +23,7 @@ describe("manual canary chart publication", () => {
       ".release/opengeni-*.tgz",
     ]);
   });
-  test("historical workflow fixture: admits only exact protected-main dispatch before source or credentials are consumed", () => {
+  test("admits only exact protected-main dispatch before source or credentials are consumed", () => {
     expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
     expect(workflow.permissions).toEqual({ contents: "read" });
     expect(workflow.jobs.publish.permissions).toEqual({ contents: "read", packages: "write" });
@@ -43,7 +46,7 @@ describe("manual canary chart publication", () => {
     }
   });
 
-  test("historical workflow fixture: reuses canonical packaging and run-scoped versions without stable promotion", () => {
+  test("reuses canonical packaging and run-scoped versions without stable promotion", () => {
     expect(source).toContain(
       "workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT)",
     );
@@ -56,7 +59,7 @@ describe("manual canary chart publication", () => {
     expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
   });
 
-  test("historical workflow fixture: only pushes absent references and requires byte/digest readback before a receipt", () => {
+  test("only pushes absent references and requires byte/digest readback before a receipt", () => {
     const steps = workflow.jobs.publish.steps;
     const publish = steps.find(
       (step: { name?: string }) => step.name === "Reconcile or publish and verify bytes",

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolveModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   createResponsesTurn,
   isModelSocketTransportError,

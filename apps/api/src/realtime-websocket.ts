@@ -13,18 +13,15 @@ import type {
   RealtimeVoiceSettings,
   RealtimeWebsocketProtocol,
   SessionRealtimeModel,
+  SessionRealtimeWebsocketInitialItem,
   WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/contracts";
-import { resolveRealtimeVoiceSettings } from "@opengeni/contracts";
+import { resolveWorkspaceRealtimeVoiceSettings } from "@opengeni/contracts";
 import {
   getActiveSessionHistoryItems,
-  getOrganizationModelDefaults,
   getSessionRealtimeContinuityEntries,
-  getWorkspaceProviderApiKeyConnectionMetadata,
   getWorkspaceSettings,
-  loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
-  organizationModelProviderConnectionActiveForWorkspace,
   loadWorkspaceVercelAiGatewayApiKey,
   readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreSessionOwner,
@@ -43,10 +40,7 @@ import {
 } from "@opengeni/xai-subscription";
 
 import { openGeniRealtimeInstructions } from "./codex-realtime";
-import {
-  projectSessionRealtimeInitialItems,
-  realtimeInstructionsWithPriorConversation,
-} from "./session-realtime-context";
+import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
 
 /**
  * Realtime voice providers reached by the browser over a WebSocket.
@@ -96,8 +90,8 @@ export type RealtimeWebsocketConnection = {
   sessionUpdate: Record<string, unknown> | null;
   /** Assistant transcripts carry inline delivery tags such as `[calm]`. */
   transcriptAudioTags?: boolean;
-  /** Opengeni's realtime instructions, without the session's prior conversation. */
   instructions: string;
+  initialItems: SessionRealtimeWebsocketInitialItem[];
 };
 
 type ProviderInput = {
@@ -107,10 +101,11 @@ type ProviderInput = {
   workspaceId: string;
   sessionId: string;
   model: SessionRealtimeModel;
+  instructions: string;
   fetchImpl: typeof fetch;
 };
 
-type MintedConnection = Omit<RealtimeWebsocketConnection, "instructions">;
+type MintedConnection = Omit<RealtimeWebsocketConnection, "instructions" | "initialItems">;
 
 /** Voice settings a model offers, as listed on its catalog entry. */
 export type RealtimeVoiceOptions = Pick<
@@ -136,15 +131,14 @@ type RealtimeWebsocketProvider = {
   /** The provider language code for a BCP 47 tag; required when `languages` is offered. */
   resolveLanguage?(tag: string): string | null;
   /**
-   * Mint the provider connection. `loadInstructions` reads the session history
-   * and returns the session's instructions with its prior conversation; a
-   * provider that must hold a lease while minting runs those reads inside it.
+   * Mint the provider connection. `loadHistory` runs the session history reads;
+   * a provider that must hold a lease while minting runs them inside it.
    * `input.voice` settles with the resolved voice settings.
    */
-  connect(
+  connect<T>(
     input: ProviderInput & { voice: Promise<ResolvedRealtimeVoice> },
-    loadInstructions: () => Promise<string>,
-  ): Promise<MintedConnection>;
+    loadHistory: () => Promise<T>,
+  ): Promise<{ minted: MintedConnection; history: T }>;
 };
 
 const AUDIO_SAMPLE_RATE = 24_000;
@@ -174,14 +168,13 @@ export function realtimeDelegationTool(): Record<string, unknown> {
     type: "function",
     name: "delegate_to_session",
     description:
-      "Relay execution work, actions, and session tasks to the underlying session agent, which decides how to do them.",
+      "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
     parameters: {
       type: "object",
       properties: {
         request: {
           type: "string",
-          description:
-            "The user's request in their own words and language, plus only the conversational context needed to understand it. Do not add tools, methods, steps, or details the user did not say.",
+          description: "Complete standalone task for the session agent",
         },
       },
       required: ["request"],
@@ -202,7 +195,7 @@ const aiGatewayProvider: RealtimeWebsocketProvider = {
     if (upstream.startsWith("xai/")) return { voices: XAI_REALTIME_VOICES };
     return {};
   },
-  async connect(input, loadInstructions) {
+  async connect(input, loadHistory) {
     const resolved = resolveAiGatewayRealtimeModel(input.model);
     if (!resolved) {
       throw new RealtimeWebsocketBrokerError(
@@ -222,8 +215,8 @@ const aiGatewayProvider: RealtimeWebsocketProvider = {
           : "The workspace AI Gateway connection is unavailable",
       );
     }
-    const [instructions, secret, voice] = await Promise.all([
-      loadInstructions(),
+    const [history, secret, voice] = await Promise.all([
+      loadHistory(),
       mintAiGatewayClientSecret({
         apiKey,
         source: resolved.source,
@@ -237,29 +230,32 @@ const aiGatewayProvider: RealtimeWebsocketProvider = {
     );
     url.searchParams.set("ai-model-id", resolved.upstreamModelId);
     return {
-      provider: "ai-gateway",
-      protocol: "ai-gateway",
-      url: url.toString(),
-      protocols: ["ai-gateway-realtime.v1", `ai-gateway-auth.${secret.token}`],
-      token: secret.token,
-      upstreamModelId: resolved.upstreamModelId,
-      expiresAt: secret.expiresAt,
-      sessionUpdate: {
-        type: "session-update",
-        config: {
-          instructions,
-          ...(voice.voice ? { voice: voice.voice } : {}),
-          outputModalities: ["audio"],
-          inputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-          outputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          turnDetection: {
-            type: "server-vad",
-            prefixPaddingMs: 300,
-            silenceDurationMs: 500,
+      history,
+      minted: {
+        provider: "ai-gateway",
+        protocol: "ai-gateway",
+        url: url.toString(),
+        protocols: ["ai-gateway-realtime.v1", `ai-gateway-auth.${secret.token}`],
+        token: secret.token,
+        upstreamModelId: resolved.upstreamModelId,
+        expiresAt: secret.expiresAt,
+        sessionUpdate: {
+          type: "session-update",
+          config: {
+            instructions: input.instructions,
+            ...(voice.voice ? { voice: voice.voice } : {}),
+            outputModalities: ["audio"],
+            inputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+            outputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+            turnDetection: {
+              type: "server-vad",
+              prefixPaddingMs: 300,
+              silenceDurationMs: 500,
+            },
+            tools: [realtimeDelegationTool()],
           },
-          tools: [realtimeDelegationTool()],
         },
       },
     };
@@ -336,7 +332,7 @@ const supergrokProvider: RealtimeWebsocketProvider = {
   errorCodePrefix: "SUPERGROK_REALTIME",
   matches: (model) => model === SUPERGROK_REALTIME_MODEL_ID,
   voiceOptions: () => ({ voices: XAI_REALTIME_VOICES, voiceDefaults: { voice: "eve" } }),
-  async connect(input, loadInstructions) {
+  async connect(input, loadHistory) {
     const unavailable = () =>
       new RealtimeWebsocketBrokerError(
         "credential_unavailable",
@@ -378,7 +374,7 @@ const supergrokProvider: RealtimeWebsocketProvider = {
       },
       async ({ resolver, fetch: requestFetch, fence }) =>
         await Promise.all([
-          loadInstructions(),
+          loadHistory(),
           mintXaiClientSecret({
             context: subscriptionCoreXaiRequestAuth(resolver),
             fetchImpl: async (url, init) => {
@@ -390,37 +386,40 @@ const supergrokProvider: RealtimeWebsocketProvider = {
         ]),
     );
     if (ran.kind === "unavailable") throw unavailable();
-    const [instructions, secret] = ran.value;
+    const [history, secret] = ran.value;
     const voice = await input.voice;
     const url = new URL("wss://api.x.ai/v1/realtime");
     url.searchParams.set("model", SUPERGROK_UPSTREAM_MODEL_ID);
     return {
-      provider: "supergrok",
-      protocol: "openai",
-      url: url.toString(),
-      protocols: [`xai-client-secret.${secret.token}`],
-      token: secret.token,
-      upstreamModelId: SUPERGROK_UPSTREAM_MODEL_ID,
-      expiresAt: secret.expiresAt,
-      sessionUpdate: {
-        type: "session.update",
-        session: {
-          instructions,
-          voice: voice.voice ?? "eve",
-          reasoning: { effort: "high" },
-          turn_detection: {
-            type: "server_vad",
-            prefix_padding_ms: 300,
-            silence_duration_ms: 500,
-          },
-          audio: {
-            input: {
-              format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-              transcription: { model: "grok-transcribe" },
+      history,
+      minted: {
+        provider: "supergrok",
+        protocol: "openai",
+        url: url.toString(),
+        protocols: [`xai-client-secret.${secret.token}`],
+        token: secret.token,
+        upstreamModelId: SUPERGROK_UPSTREAM_MODEL_ID,
+        expiresAt: secret.expiresAt,
+        sessionUpdate: {
+          type: "session.update",
+          session: {
+            instructions: input.instructions,
+            voice: voice.voice ?? "eve",
+            reasoning: { effort: "high" },
+            turn_detection: {
+              type: "server_vad",
+              prefix_padding_ms: 300,
+              silence_duration_ms: 500,
             },
-            output: { format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE } },
+            audio: {
+              input: {
+                format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+                transcription: { model: "grok-transcribe" },
+              },
+              output: { format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE } },
+            },
+            tools: [realtimeDelegationTool()],
           },
-          tools: [realtimeDelegationTool()],
         },
       },
     };
@@ -519,39 +518,6 @@ const ELEVENLABS_REALTIME_VOICES = voiceChoices([
  * comes from the person's language; it sets what the model hears and the
  * language it replies in. An unsupported language keeps the provider default.
  */
-/**
- * The ElevenLabs key a workspace's voice sessions use: the workspace's own
- * key when it has one, else its organization's key.
- */
-export async function loadElevenLabsApiKey(
-  db: Database,
-  settings: Settings,
-  scope: { accountId: string; workspaceId: string },
-): Promise<string | null> {
-  return (
-    (await loadWorkspaceProviderApiKey(db, settings, scope.workspaceId, "elevenlabs")) ??
-    (await loadOrganizationModelProviderApiKey(db, settings, {
-      ...scope,
-      providerKind: "elevenlabs",
-    }))
-  );
-}
-
-/** Whether a workspace has an ElevenLabs key to use, its own or its organization's. */
-export async function elevenLabsKeyAvailable(
-  db: Database,
-  scope: { accountId: string; workspaceId: string },
-): Promise<boolean> {
-  const [own, organization] = await Promise.all([
-    getWorkspaceProviderApiKeyConnectionMetadata(db, scope.workspaceId, "elevenlabs"),
-    organizationModelProviderConnectionActiveForWorkspace(db, {
-      ...scope,
-      providerKind: "elevenlabs",
-    }),
-  ]);
-  return own !== null || organization;
-}
-
 const elevenLabsProvider: RealtimeWebsocketProvider = {
   id: "elevenlabs",
   errorCodePrefix: "ELEVENLABS_REALTIME",
@@ -564,7 +530,7 @@ const elevenLabsProvider: RealtimeWebsocketProvider = {
     voiceDefaults: { voice: ELEVENLABS_DEFAULT_VOICE, turnEagerness: "high" },
   }),
   resolveLanguage: resolveElevenLabsRealtimeLanguage,
-  async connect(input, loadInstructions) {
+  async connect(input, loadHistory) {
     const upstreamModelId = resolveElevenLabsRealtimeModel(input.model);
     if (!upstreamModelId) {
       throw new RealtimeWebsocketBrokerError(
@@ -572,11 +538,9 @@ const elevenLabsProvider: RealtimeWebsocketProvider = {
         "The selected model is not an Eleven Realtime model",
       );
     }
-    // The mint carries the instructions, so the history is read alongside the key.
-    const [apiKey, voice, instructions] = await Promise.all([
-      loadElevenLabsApiKey(input.db, input.settings, input),
+    const [apiKey, voice] = await Promise.all([
+      loadWorkspaceProviderApiKey(input.db, input.settings, input.workspaceId, "elevenlabs"),
       input.voice,
-      loadInstructions(),
     ]);
     if (!apiKey) {
       throw new RealtimeWebsocketBrokerError(
@@ -584,41 +548,47 @@ const elevenLabsProvider: RealtimeWebsocketProvider = {
         "Connect an ElevenLabs API key to use this voice model",
       );
     }
-    const secret = await mintElevenLabsClientSecret({
-      apiKey,
-      fetchImpl: input.fetchImpl,
-      session: {
-        type: "realtime",
-        model: upstreamModelId,
-        instructions,
-        output_modalities: ["audio"],
-        audio: {
-          input: {
-            format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-            transcription: voice.language === undefined ? {} : { language: voice.language },
-            turn_detection: { type: "semantic_vad", eagerness: voice.turnEagerness ?? "high" },
+    const [history, secret] = await Promise.all([
+      loadHistory(),
+      mintElevenLabsClientSecret({
+        apiKey,
+        fetchImpl: input.fetchImpl,
+        session: {
+          type: "realtime",
+          model: upstreamModelId,
+          instructions: input.instructions,
+          output_modalities: ["audio"],
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+              transcription: voice.language === undefined ? {} : { language: voice.language },
+              turn_detection: { type: "semantic_vad", eagerness: voice.turnEagerness ?? "high" },
+            },
+            output: {
+              format: { type: "audio/pcm" },
+              ...(voice.voice ? { voice: voice.voice } : {}),
+            },
           },
-          output: {
-            format: { type: "audio/pcm" },
-            ...(voice.voice ? { voice: voice.voice } : {}),
-          },
+          tools: [realtimeDelegationTool()],
+          max_duration_seconds: ELEVENLABS_MAX_SESSION_SECONDS,
         },
-        tools: [realtimeDelegationTool()],
-        max_duration_seconds: ELEVENLABS_MAX_SESSION_SECONDS,
-      },
-    });
+      }),
+    ]);
     const url = new URL("wss://api.elevenlabs.io/v1/convai/realtime");
     url.searchParams.set("model", upstreamModelId);
     return {
-      provider: "elevenlabs",
-      protocol: "openai",
-      url: url.toString(),
-      protocols: ["realtime", `openai-insecure-api-key.${secret.token}`],
-      token: secret.token,
-      upstreamModelId,
-      expiresAt: secret.expiresAt,
-      sessionUpdate: null,
-      transcriptAudioTags: true,
+      history,
+      minted: {
+        provider: "elevenlabs",
+        protocol: "openai",
+        url: url.toString(),
+        protocols: ["realtime", `openai-insecure-api-key.${secret.token}`],
+        token: secret.token,
+        upstreamModelId,
+        expiresAt: secret.expiresAt,
+        sessionUpdate: null,
+        transcriptAudioTags: true,
+      },
     };
   },
 };
@@ -770,21 +740,18 @@ export async function createRealtimeWebsocketConnection(input: {
   }
   const instructions = openGeniRealtimeInstructions();
   // Read alongside the provider's credential, not before it.
-  const voice = Promise.all([
-    getWorkspaceSettings(input.db, input.workspaceId),
-    getOrganizationModelDefaults(input.db, input.accountId),
-  ]).then(([settings, organizationDefaults]) =>
+  const voice = getWorkspaceSettings(input.db, input.workspaceId).then((settings) =>
     resolveRealtimeVoice({
       provider,
       model: input.model,
       connection: input.voiceSettings,
-      workspace: resolveRealtimeVoiceSettings(settings, organizationDefaults, input.model),
+      workspace: resolveWorkspaceRealtimeVoiceSettings(settings, input.model),
       personLanguage: input.language,
     }),
   );
   // A provider that fails before reading it must not leave it unhandled.
   voice.catch(() => undefined);
-  const minted = await provider.connect(
+  const { minted, history } = await provider.connect(
     {
       db: input.db,
       settings: input.settings,
@@ -792,19 +759,19 @@ export async function createRealtimeWebsocketConnection(input: {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       model: input.model,
+      instructions,
       voice,
       fetchImpl: input.fetchImpls?.[provider.id] ?? fetch,
     },
-    async () => {
-      const [history, continuity] = await Promise.all([
+    async () =>
+      await Promise.all([
         getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
         getSessionRealtimeContinuityEntries(input.db, input.workspaceId, input.sessionId),
-      ]);
-      return realtimeInstructionsWithPriorConversation(
-        instructions,
-        projectSessionRealtimeInitialItems(history, continuity),
-      );
-    },
+      ]),
   );
-  return { ...minted, instructions };
+  return {
+    ...minted,
+    instructions,
+    initialItems: projectSessionRealtimeInitialItems(history[0], history[1]),
+  };
 }

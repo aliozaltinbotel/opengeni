@@ -12,7 +12,7 @@ test("uses the authenticated email across provider metadata shapes", () => {
   }
 });
 
-test("uses real workspace names without displaying provider IDs", () => {
+test("distinguishes Slack workspaces and truthfully falls back to verified IDs", () => {
   expect(
     connectionAccountIdentityLabel(
       { slackUserName: "member", slackTeamName: "Community" },
@@ -21,7 +21,7 @@ test("uses real workspace names without displaying provider IDs", () => {
   ).toBe("member · Community");
   expect(
     connectionAccountIdentityLabel({ slackUserId: "U_ONE", slackTeamId: "T_ONE" }, "Slack account"),
-  ).toBe("Slack account");
+  ).toBe("U_ONE · T_ONE");
 });
 
 test("ignores malformed identities and bounds presentation without mutating metadata", () => {

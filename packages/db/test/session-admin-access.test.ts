@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 
@@ -13,16 +13,14 @@ import {
   revokeSessionAdminAccess,
   SessionAdminAccessNotAllowedError,
   SessionAdminAccessNotOwnSessionError,
-  SessionAdminAccessNotWorkspaceMemberError,
   setOrganizationAgentAdminAccess,
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "../src";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
-// Full access for agent sessions (stored as admin access): allowed per
-// organization (off by default), given by any member of the session's
-// workspace (or an owner or admin) to a session they started, and checked live.
+// Admin access for agent sessions: allowed per organization (off by default),
+// given by an owner or admin to their own session, and checked live.
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -137,7 +135,7 @@ describe("session admin access", () => {
     ).toBeNull();
   });
 
-  test("a member of the workspace, owner or admin gives only their own session, and it acts as them", async () => {
+  test("an owner or admin gives only their own session, and it acts as them", async () => {
     if (!client) return;
     const db = client.db;
     const org = await organization("admin-access-grant");
@@ -166,14 +164,16 @@ describe("session admin access", () => {
     await expect(
       grantSessionAdminAccess(db, { ...target, sessionId: spawned, actorSubjectId: org.owner }),
     ).rejects.toBeInstanceOf(SessionAdminAccessNotOwnSessionError);
-    // A member who can't use the workspace can't give even their own session access.
-    await expect(
-      grantSessionAdminAccess(db, {
-        ...target,
-        sessionId: membersSession,
-        actorSubjectId: org.member,
-      }),
-    ).rejects.toBeInstanceOf(SessionAdminAccessNotWorkspaceMemberError);
+    // A member can't give admin access even to their own session.
+    expect(
+      await sqlState(
+        grantSessionAdminAccess(db, {
+          ...target,
+          sessionId: membersSession,
+          actorSubjectId: org.member,
+        }),
+      ),
+    ).toBe("42501");
 
     const granted = await grantSessionAdminAccess(db, {
       ...target,
@@ -196,43 +196,6 @@ describe("session admin access", () => {
       grantedAt: granted.grantedAt,
       expiresAt: null,
     });
-    expect(
-      await resolveSessionAdminAuthority(db, { ...key, sessionId: membersSession }),
-    ).toBeNull();
-
-    // Once they belong to the workspace, a member gives their own session their
-    // access, and it lasts only while they still belong to it.
-    await shared!.admin`
-      insert into workspace_memberships (account_id, workspace_id, subject_id)
-      values (${org.accountId}, ${org.workspaceId}, ${org.member})`;
-    const membersGrant = await grantSessionAdminAccess(db, {
-      ...target,
-      sessionId: membersSession,
-      actorSubjectId: org.member,
-    });
-    expect(membersGrant.grantedBySubjectId).toBe(org.member);
-    expect(
-      await resolveSessionAdminAuthority(db, { ...key, sessionId: membersSession }),
-    ).toMatchObject({ subjectId: org.member });
-    expect(
-      await getSessionAdminAccessView(db, {
-        ...key,
-        sessionId: membersSession,
-        viewerSubjectId: org.member,
-      }),
-    ).toMatchObject({ active: true, viewerStartedSession: true, viewerIsAdministrator: false });
-    await shared!.admin`
-      update organization_memberships set status = 'suspended'
-      where account_id = ${org.accountId} and subject_id = ${org.member}`;
-    expect(
-      await resolveSessionAdminAuthority(db, { ...key, sessionId: membersSession }),
-    ).toBeNull();
-    await shared!.admin`
-      update organization_memberships set status = 'active'
-      where account_id = ${org.accountId} and subject_id = ${org.member}`;
-    await shared!.admin`
-      delete from workspace_memberships
-      where workspace_id = ${org.workspaceId} and subject_id = ${org.member}`;
     expect(
       await resolveSessionAdminAuthority(db, { ...key, sessionId: membersSession }),
     ).toBeNull();
@@ -270,7 +233,7 @@ describe("session admin access", () => {
     expect(await revokeSessionAdminAccess(db, { ...key, sessionId: ownersSession })).toBe(false);
   });
 
-  test("ends when the person loses their access to the workspace or the organization turns it off", async () => {
+  test("ends when the person loses their role or the organization turns it off", async () => {
     if (!client) return;
     const db = client.db;
     const org = await organization("admin-access-live");
@@ -298,7 +261,6 @@ describe("session admin access", () => {
       await resolveSessionAdminAuthority(db, { ...key, sessionId: adminsSession }),
     ).not.toBeNull();
 
-    // The admin had the workspace only through their role (no membership row).
     await shared!.admin`
       update organization_memberships set role = 'member'
       where account_id = ${org.accountId} and subject_id = ${org.admin}`;

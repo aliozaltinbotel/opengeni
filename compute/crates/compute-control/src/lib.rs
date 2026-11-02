@@ -32,7 +32,6 @@ pub mod group;
 pub mod hostapi;
 pub mod hosts;
 pub mod identity;
-pub mod images;
 pub mod init;
 pub mod keys;
 pub mod leader;
@@ -43,7 +42,6 @@ pub mod store;
 pub mod tls;
 pub mod view;
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,10 +64,6 @@ use crate::view::View;
 /// How long a create's request id keeps answering that its sandbox is
 /// gone, counted from the deletion.
 pub const REQUESTS_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
-/// How long a host given up on stays listed (`GET /v1/hosts`, state
-/// `lost`) before the service forgets it, counted from the give-up.
-pub const LOST_HOSTS_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How a replica runs.
 #[derive(Debug)]
@@ -102,10 +96,6 @@ pub struct Config {
     /// The OTLP/HTTP metrics endpoint hosts' metrics are passed on to;
     /// `None` takes none.
     pub host_metrics: Option<String>,
-    /// The OCI image, pinned by digest, each of these image names starts
-    /// from in this release, built into a stored image when none was
-    /// ([`images`]).
-    pub image_sources: BTreeMap<String, String>,
 }
 
 /// A running replica; dropping it stops it.
@@ -137,8 +127,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     terms
         .validate()
         .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
-    let give_up_after = config.settings.give_up_after;
-    let view = Arc::new(View::new(config.seed, terms.term));
+    let view = Arc::new(View::new(config.seed));
     let service = Arc::new(Service::new(
         Arc::clone(&store),
         Arc::clone(&view),
@@ -180,7 +169,6 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             Arc::clone(&store),
             Arc::clone(&view),
             terms,
-            give_up_after,
             config.scaling,
             Arc::clone(&metrics),
         )),
@@ -192,10 +180,20 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             config.api_tls,
             "the public API",
         )),
-        tokio::spawn(prune(Arc::clone(&service))),
-        tokio::spawn(images::follow(Arc::clone(&service), config.image_sources)),
+        tokio::spawn(prune_requests(Arc::clone(&service))),
     ];
-    let metrics = serve_metrics(config.metrics, metrics, &view, &mut tasks).await?;
+    let metrics = match config.metrics {
+        Some(address) => {
+            let listener = TcpListener::bind(address)
+                .await
+                .with_context(|| format!("listening for Prometheus on {address}"))?;
+            let bound = listener.local_addr()?;
+            let router = metrics::router(metrics, Arc::clone(&view));
+            tasks.push(tokio::spawn(metrics::serve(listener, router)));
+            Some(bound)
+        }
+        None => None,
+    };
     let e2b = match config.e2b {
         Some(e2b::listen::Listen {
             address,
@@ -224,33 +222,11 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     })
 }
 
-/// Serves Prometheus metrics on `address`, if one is set, among `tasks`;
-/// returns the address bound.
-async fn serve_metrics(
-    address: Option<SocketAddr>,
-    metrics: Arc<Metrics>,
-    view: &Arc<View>,
-    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> anyhow::Result<Option<SocketAddr>> {
-    let Some(address) = address else {
-        return Ok(None);
-    };
-    let listener = TcpListener::bind(address)
-        .await
-        .with_context(|| format!("listening for Prometheus on {address}"))?;
-    let bound = listener.local_addr()?;
-    let router = metrics::router(metrics, Arc::clone(view));
-    tasks.push(tokio::spawn(metrics::serve(listener, router)));
-    Ok(Some(bound))
-}
-
 /// Forgets, once an hour, the requests whose sandboxes were deleted more
-/// than [`REQUESTS_KEPT`] ago, and the hosts given up on more than
-/// [`LOST_HOSTS_KEPT`] ago. Every replica does it; deleting twice is
+/// than [`REQUESTS_KEPT`] ago. Every replica does it; deleting twice is
 /// harmless.
-async fn prune<S: Store>(service: Arc<Service<S>>) {
+async fn prune_requests<S: Store>(service: Arc<Service<S>>) {
     let keep = u64::try_from(REQUESTS_KEPT.as_millis()).unwrap_or(u64::MAX);
-    let keep_hosts = u64::try_from(LOST_HOSTS_KEPT.as_millis()).unwrap_or(u64::MAX);
     let mut every = tokio::time::interval(Duration::from_secs(60 * 60));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -259,11 +235,6 @@ async fn prune<S: Store>(service: Arc<Service<S>>) {
             Ok(0) => {}
             Ok(pruned) => tracing::info!(pruned, "forgot old create requests"),
             Err(error) => tracing::warn!(%error, "forgetting old create requests failed"),
-        }
-        match service.prune_hosts(keep_hosts).await {
-            Ok(0) => {}
-            Ok(pruned) => tracing::info!(pruned, "forgot hosts given up on"),
-            Err(error) => tracing::warn!(%error, "forgetting hosts given up on failed"),
         }
     }
 }

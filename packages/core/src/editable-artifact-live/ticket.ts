@@ -13,7 +13,7 @@ import {
   type EditableArtifactModality,
   type EditableArtifactScope,
 } from "../domain/editable-artifacts/types";
-import { EditableArtifactLiveError } from "@opengeni/contracts/editable-artifact-live";
+import { EditableArtifactLiveError } from "./errors";
 import type {
   EditableArtifactLiveClockPort,
   EditableArtifactLiveTicketStorePort,

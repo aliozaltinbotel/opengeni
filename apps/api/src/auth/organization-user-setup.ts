@@ -1,6 +1,5 @@
 import type { Settings } from "@opengeni/config";
 import type { ManagedEmailTransport } from "@opengeni/core";
-import { escapeHtml } from "./email-html";
 
 const encoder = new TextEncoder();
 export type OrganizationUserSetupEmailTokenTransport = "fragment" | "query";
@@ -17,7 +16,7 @@ export function assertOrganizationUserSetupDeliveryConfigured(
 ): void {
   assertOrganizationUserSetupQueryTransportConfigured(settings);
   requiredSetupSecret(settings);
-  requiredSetupWebBaseUrl(settings);
+  requiredPublicBaseUrl(settings);
   assertManagedEmailTransportMetadata(transport);
 }
 
@@ -86,7 +85,7 @@ export async function deriveOrganizationUserSetupToken(
   );
   const token = base64Url(new Uint8Array(signature));
   const digest = await sha256Hex(token);
-  const url = new URL("/setup-account", requiredSetupWebBaseUrl(settings));
+  const url = new URL("/setup-account", requiredPublicBaseUrl(settings));
   if ((input.transport ?? settings.organizationUserSetupEmailTokenTransport) === "query") {
     // Email security gateways routinely wrap links and may discard URL
     // fragments. Enable this only after the compatibility web rollout; the
@@ -100,8 +99,6 @@ export async function deriveOrganizationUserSetupToken(
 }
 
 export type OrganizationUserSetupEmailSnapshot = {
-  /** The product the invitation names (`settings.productName`). */
-  productName: string;
   senderEmail: string;
   recipientEmail: string;
   recipientName: string | null;
@@ -123,8 +120,6 @@ export function renderOrganizationUserSetupEmail(input: OrganizationUserSetupEma
   html: string;
 } {
   const greeting = input.recipientName ? `Hi ${input.recipientName},` : "Hello,";
-  const product = input.productName;
-  const productHtml = escapeHtml(product);
   const role = titleCase(input.organizationRole);
   const workspaceSummary =
     input.sharedWorkspaceAccess.length === 0
@@ -144,9 +139,9 @@ export function renderOrganizationUserSetupEmail(input: OrganizationUserSetupEma
   return {
     from: input.senderEmail,
     to: input.recipientEmail,
-    subject: `You're invited to join ${input.organizationName} on ${product}`,
-    text: `${greeting}\n\nYou've been invited to join ${input.organizationName} on ${product} as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nAccept invitation to ${input.organizationName}: ${input.setupUrl}\n\nYou'll sign in or create an account before joining. Already use ${product}? Open this invitation and choose Sign in as ${input.recipientEmail}. ${product} will show the invitation immediately after you sign in.`,
-    html: `<p>${escapeHtml(greeting)}</p><p>You've been invited to join <strong>${escapeHtml(input.organizationName)}</strong> on ${productHtml} as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Accept invitation to ${escapeHtml(input.organizationName)}</a></p><p>You'll sign in or create an account before joining. Already use ${productHtml}? Open this invitation and choose <strong>Sign in as ${escapeHtml(input.recipientEmail)}</strong>. ${productHtml} will show the invitation immediately after you sign in.</p>`,
+    subject: `You're invited to join ${input.organizationName} on Opengeni`,
+    text: `${greeting}\n\nYou've been invited to join ${input.organizationName} on Opengeni as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nAccept invitation to ${input.organizationName}: ${input.setupUrl}\n\nYou'll sign in or create an account before joining. Already use Opengeni? Open this invitation and choose Sign in as ${input.recipientEmail}. Opengeni will show the invitation immediately after you sign in.`,
+    html: `<p>${escapeHtml(greeting)}</p><p>You've been invited to join <strong>${escapeHtml(input.organizationName)}</strong> on Opengeni as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Accept invitation to ${escapeHtml(input.organizationName)}</a></p><p>You'll sign in or create an account before joining. Already use Opengeni? Open this invitation and choose <strong>Sign in as ${escapeHtml(input.recipientEmail)}</strong>. Opengeni will show the invitation immediately after you sign in.</p>`,
   };
 }
 
@@ -205,7 +200,6 @@ export async function resolveOrganizationUserSetupDeliveryEmail(
       transport,
     });
     const message = renderOrganizationUserSetupEmail({
-      productName: settings.productName,
       senderEmail: input.senderEmail,
       recipientEmail: input.recipientEmail,
       recipientName: input.recipientName,
@@ -277,12 +271,11 @@ function requiredSetupSecret(settings: Settings): string {
   return settings.betterAuthSecret;
 }
 
-function requiredSetupWebBaseUrl(settings: Settings): string {
-  const baseUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
-  if (!baseUrl) {
+function requiredPublicBaseUrl(settings: Settings): string {
+  if (!settings.publicBaseUrl) {
     throw new Error("OPENGENI_PUBLIC_BASE_URL is required for organization user setup");
   }
-  return baseUrl;
+  return settings.publicBaseUrl;
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -302,4 +295,13 @@ function base64Url(bytes: Uint8Array): string {
 
 function titleCase(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }

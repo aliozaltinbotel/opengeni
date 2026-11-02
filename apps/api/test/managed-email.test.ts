@@ -6,12 +6,11 @@ import {
 } from "../src/auth/managed-email";
 import {
   assertManagedEmailTransportMetadata,
-  deriveOrganizationUserSetupToken,
   organizationUserSetupPayloadDigest,
   renderOrganizationUserSetupEmail,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../src/auth/organization-user-setup";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 
 const message = {
   kind: "organization_user_setup" as const,
@@ -80,7 +79,6 @@ describe("managed email transport", () => {
 
   test("renders an escaped, frozen safe snapshot with a stable payload digest", async () => {
     const rendered = renderOrganizationUserSetupEmail({
-      productName: "Opengeni",
       senderEmail: "Opengeni <invites@example.test>",
       recipientEmail: "invited@example.test",
       recipientName: "Ada <Admin>",
@@ -189,93 +187,4 @@ describe("managed email transport", () => {
       }),
     ).rejects.toThrow("does not match its frozen payload");
   });
-});
-
-
-test("split-origin setup email opens the configured console and preserves the canonical bearer", async () => {
-  const settings = testSettings({ publicBaseUrl: "https://api.example.test", webBaseUrl: "https://console.example.test",
-    betterAuthSecret: "synthetic-managed-auth-secret-at-least-32-bytes" });
-  const input = { invitationId: crypto.randomUUID(), deliveryId: crypto.randomUUID() };
-  const split = await deriveOrganizationUserSetupToken(settings, input);
-  const same = await deriveOrganizationUserSetupToken({ ...settings, webBaseUrl: undefined }, input);
-  expect(new URL(split.url).origin).toBe("https://console.example.test");
-  expect(new URL(split.url).pathname).toBe("/setup-account");
-  expect(split.token).toBe(same.token);
-  expect(split.digest).toBe(same.digest);
-  expect(new URL(split.url).hash).toBe(new URL(same.url).hash);
-});
-
-test("split-origin verification keeps the API endpoint and accepts only a trusted console callback", async () => {
-  const { verificationUrl, verificationUrlForConsole } = await import("../src/auth/managed-auth");
-  const settings = testSettings({ publicBaseUrl: "https://api.example.test", webBaseUrl: "https://console.example.test",
-    consoleAllowedOrigins: "https://console.example.test", betterAuthSecret: "synthetic-managed-auth-secret-at-least-32-bytes" });
-  const url = new URL(await verificationUrl(settings, "fixture@example.invalid"));
-  expect(url.origin).toBe("https://api.example.test");
-  expect(url.pathname).toBe("/v1/auth/verify-email");
-  expect(url.searchParams.get("callbackURL")).toBe("https://console.example.test/");
-  expect(url.searchParams.get("token")).toBeTruthy();
-  const generated = "https://api.example.test/v1/auth/verify-email?token=synthetic-test-token&callbackURL=%2F";
-  const legacy = new URL(verificationUrlForConsole(settings, generated));
-  expect(legacy.origin + legacy.pathname).toBe("https://api.example.test/v1/auth/verify-email");
-  expect(legacy.searchParams.get("token")).toBe("synthetic-test-token");
-  expect(legacy.searchParams.get("callbackURL")).toBe("https://console.example.test/");
-  expect(verificationUrlForConsole({ ...settings, webBaseUrl: undefined }, generated)).toBe(generated);
-  const explicit = new URL(generated);
-  explicit.searchParams.set("callbackURL", "https://console.example.test/workspaces");
-  expect(verificationUrlForConsole(settings, explicit.toString())).toBe(explicit.toString());
-  await expect(verificationUrl({ ...settings, webBaseUrl: "https://untrusted.example.test" }, "fixture@example.invalid")).rejects.toThrow("trusted");
-});
-
-test("split-origin verification returns signup root markers to the console", async () => {
-  const { verificationUrlForConsole } = await import("../src/auth/managed-auth");
-  const settings = testSettings({
-    publicBaseUrl: "https://api.example.test",
-    webBaseUrl: "https://console.example.test",
-    consoleAllowedOrigins: "https://console.example.test",
-  });
-  for (const callback of [
-    "/?auth_event=email_verified",
-    "/?utm_source=fixture&auth_event=email_verified#return",
-    "https://api.example.test/?auth_event=email_verified",
-  ]) {
-    const original = new URL("https://api.example.test/v1/auth/verify-email");
-    original.searchParams.set("token", "synthetic-verification-fixture");
-    original.searchParams.set("callbackURL", callback);
-    const delivered = new URL(verificationUrlForConsole(settings, original.toString()));
-    expect(delivered.origin).toBe(original.origin);
-    expect(delivered.pathname).toBe(original.pathname);
-    expect(delivered.searchParams.get("token")).toBe(original.searchParams.get("token"));
-    const expected = new URL(callback, settings.publicBaseUrl);
-    expected.host = "console.example.test";
-    expect(delivered.searchParams.get("callbackURL")).toBe(expected.toString());
-  }
-});
-
-
-test("verification callback rewriting preserves explicit destinations and trust refusal", async () => {
-  const { verificationUrlForConsole } = await import("../src/auth/managed-auth");
-  const settings = testSettings({
-    publicBaseUrl: "https://api.example.test",
-    webBaseUrl: "https://console.example.test",
-    consoleAllowedOrigins: "https://console.example.test",
-  });
-  for (const callback of [
-    "https://console.example.test/workspaces?auth_event=email_verified",
-    "/connect-agent?auth_event=email_verified",
-    "//other.example.test/?auth_event=email_verified",
-    "https://other.example.test/?auth_event=email_verified",
-    "https://fixture:fixture@api.example.test/",
-    "javascript:fixture()",
-    "https://[invalid",
-  ]) {
-    const original = new URL("https://api.example.test/v1/auth/verify-email");
-    original.searchParams.set("token", "synthetic-verification-fixture");
-    original.searchParams.set("callbackURL", callback);
-    expect(verificationUrlForConsole(settings, original.toString())).toBe(original.toString());
-  }
-  const original = new URL("https://api.example.test/v1/auth/verify-email");
-  original.searchParams.set("callbackURL", "/?auth_event=email_verified");
-  expect(() => verificationUrlForConsole({
-    ...settings, webBaseUrl: "https://other.example.test",
-  }, original.toString())).toThrow("trusted");
 });

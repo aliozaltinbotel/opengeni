@@ -90,22 +90,12 @@ export type InteractionDiscovery = {
   computers: ComputerSession[];
   identities: BrowserIdentity[];
   /** Online machines ready for the extension; listed only when no attached
-   * profile is connected. `machine` is the computer's plain name;
-   * `onThisMachine` marks the computer this session runs on. */
-  attachedBrowserBridges: Array<{
-    enrollmentId: string;
-    machine?: string;
-    onThisMachine?: true;
-    connectedProfileCount: number;
-  }>;
+   * profile is connected. */
+  attachedBrowserBridges: Array<{ enrollmentId: string; connectedProfileCount: number }>;
   attachedBrowsers: Array<{
     id: string;
     name: string;
     profileLabel?: string;
-    /** The computer this profile is on, by its plain name. */
-    machine?: string;
-    /** Present when that computer is the one this session runs on. */
-    onThisMachine?: true;
     browserName: string;
     platform: AttachedBrowserDevice["platform"];
     state: AttachedBrowserDevice["state"];
@@ -122,8 +112,7 @@ export type CodemodeBrowserOpenOptions = {
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
   /** `{ kind: "attached_device" }` without a deviceId opens the person's own
-   * connected Chrome (the only, or most recently active, profile, preferring
-   * one on the computer this session runs on). */
+   * connected Chrome (the only, or most recently active, profile). */
   placement?: InteractionPlacement | { kind: "attached_device" } | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
@@ -182,11 +171,6 @@ export type CodemodeBrowserAgentNode = Readonly<{
   name?: string;
   description?: string;
   value?: string | { redacted: true; reason: string };
-  /** Full length of a name, description or value the outline clipped; read
-   * the rest with a dom read of this ref. Absent when nothing was clipped. */
-  nameChars?: number;
-  descriptionChars?: number;
-  valueChars?: number;
   /** Omitted when empty. */
   states?: readonly string[];
   /** Omitted when empty. */
@@ -202,9 +186,6 @@ export type CodemodeBrowserAgentView = Readonly<{
   omittedRegions?: readonly Readonly<{ role: string; name?: string; count: number }>[];
   removedRefCount?: number;
   clippedFieldCount?: number;
-  /** The page was too large to read whole: at least this many elements were
-   * left unread. The view keeps the page's structure and the part on screen. */
-  unreadNodeCount?: number;
 }>;
 
 /** A tab with the identity, page, selection and fences a next call needs. */
@@ -278,7 +259,6 @@ export type CodemodeBrowserDomReadOptions = BrowserActionFences &
           locator: BrowserDomReadLocator;
           attributes?: readonly BrowserDomSafeAttribute[];
           maxChars?: number;
-          offset?: number;
         }
       | { kind: "count"; selector: string };
   }>;
@@ -306,11 +286,7 @@ export type CodemodeBrowserAxReadResult = Readonly<{
 
 export type CodemodeBrowserReadResult =
   | CodemodeBrowserAxReadResult
-  | (BrowserDomReadResponse & {
-      source: "dom";
-      /** Offset of the next page when the text or value was cut. */
-      nextOffset?: number;
-    });
+  | (BrowserDomReadResponse & { source: "dom" });
 
 export type ComputerActionFences = {
   expectedTargetGeneration?: string | undefined;
@@ -949,12 +925,12 @@ export class CodemodeBrowserTab {
     return new CodemodeBrowserLocator(this, { kind: "role", role, ...options });
   }
 
-  getByText(text: string, exact?: boolean) {
-    return new CodemodeBrowserLocator(this, { kind: "text", text, ...(exact ? { exact } : {}) });
+  getByText(text: string) {
+    return new CodemodeBrowserLocator(this, { kind: "text", text });
   }
 
-  getByLabel(text: string, exact?: boolean) {
-    return new CodemodeBrowserLocator(this, { kind: "label", text, ...(exact ? { exact } : {}) });
+  getByLabel(text: string) {
+    return new CodemodeBrowserLocator(this, { kind: "label", text });
   }
 
   getByPlaceholder(text: string) {

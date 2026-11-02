@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   managedVideoGenerationCredentialLease,
   videoCapabilitiesForTurn,

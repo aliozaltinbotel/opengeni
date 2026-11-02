@@ -12,22 +12,13 @@ import {
   McpConnectionDecision,
   McpOAuthTokenResponse,
   OrganizationAccessPolicy,
-  OrganizationAccessPreset,
   organizationAccessPresetPermissions,
   type AccessContext,
-  type Permission,
   type AccessGrant,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
 } from "@opengeni/contracts";
 import {
-  freezeMcpOAuthHostProposal,
-  readMcpOAuthHostProposal,
-  activeCanonicalHumanLoginBinding,
-  getCanonicalHumanIdentityProjection,
-  type McpOAuthHostProposal,
-  type McpOAuthHostHuman,
-  type McpOAuthAuthorizationRequest,
   consumeMcpOAuthAuthorizationRequest,
   createMcpOAuthAuthorizationRequest,
   deleteMcpOAuthAuthorizationRequest,
@@ -48,31 +39,20 @@ import {
   type McpOAuthAccess,
 } from "@opengeni/db";
 import {
-  organizationGovernedByHost,
   hasPermission,
   requireAccessContext,
   requireAccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { requireCanonicalHumanRequestIdentity } from "@opengeni/core/canonical-human-identities";
-import { readSessionAuthentication } from "./auth/session-authentication";
-import { z } from "zod";
-import type { Settings } from "@opengeni/config";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
 import { requireSameOriginBrowserMutation } from "./http/browser-mutation-origin";
 import {
-  mcpOAuthConsentReadsOnly,
   prepareWorkspaceToolGateway,
-  prepareWorkspaceToolGatewayForGrant,
   requireWorkspaceToolGatewayAuthorization,
-  workspaceToolDeclaresReadOnly,
-  type PreparedWorkspaceToolGateway,
 } from "./workspace-tool-gateway";
-import { parseRequestBody } from "./http/request-body";
-import { requireNativeOrganizationMutation } from "./http/organization-governance";
 
 const CLIENT_PREFIX = "ogmcp_client_";
 const REQUEST_PREFIX = "ogmcp_req_";
@@ -96,10 +76,6 @@ export type McpOAuthResource = {
 export type McpOAuthRouteAccess = {
   grant: AccessGrant;
   allowedToolIdentities: ToolGatewayIdentity[];
-  /** The host tool-set versions recorded at consent, by server id; null when none were. */
-  consentedToolSetVersions: Record<string, string> | null;
-  /** The access level recorded at consent; null for a consent from before levels existed. */
-  consentPreset: OrganizationAccessPreset | null;
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -272,28 +248,15 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         permissions: grant.permissions,
         toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
         organizationAccess: null,
-        consentPreset: "full",
-        toolSetVersions: consentToolSetVersions(prepared),
         expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
       });
     } finally {
       await prepared.close();
     }
-    const governed = await organizationGovernedByHost(deps, grant.accountId);
-    const hostProposal =
-      governed && deps.mcpOAuthHostConsent
-        ? await freezeMcpOAuthHostProposal(deps.db, {
-            requestHash: tokenHash(requestToken),
-            organizationId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            subjectId: grant.subjectId,
-            human: await requireMcpOAuthHostBrowserHuman(c, deps, grant.subjectId),
-          })
-        : null;
     const accounts = await consentAccountsForWorkspaces(deps, workspaces);
     c.header(
       "content-security-policy",
-      `default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'${hostProposal ? "; connect-src 'self'" : ""}`,
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     );
     c.header("cache-control", "no-store");
     return c.html(
@@ -308,73 +271,8 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
           kind: workspace.kind,
         })),
         selectedWorkspaceId: grant.workspaceId,
-        permissions: grant.permissions,
-        ...(hostProposal ? { hostProposal } : {}),
       }),
     );
-  });
-
-  app.post("/oauth/authorize/host-consent", async (c) => {
-    requireMcpOAuthEnabled(deps);
-    requireSameOriginBrowserMutation(c, deps);
-    const body = z
-      .object({ form: z.string().min(1).max(65_536) })
-      .strict()
-      .safeParse(await c.req.json().catch(() => null));
-    if (!body.success) throw new HTTPException(400, { message: "Invalid consent request" });
-    const form = new URLSearchParams(body.data.form);
-    if (form.get("decision") !== "approve")
-      throw new HTTPException(403, { message: "Explicit approval is required" });
-    const requestToken = form.get("request") ?? "";
-    const request = requestToken.startsWith(REQUEST_PREFIX)
-      ? await getMcpOAuthAuthorizationRequest(deps.db, tokenHash(requestToken))
-      : null;
-    if (!request || request.workspaceId === null)
-      throw new HTTPException(410, { message: "Pending workspace consent is unavailable" });
-    const selectedWorkspaceId = form.get("workspace_id") || request.workspaceId;
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      selectedWorkspaceId,
-      "workspace:read",
-    );
-    const grant = requireWorkspaceToolGatewayAuthorization(authorization);
-    if (!(await organizationGovernedByHost(deps, grant.accountId)))
-      throw new HTTPException(403, { message: "Host consent is unavailable" });
-    const before = await readMcpOAuthHostProposal(deps.db, {
-      requestHash: request.requestHash,
-      organizationId: request.accountId,
-    });
-    const proposal = await prepareMcpOAuthHostProposal(c, deps, request, form);
-    c.header("cache-control", "no-store");
-    if (
-      !before ||
-      !matchesDisplayedMcpOAuthProposal(form, before) ||
-      proposal.digest !== before.digest ||
-      proposal.revision !== before.revision
-    ) {
-      return c.html(await renderMcpOAuthHostReview(c, deps, requestToken, proposal, form), 409);
-    }
-    if (!deps.mcpOAuthHostConsent)
-      throw new HTTPException(403, { message: "Host consent is unavailable" });
-    const credential = c.req.header(MCP_OAUTH_HOST_CREDENTIAL_HEADER);
-    if (!credential)
-      throw new HTTPException(401, { message: "Host consent credential is required" });
-    await runMcpOAuthHostHandoff(deps.mcpOAuthHostConsent, proposal, credential);
-    // A callback acknowledgement is not the HOST command's durable admission.
-    const stored = await readMcpOAuthHostProposal(deps.db, {
-      requestHash: proposal.requestHash,
-      organizationId: proposal.organizationId,
-    });
-    if (
-      !stored?.admitted ||
-      stored.digest !== proposal.digest ||
-      stored.revision !== proposal.revision ||
-      stored.operationId !== proposal.operationId
-    ) {
-      throw new HTTPException(503, { message: "MCP_OAUTH_HOST_ADMISSION_INDETERMINATE" });
-    }
-    return c.json({ outcome: "admitted" });
   });
 
   app.post("/oauth/authorize", async (c) => {
@@ -435,78 +333,16 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "OAuth consent authority changed",
       });
     }
-    const consent = workspaceConsentAccess(form, grant.permissions);
-    if (!consent) {
-      return oauthAuthorizeBrowserError(
-        c,
-        "Choose an access level before authorizing this client.",
-      );
-    }
-    if (deps.mcpOAuthHostConsent && (await organizationGovernedByHost(deps, grant.accountId))) {
-      if (
-        c.req.header("origin") !== new URL(deps.settings.publicBaseUrl!).origin ||
-        c.req.header("sec-fetch-site") !== "same-origin"
-      )
-        throw new HTTPException(403, { message: "Same-origin browser approval is required" });
-      const proposal = await prepareMcpOAuthHostProposal(c, deps, request, form);
-      if (!matchesDisplayedMcpOAuthProposal(form, proposal))
-        return c.html(
-          await renderMcpOAuthHostReview(c, deps, form.get("request") ?? "", proposal, form),
-          409,
-        );
-      const browser = await requireCanonicalHumanRequestIdentity(c, {
-        db: deps.db,
-        managedAuth: deps.managedAuth,
-        managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
-        managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
-      });
-      const code = opaque(CODE_PREFIX);
-      const consumed = await consumeMcpOAuthAuthorizationRequest(deps.db, {
-        requestHash: request.requestHash,
-        subjectId: grant.subjectId,
-        codeHash: tokenHash(code),
-        codeExpiresAt: expiresIn(MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS),
-        hostAdmission: proposal,
-        hostBrowserAuthUserId: browser.authUserId,
-      });
-      if (!consumed)
-        throw new HTTPException(403, { message: "Matching HOST consent admission is required" });
-      return completeAuthorizationRedirect(
-        c,
-        authorizationRedirect(consumed.redirectUri, {
-          code,
-          iss: mcpOAuthIssuer(deps),
-          ...(consumed.state ? { state: consumed.state } : {}),
-        }),
-      );
-    }
-    // Refused before the request is rebound or a code is issued.
-    await requireNativeOrganizationMutation(deps, grant.accountId, "mcp_connection.create");
-    if (
-      grant.workspaceId !== request.workspaceId ||
-      grant.accountId !== request.accountId ||
-      consent.preset !== "full" ||
-      request.consentPreset !== "full"
-    ) {
-      // A narrower level freezes what the narrowed grant would list: the
-      // same preparation the connection's tokens get.
-      const prepared =
-        consent.preset === "full"
-          ? await prepareWorkspaceToolGateway(deps, authorization)
-          : await prepareWorkspaceToolGatewayForGrant(deps, {
-              ...grant,
-              permissions: consent.permissions,
-            });
+    if (grant.workspaceId !== request.workspaceId || grant.accountId !== request.accountId) {
+      const prepared = await prepareWorkspaceToolGateway(deps, authorization);
       try {
         const rebound = await rebindMcpOAuthAuthorizationRequest(deps.db, {
           requestHash: request.requestHash,
           subjectId: grant.subjectId,
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
-          permissions: consent.permissions,
-          toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog, consent),
-          consentPreset: consent.preset,
-          toolSetVersions: consentToolSetVersions(prepared),
+          permissions: grant.permissions,
+          toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
         });
         if (!rebound) {
           return oauthAuthorizeBrowserError(
@@ -568,11 +404,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireSameOriginBrowserMutation(c, deps);
     const person = await requireBrowserPerson(c, deps);
     const request = await requirePendingOrganizationRequest(deps, c.req.param("request"), person);
-    const parsed = parseRequestBody(McpConnectionDecision, await c.req.json().catch(() => null), {
-      status: 400,
-      message: "invalid sign-in decision",
-    });
-    const decision = parsed;
+    const parsed = McpConnectionDecision.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid sign-in decision" });
+    const decision = parsed.data;
     if (decision.decision === "deny") {
       await deleteMcpOAuthAuthorizationRequest(deps.db, request.requestHash);
       return c.json({
@@ -586,8 +420,6 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizations = await consentOrganizations(deps, person.context);
     const organization = organizations.find((each) => each.id === decision.organizationId);
     if (!organization) throw new HTTPException(403, { message: "organization is not available" });
-    // Refused before the request is bound or a code is issued.
-    await requireNativeOrganizationMutation(deps, organization.id, "mcp_connection.create");
     const access = decision.access;
     if (access.workspaceScope.kind === "selected") {
       const reachable = new Set(organization.workspaces.map((workspace) => workspace.id));
@@ -686,7 +518,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
 }
 
 export async function resolveMcpOAuthRouteAccess(
-  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  deps: ApiRouteDeps,
   request: Request,
   workspaceId: string,
 ): Promise<McpOAuthRouteAccess | null> {
@@ -715,12 +547,7 @@ export async function resolveMcpOAuthRouteAccess(
   const allowedToolIdentities = access.toolIdentities.filter((identity) =>
     requestResource.kind === "all" ? true : identity.serverId === requestResource.kind,
   );
-  return {
-    grant,
-    allowedToolIdentities,
-    consentedToolSetVersions: access.toolSetVersions ?? null,
-    consentPreset: access.consentPreset ?? null,
-  };
+  return { grant, allowedToolIdentities };
 }
 
 export function mcpOAuthBearerToken(request: Request): string | null {
@@ -734,64 +561,8 @@ export function isMcpOAuthResourcePath(pathname: string): boolean {
   return WORKSPACE_MCP_PATH.test(pathname) || pathname === ORGANIZATION_MCP_PATH;
 }
 
-/**
- * The tool identities a consent freezes. Under a read-only level (Read only,
- * or Custom without any permission that changes something) only tools that
- * declare `readOnlyHint: true` (and are not destructive) are kept, so a tool
- * that says nothing about its effects is left out. The connection's tool
- * gateway applies the same rule again on every request
- * (`prepareMcpOAuthWorkspaceToolGateway`).
- */
-export function mcpOAuthConsentToolIdentities(
-  catalog: ToolGatewayCatalog,
-  consent?: WorkspaceConsentAccess,
-): ToolGatewayIdentity[] {
-  const readOnly = consent !== undefined && mcpOAuthConsentReadsOnly(consent);
-  return catalog.entries
-    .filter((entry) => !readOnly || workspaceToolDeclaresReadOnly(entry))
-    .map((entry) => entry.identity);
-}
-
-/** The host tool-set versions a consent records: each used host server's, or null. */
-function consentToolSetVersions(
-  prepared: Pick<PreparedWorkspaceToolGateway, "hostToolSetVersions">,
-): Record<string, string> | null {
-  const versions = prepared.hostToolSetVersions;
-  return versions && Object.keys(versions).length > 0 ? { ...versions } : null;
-}
-
-/** A workspace consent's chosen access level and the grant permissions it leaves. */
-export type WorkspaceConsentAccess = {
-  preset: OrganizationAccessPreset;
-  permissions: Permission[];
-};
-
-/**
- * The access level a workspace consent form chose (`access_preset`: `full`,
- * `read_only` or `custom` with `permission` values; absent means `full`, the
- * behaviour before the choice existed), applied to the person's live
- * permissions in the workspace. The result never holds a permission the person
- * lacks, and always keeps `workspace:read`, which the connection needs at all.
- * Null for an unknown level.
- */
-export function workspaceConsentAccess(
-  form: URLSearchParams,
-  live: readonly Permission[],
-): WorkspaceConsentAccess | null {
-  const preset = OrganizationAccessPreset.safeParse(form.get("access_preset") ?? "full");
-  if (!preset.success) return null;
-  const chosen =
-    preset.data === "full"
-      ? null
-      : new Set<string>(
-          preset.data === "read_only"
-            ? organizationAccessPresetPermissions("read_only")
-            : form.getAll("permission"),
-        );
-  const permissions = live.filter(
-    (permission) => chosen === null || permission === "workspace:read" || chosen.has(permission),
-  );
-  return { preset: preset.data, permissions };
+export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): ToolGatewayIdentity[] {
+  return catalog.entries.map((entry) => entry.identity);
 }
 
 export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
@@ -801,44 +572,24 @@ export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
     pathname.startsWith("/.well-known/oauth-protected-resource/") ||
     pathname === "/oauth/register" ||
     pathname === "/oauth/authorize" ||
-    pathname === "/oauth/authorize/host-consent" ||
     pathname === "/oauth/token"
   );
 }
 
-export function mcpOAuthAuthenticateHeader(deps: McpOAuthIssuerDeps, pathname: string): string {
+export function mcpOAuthAuthenticateHeader(deps: ApiRouteDeps, pathname: string): string {
   return `Bearer resource_metadata="${mcpOAuthIssuer(deps)}/.well-known/oauth-protected-resource${pathname}", scope="${MCP_OAUTH_SCOPE}"`;
 }
 
-/**
- * The challenge the deployment perimeter adds to its own 401 on an exact
- * workspace MCP resource, so a client refused before the route is reached
- * still discovers the protected-resource metadata (RFC 9728). It is the
- * route's own challenge: the issuer is the configured public base URL and the
- * path is the request's workspace MCP path; no request header contributes.
- * Null when MCP OAuth is off or has no public base URL, or for any other path.
- */
-export function workspaceMcpPerimeterChallenge(
-  settings: Pick<Settings, "mcpOauthEnabled" | "publicBaseUrl">,
-  pathname: string,
-): string | null {
-  if (!settings.mcpOauthEnabled || !settings.publicBaseUrl) return null;
-  if (!WORKSPACE_MCP_PATH.test(pathname)) return null;
-  return mcpOAuthAuthenticateHeader({ settings }, pathname);
-}
-
-function requireMcpOAuthEnabled(deps: Pick<ApiRouteDeps, "settings">): void {
+function requireMcpOAuthEnabled(deps: ApiRouteDeps): void {
   if (!deps.settings.mcpOauthEnabled) throw new HTTPException(404, { message: "not found" });
 }
 
-type McpOAuthIssuerDeps = { settings: Pick<Settings, "publicBaseUrl"> };
-
-function mcpOAuthIssuer(deps: McpOAuthIssuerDeps): string {
+function mcpOAuthIssuer(deps: ApiRouteDeps): string {
   if (!deps.settings.publicBaseUrl) throw new Error("MCP OAuth public base URL is not configured");
   return new URL(deps.settings.publicBaseUrl).origin;
 }
 
-function parseMcpOAuthResource(deps: Pick<ApiRouteDeps, "settings">, value: string): McpOAuthResource {
+function parseMcpOAuthResource(deps: ApiRouteDeps, value: string): McpOAuthResource {
   let url: URL;
   try {
     url = new URL(value);
@@ -1088,12 +839,6 @@ export function renderMcpOAuthConsentPage(input: {
   accounts: McpOAuthConsentAccount[];
   workspaces: McpOAuthConsentWorkspace[];
   selectedWorkspaceId: string;
-  /** The person's permissions in the selected workspace: the Custom level's choices. */
-  permissions?: readonly string[];
-  hostProposal?: McpOAuthHostProposal;
-  consentPreset?: string;
-  selectedPermissions?: readonly string[];
-  reviewRequired?: boolean;
 }): string {
   const selectedWorkspace =
     input.workspaces.find((workspace) => workspace.id === input.selectedWorkspaceId) ??
@@ -1120,36 +865,11 @@ export function renderMcpOAuthConsentPage(input: {
     accountId: workspace.accountId,
     label: consentWorkspaceLabel(workspace),
   }));
-  const customPermissions =
-    input.permissions && input.permissions.length > 0
-      ? `<details class="custom"><summary>Custom permissions</summary>${input.permissions
-          .filter((permission) => permission !== "workspace:read")
-          .map(
-            (permission) =>
-              `<label><input type="checkbox" name="permission" value="${escapeHtml(permission)}"${input.selectedPermissions?.includes(permission) ? " checked" : ""}> <span>${escapeHtml(permission)}</span></label>`,
-          )
-          .join("")}</details>`
-      : "";
-  const accessLabel =
-    input.hostProposal?.material.consentPreset === "read_only"
-      ? "Read only"
-      : input.hostProposal?.material.consentPreset === "custom"
-        ? "Custom"
-        : "Full";
-  const hostFields = input.hostProposal
-    ? `<input type="hidden" name="host_revision" value="${input.hostProposal.revision}"><input type="hidden" name="host_digest" value="${escapeHtml(input.hostProposal.digest)}">${input.reviewRequired ? '<p role="alert">Access changed. Review the permissions and tools below, then authorize again.</p>' : ""}<p class="note">Current access: <strong>${accessLabel}</strong>. ${input.hostProposal.material.permissions.length} permissions; ${input.hostProposal.material.toolIdentities.length} tools.</p><details${input.reviewRequired ? " open" : ""} style="overflow-wrap:anywhere"><summary>Permissions and tools</summary><p>The selected access and checked custom permissions apply to these tools.</p>${input.hostProposal.material.toolIdentities.length ? `<ul>${input.hostProposal.material.toolIdentities.map((tool) => `<li>${escapeHtml(tool.serverId)}: ${escapeHtml(tool.toolName)}</li>`).join("")}</ul>` : "<p>No tools are currently available for this access.</p>"}</details>`
-    : "";
   const body = `<p class="lede"><strong>${escapeHtml(input.clientName)}</strong> wants MCP access to the organization and workspace you choose.</p>
 <form method="post" action="/oauth/authorize" onsubmit="var submitter=event.submitter;if(submitter&&submitter.name){var input=document.createElement('input');input.type='hidden';input.name=submitter.name;input.value=submitter.value;this.appendChild(input)}this.querySelectorAll('button').forEach(function(button){button.disabled=true})">
-<input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">${hostFields}
+<input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
 <label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
-<fieldset class="field levels"><legend>Access</legend>
-<label><input type="radio" name="access_preset" value="full"${!input.consentPreset || input.consentPreset === "full" ? " checked" : ""}> <span><strong>Full</strong> Everything you can do in this workspace.</span></label>
-<label><input type="radio" name="access_preset" value="read_only"${input.consentPreset === "read_only" ? " checked" : ""}> <span><strong>Read only</strong> Only tools that declare they only read.</span></label>
-<label><input type="radio" name="access_preset" value="custom"${input.consentPreset === "custom" ? " checked" : ""}> <span><strong>Custom</strong> Only the permissions you pick below.</span></label>
-${customPermissions}
-</fieldset>
 <p class="note">The grant is limited to tools available in the workspace you authorize. Opengeni rechecks live authority on every request.</p>
 <div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div>
 </form>
@@ -1171,34 +891,7 @@ ${customPermissions}
     });
     if (items.some(function (item) { return item.id === selected; })) workspace.value = selected;
   }
-  account.addEventListener("change", sync);${
-    input.hostProposal
-      ? `
-  var form = workspace.form;
-  form.onsubmit = async function(event) {
-    var submitter = event.submitter;
-    if (!submitter || submitter.value !== "approve") return;
-    event.preventDefault();
-    form.querySelectorAll("button").forEach(function(button) { button.disabled = true; });
-    try {
-      var fields = new URLSearchParams(new FormData(form));
-      fields.set("decision", "approve");
-      var minted = await fetch("/v1/auth/host-token?workspace=" + encodeURIComponent(workspace.value), { credentials: "same-origin", cache: "no-store" });
-      if (!minted.ok) throw new Error("Sign in again before authorizing.");
-      var credential = await minted.json();
-      var response = await fetch("/oauth/authorize/host-consent", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "${MCP_OAUTH_HOST_CREDENTIAL_HEADER}": credential.token }, body: JSON.stringify({ form: fields.toString() }) });
-      credential = null;
-      if (response.status === 409) { var page = await response.text(); document.open(); document.write(page); document.close(); return; }
-      if (!response.ok) throw new Error("Authorization could not be confirmed. Review and try again.");
-      var decision = document.createElement("input"); decision.type = "hidden"; decision.name = "decision"; decision.value = "approve"; form.appendChild(decision);
-      HTMLFormElement.prototype.submit.call(form);
-    } catch (_) {
-      var message = document.createElement("p"); message.setAttribute("role", "alert"); message.textContent = "Authorization could not be confirmed. Review and try again."; form.prepend(message);
-      form.querySelectorAll("button").forEach(function(button) { button.disabled = false; });
-    }
-  };`
-      : ""
-  }
+  account.addEventListener("change", sync);
 })();
 </script>`;
   return oauthDocument({
@@ -1284,7 +977,7 @@ function oauthDocument(input: {
 }
 
 const OAUTH_PAGE_CSS =
-  'html,body{margin:0}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f4f5;color:#18181b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}main{width:min(100%,28rem);background:#fff;border:1px solid #e4e4e7;border-radius:20px;padding:24px}h1{margin:8px 0 0;font-size:22px;line-height:1.3;font-weight:650}p{margin:12px 0 0}strong{font-weight:600}.mark{margin:0;font-size:12px;font-weight:600;color:#71717a}.lede,.note{color:#52525b}.field{display:flex;flex-direction:column;gap:6px;margin-top:16px;font-size:13px;color:#71717a}select{width:100%;border:1px solid #e4e4e7;border-radius:10px;background:#f4f4f5;color:#18181b;padding:10px 12px;font:inherit}.actions{display:flex;gap:12px;margin-top:20px}button{flex:1;min-height:40px;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}.approve{background:#18181b;color:#fff}.deny{background:#fff;color:#18181b;border:1px solid #e4e4e7}button:disabled{opacity:0.6;cursor:wait}fieldset{border:0;padding:0;margin:16px 0 0}legend{padding:0;margin-bottom:6px}.levels label{display:flex;gap:8px;align-items:flex-start;color:#18181b;font-size:14px;margin-top:6px}.levels strong{margin-right:4px}.custom{margin-top:8px}.custom summary{cursor:pointer;color:#52525b}.custom label{font-size:13px}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}h1{color:#fafafa}.mark{color:#a1a1aa}.lede,.note{color:#a1a1aa}select{background:#27272a;border-color:#3f3f46;color:#fafafa}.approve{background:#fafafa;color:#18181b}.deny{background:#27272a;color:#fafafa;border-color:#3f3f46}.levels label{color:#fafafa}.custom summary{color:#a1a1aa}}';
+  'html,body{margin:0}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f4f5;color:#18181b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}main{width:min(100%,28rem);background:#fff;border:1px solid #e4e4e7;border-radius:20px;padding:24px}h1{margin:8px 0 0;font-size:22px;line-height:1.3;font-weight:650}p{margin:12px 0 0}strong{font-weight:600}.mark{margin:0;font-size:12px;font-weight:600;color:#71717a}.lede,.note{color:#52525b}.field{display:flex;flex-direction:column;gap:6px;margin-top:16px;font-size:13px;color:#71717a}select{width:100%;border:1px solid #e4e4e7;border-radius:10px;background:#f4f4f5;color:#18181b;padding:10px 12px;font:inherit}.actions{display:flex;gap:12px;margin-top:20px}button{flex:1;min-height:40px;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}.approve{background:#18181b;color:#fff}.deny{background:#fff;color:#18181b;border:1px solid #e4e4e7}button:disabled{opacity:0.6;cursor:wait}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}h1{color:#fafafa}.mark{color:#a1a1aa}.lede,.note{color:#a1a1aa}select{background:#27272a;border-color:#3f3f46;color:#fafafa}.approve{background:#fafafa;color:#18181b}.deny{background:#27272a;color:#fafafa;border-color:#3f3f46}}';
 
 function jsonForScript(value: unknown): string {
   return JSON.stringify(value).replace(/</gu, "\\u003c");
@@ -1433,198 +1126,4 @@ export async function resolveOrganizationMcpOAuthAccess(
     throw new HTTPException(401, { message: "invalid MCP OAuth access token" });
   }
   return { ...access, organizationAccess: access.organizationAccess };
-}
-
-/** Opaque host-only channel; never an Authorization/native authentication header. */
-export const MCP_OAUTH_HOST_CREDENTIAL_HEADER = "x-opengeni-host-consent-credential";
-
-async function requireMcpOAuthHostBrowserHuman(
-  c: Context,
-  deps: ApiRouteDeps,
-  subjectId: string,
-): Promise<McpOAuthHostHuman> {
-  if (!c.req.header("cookie") || c.req.header("authorization") || isAgentActingAsPerson(c))
-    throw new HTTPException(401, { message: "A signed-in browser human is required" });
-  const human = await requireCanonicalHumanRequestIdentity(c, {
-    db: deps.db,
-    managedAuth: deps.managedAuth,
-    managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
-    managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
-  });
-  if (subjectId !== `user:${human.authUserId}`)
-    throw new HTTPException(403, { message: "Consent belongs to another person" });
-  const projection = await getCanonicalHumanIdentityProjection(deps.db, human.authUserId);
-  const binding = activeCanonicalHumanLoginBinding(projection);
-  const authentication = await readSessionAuthentication(deps.db, human);
-  if (
-    projection.activeIdentity.status !== "active" ||
-    !binding ||
-    authentication?.identityId !== projection.activeIdentity.id ||
-    !authentication.latest
-  )
-    throw new HTTPException(403, { message: "The browser sign-in changed" });
-  return {
-    identityId: projection.activeIdentity.id,
-    authSessionId: human.authSessionId,
-    loginBindingId: binding.id,
-    loginBindingRevision: binding.revision,
-  };
-}
-function matchesDisplayedMcpOAuthProposal(
-  form: URLSearchParams,
-  proposal: McpOAuthHostProposal,
-): boolean {
-  return (
-    form.get("host_revision") === String(proposal.revision) &&
-    form.get("host_digest") === proposal.digest
-  );
-}
-async function prepareMcpOAuthHostProposal(
-  c: Context,
-  deps: ApiRouteDeps,
-  request: McpOAuthAuthorizationRequest,
-  form: URLSearchParams,
-): Promise<McpOAuthHostProposal> {
-  const workspaceId = form.get("workspace_id") || request.workspaceId;
-  if (!workspaceId || !isWorkspaceId(workspaceId))
-    throw new HTTPException(400, { message: "Choose a workspace" });
-  const initialHuman = await requireMcpOAuthHostBrowserHuman(c, deps, request.subjectId);
-  const authorization = await requireAccessGrantAuthorization(
-    c,
-    deps,
-    workspaceId,
-    "workspace:read",
-  );
-  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
-  if (grant.subjectId !== request.subjectId)
-    throw new HTTPException(403, { message: "Consent belongs to another person" });
-  const consent = workspaceConsentAccess(form, grant.permissions);
-  if (!consent) throw new HTTPException(400, { message: "Choose an access level" });
-  const prepared =
-    consent.preset === "full"
-      ? await prepareWorkspaceToolGateway(deps, authorization)
-      : await prepareWorkspaceToolGatewayForGrant(deps, {
-          ...grant,
-          permissions: consent.permissions,
-        });
-  try {
-    if (
-      !(await rebindMcpOAuthAuthorizationRequest(deps.db, {
-        requestHash: request.requestHash,
-        subjectId: grant.subjectId,
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        permissions: consent.permissions,
-        toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog, consent),
-        consentPreset: consent.preset,
-        toolSetVersions: consentToolSetVersions(prepared),
-      }))
-    )
-      throw new HTTPException(410, { message: "Consent expired or was already answered" });
-  } finally {
-    await prepared.close();
-  }
-  // Re-read the browser after catalog/network preparation, including login rebinding.
-  const human = await requireMcpOAuthHostBrowserHuman(c, deps, grant.subjectId);
-  if (JSON.stringify(human) !== JSON.stringify(initialHuman))
-    throw new HTTPException(403, { message: "The browser sign-in changed" });
-  const proposal = await freezeMcpOAuthHostProposal(deps.db, {
-    requestHash: request.requestHash,
-    organizationId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    subjectId: grant.subjectId,
-    human,
-  });
-  if (!proposal)
-    throw new HTTPException(410, { message: "Consent expired or was already answered" });
-  return proposal;
-}
-async function renderMcpOAuthHostReview(
-  c: Context,
-  deps: ApiRouteDeps,
-  requestToken: string,
-  proposal: McpOAuthHostProposal,
-  form: URLSearchParams,
-): Promise<string> {
-  c.header("cache-control", "no-store");
-  c.header(
-    "content-security-policy",
-    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; connect-src 'self'",
-  );
-  const context = await requireAccessContext(c, deps);
-  const workspaces = await listConsentWorkspaces(deps, context);
-  const clientId = proposal.material.clientId;
-  const client = typeof clientId === "string" ? await getMcpOAuthClient(deps.db, clientId) : null;
-  const authorization = await requireAccessGrantAuthorization(
-    c,
-    deps,
-    proposal.workspaceId,
-    "workspace:read",
-  );
-  return renderMcpOAuthConsentPage({
-    clientName: client?.clientName ?? "MCP client",
-    requestToken,
-    accounts: await consentAccountsForWorkspaces(deps, workspaces),
-    workspaces,
-    selectedWorkspaceId: proposal.workspaceId,
-    permissions: requireWorkspaceToolGatewayAuthorization(authorization).permissions,
-    hostProposal: proposal,
-    consentPreset: form.get("access_preset") ?? "full",
-    selectedPermissions: form.getAll("permission"),
-    reviewRequired: true,
-  });
-}
-/** Fixed errors deliberately discard host exceptions, including credential-bearing messages. */
-export async function runMcpOAuthHostHandoff(
-  port: NonNullable<ApiRouteDeps["mcpOAuthHostConsent"]>,
-  proposal: McpOAuthHostProposal,
-  credential: string,
-): Promise<void> {
-  if (credential.length > 8192)
-    throw new HTTPException(401, { message: "Host consent credential is invalid" });
-  let expiry: unknown;
-  try {
-    const payload: unknown = JSON.parse(
-      Buffer.from(credential.split(".")[1] ?? "", "base64url").toString("utf8"),
-    );
-    expiry = payload && typeof payload === "object" && "exp" in payload ? payload.exp : null;
-  } catch {
-    expiry = null;
-  }
-  if (typeof expiry !== "number" || !Number.isFinite(expiry))
-    throw new HTTPException(401, { message: "Host consent credential is invalid" });
-  const deadlineAt = Math.min(Date.now() + 10_000, expiry * 1000, Date.parse(proposal.expiresAt));
-  const remaining = deadlineAt - Date.now();
-  if (remaining <= 0) throw new HTTPException(401, { message: "Host consent credential expired" });
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      port.admit({
-        proposal: {
-          requestHash: proposal.requestHash,
-          organizationId: proposal.organizationId,
-          workspaceId: proposal.workspaceId,
-          revision: proposal.revision,
-          digest: proposal.digest,
-          operationId: proposal.operationId,
-          expiresAt: proposal.expiresAt,
-        },
-        readCredential: () => credential,
-        signal: controller.signal,
-        deadlineAt,
-      }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(new Error("host consent deadline"));
-        }, remaining);
-      }),
-    ]);
-  } catch {
-    /* Outcome may have committed: the caller reads only durable admission. */
-  } finally {
-    if (timer) clearTimeout(timer);
-    controller.abort();
-  }
 }

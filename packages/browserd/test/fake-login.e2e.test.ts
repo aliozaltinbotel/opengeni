@@ -9,7 +9,12 @@ import type {
   BrowserPasskeyEvent,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
-import { AgentBrowserDriver, ManagedBrowserRunner, BrowserPasskeyManager } from "../src";
+import {
+  AgentBrowserDriver,
+  AgentBrowserJsonRunner,
+  BrowserPasskeyManager,
+  resolvePinnedAgentBrowserBinary,
+} from "../src";
 import { startFakeLoginServer, type FakeLoginServer } from "../../testing/src/fake-login/server";
 
 // Fake-login suite through the real browserd driver and Chrome: passkeys
@@ -21,21 +26,16 @@ const enabled = process.env.OPENGENI_BROWSERD_E2E === "1" || headed;
 const e2e = enabled ? test : test.skip;
 const mode = headed ? "headed" : "headless";
 const evidenceDirectory = process.env.OPENGENI_BROWSERD_EVIDENCE_DIR ?? null;
-// The OS picks free ports unless FAKE_LOGIN_PORT pins them. A fixed default
-// sits in Linux's ephemeral range (32768-60999), where any concurrent client
-// socket can already hold it.
-const sitePort = Number(process.env.FAKE_LOGIN_PORT ?? 0);
+const sitePort = Number(process.env.FAKE_LOGIN_PORT ?? (headed ? 47432 : 47430));
 
 let site: FakeLoginServer;
 const siteLog: string[] = [];
 const evidence: Record<string, unknown> = { mode };
 
 beforeAll(async () => {
-  // A skipped suite (every unit-shard run) starts no server.
-  if (!enabled) return;
   site = await startFakeLoginServer({
     port: sitePort,
-    iframePort: sitePort ? sitePort + 1 : 0,
+    iframePort: sitePort + 1,
     log: (line) => siteLog.push(line),
   });
   if (evidenceDirectory) await mkdir(evidenceDirectory, { recursive: true });
@@ -254,12 +254,22 @@ type Browser = {
 
 async function launch(label: string): Promise<Browser> {
   const directory = await mkdtemp(`/tmp/w4cdp-${label}-`);
-  const runner = await ManagedBrowserRunner.create({
+  const runner = await AgentBrowserJsonRunner.create({
+    namespace: `w4${randomUUID().slice(0, 8)}`,
+    sessionName: "s",
+    socketDirectory: join(directory, "s"),
     profileDirectory: join(directory, "profile"),
+    downloadDirectory: join(directory, "downloads"),
+    screenshotDirectory: join(directory, "screenshots"),
     headed,
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
       : {}),
+    binary: await resolvePinnedAgentBrowserBinary(
+      process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+        ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+        : {},
+    ),
   });
   const browserSessionId = randomUUID();
   const controllerGeneration = `controller-${randomUUID()}`;
@@ -419,7 +429,7 @@ async function shot(driver: AgentBrowserDriver, targetId: string, name: string):
 }
 
 function crossOrigin(): string {
-  return site.crossOriginUrl;
+  return `http://127.0.0.1:${sitePort + 1}`;
 }
 
 function nodes(observation: BrowserObservation): InteractionSemanticNodeValue[] {

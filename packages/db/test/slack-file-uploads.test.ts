@@ -4,7 +4,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   bindSlackInteractionSession,

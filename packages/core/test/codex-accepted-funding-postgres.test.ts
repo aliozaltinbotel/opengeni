@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { withCodexCatalogProvider } from "@opengeni/config";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   createDb,
   createSession,

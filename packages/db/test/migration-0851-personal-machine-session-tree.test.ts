@@ -5,7 +5,7 @@ import {
   acquireRestrictedRuntimeTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,

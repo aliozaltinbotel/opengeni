@@ -72,6 +72,7 @@ test("browserd entrypoint reads an owner-only token, becomes healthy, and drains
       OPENGENI_BROWSERD_COMPUTER_BACKEND: undefined,
       OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: undefined,
       OPENGENI_BROWSERD_ROOT: join(directory, "state"),
+      OPENGENI_BROWSERD_SOCKET_ROOT: join(directory, "sockets"),
       OPENGENI_BROWSERD_ADMIN_TOKEN_FILE: tokenFile,
       OPENGENI_BROWSERD_HOSTNAME: "127.0.0.1",
       OPENGENI_BROWSERD_PORT: "0",
@@ -100,6 +101,7 @@ test("browserd entrypoint reads an owner-only token, becomes healthy, and drains
 });
 
 test("browserd with a parent lifeline drains when its parent's end of stdin closes", async () => {
+  // Short paths: agent-browser sockets must fit the Unix socket path limit.
   const directory = await mkdtemp("/tmp/ogb-ml-");
   const tokenFile = join(directory, "admin-token");
   await writeFile(tokenFile, `admin.${"a".repeat(48)}\n`, { mode: 0o600 });
@@ -109,6 +111,7 @@ test("browserd with a parent lifeline drains when its parent's end of stdin clos
     OPENGENI_BROWSERD_COMPUTER_BACKEND: undefined,
     OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: undefined,
     OPENGENI_BROWSERD_ROOT: join(directory, "state"),
+    OPENGENI_BROWSERD_SOCKET_ROOT: join(directory, "s1"),
     OPENGENI_BROWSERD_ADMIN_TOKEN_FILE: tokenFile,
     OPENGENI_BROWSERD_HOSTNAME: "127.0.0.1",
     OPENGENI_BROWSERD_PORT: "0",
@@ -126,6 +129,7 @@ test("browserd with a parent lifeline drains when its parent's end of stdin clos
     env: {
       ...environment,
       OPENGENI_BROWSERD_ROOT: join(directory, "state-lifeline"),
+      OPENGENI_BROWSERD_SOCKET_ROOT: join(directory, "s2"),
       OPENGENI_BROWSERD_PARENT_LIFELINE: "stdin",
     },
     stdin: "pipe",

@@ -233,14 +233,6 @@ beforeAll(async () => {
       ]);
       dockerStarted = true;
     } catch (err) {
-      if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
-        throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but dedicated-schema PostgreSQL is unavailable",
-          {
-            cause: err,
-          },
-        );
-      }
       available = false;
       console.warn(`[rls-dedicated] docker unavailable, skipping: ${String(err)}`);
       return;

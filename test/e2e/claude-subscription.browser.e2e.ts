@@ -2,8 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { clickSelfClosingPopup } from "./self-closing-popup";
 
 let browser: Browser, web: StartedProcess, baseUrl: string;
@@ -77,9 +76,7 @@ for (const theme of ["dark", "light"] as const) {
         try {
           await page.goto(`${baseUrl}/test/claude-subscription.html?scope=${scope}`);
           await page.getByRole("heading", { name: "Connect Claude subscription" }).waitFor();
-          const tokenMethod = page.getByRole("radio", { name: "Setup token", exact: true });
-          await tokenMethod.click();
-          expect(await tokenMethod.getAttribute("aria-checked")).toBe("true");
+          await page.getByRole("button", { name: "Use a setup token", exact: false }).click();
           expect(await page.locator('input[type="file"]').count()).toBe(0);
           expect(await page.getByLabel("Claude account UUID").count()).toBe(0);
           expect(await page.getByLabel("Claude device ID").count()).toBe(0);
@@ -87,7 +84,7 @@ for (const theme of ["dark", "light"] as const) {
             await page.getByLabel("Create a Claude setup token", { exact: true }).inputValue(),
           ).toBe("claude setup-token");
           const connect = page.getByRole("button", {
-            name: "Connect Claude",
+            name: "Connect Claude subscription",
             exact: true,
           });
           expect(await connect.isDisabled()).toBe(true);

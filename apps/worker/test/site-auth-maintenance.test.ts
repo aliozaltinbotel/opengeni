@@ -1,7 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { SiteAuthMaintenanceClaim } from "@opengeni/db";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { createSiteAuthMaintenanceActivities } from "../src/activities/site-auth-maintenance";
 import type { ActivityServices } from "../src/activities/types";
 
@@ -156,36 +155,5 @@ describe("site auth maintenance", () => {
     });
     expect(JSON.stringify(attributes)).not.toContain("private provider");
     expect(JSON.stringify(attributes)).not.toContain(claim.loginUrl!);
-  });
-});
-
-test("maintenance create forwards the configured host without borrowing a human", async () => {
-  const service = await services()();
-  const port = {
-    authorizeSession: async () => ({ allowed: true as const }),
-    resolveListScope: async () => ({ kind: "all" as const }),
-  };
-  service.sessionAuthorization = port;
-  let forwarded: unknown;
-  const activity = createSiteAuthMaintenanceActivities(async () => service, {
-    claim: async () => [claim],
-    admit: async () => null,
-    assertModelPolicy: async () => undefined,
-    confirm: async () => true,
-    recordUsage: async () => undefined,
-    createSession: async (input) => {
-      forwarded = input.sessionCreateHost;
-      return {
-        session: { id: claim.sessionId },
-        outcome: "created",
-        replay: false,
-        changed: true,
-      } as never;
-    },
-  });
-  await activity.maintainSiteAuthConnections();
-  expect(forwarded).toMatchObject({
-    port,
-    actor: { kind: "subject", subjectId: "site-auth-maintenance" },
   });
 });

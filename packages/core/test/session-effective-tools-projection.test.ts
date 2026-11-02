@@ -11,7 +11,7 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   sessionEffectiveToolProjectionInput,
   sessionWithEffectiveToolPolicy,
@@ -85,8 +85,8 @@ async function withPageContext(
     version: null,
     modelNotes: {},
   });
-  const skills = spyOn(db, "hasWorkspaceManagedSkill").mockResolvedValue(false);
-  const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
+  const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([]);
+  const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
   try {
     await run(
       await workspaceSessionEffectiveToolsContext(
@@ -96,20 +96,6 @@ async function withPageContext(
         rows,
       ),
     );
-    const configured = rows.filter((row) => row.agent != null);
-    expect(skills).toHaveBeenCalledTimes(
-      configured.some((row) => row.agent?.capabilities.skills === "read") ? 1 : 0,
-    );
-    if (configured.length) {
-      expect(history).toHaveBeenCalledTimes(1);
-      expect(history.mock.calls[0]?.[1]).toEqual({
-        accountId: configured[0]!.accountId,
-        workspaceId: rows[0]!.workspaceId,
-        sessionIds: [...new Set(configured.map((row) => row.id))],
-      });
-    } else {
-      expect(history).not.toHaveBeenCalled();
-    }
   } finally {
     history.mockRestore();
     skills.mockRestore();
@@ -449,7 +435,7 @@ describe("server effectiveTools environment projection", () => {
         version: null,
         modelNotes: {},
       });
-      const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
+      const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
       const codexPool = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
       // SuperGrok readiness is the core route's answer (its legacy pool is gone).
       const xaiPool = spyOn(db, "readSubscriptionCoreRouteReadiness");
@@ -566,11 +552,14 @@ describe("server effectiveTools environment projection", () => {
       version: null,
       modelNotes: {},
     });
-    const skills = spyOn(db, "hasWorkspaceManagedSkill").mockResolvedValue(true);
+    const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([
+      { activationMode: "session_selected" },
+      { activationMode: "workspace_managed" },
+    ] as Awaited<ReturnType<typeof db.listSkillDescriptors>>);
     const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
       kind: "selfhosted",
     } as NonNullable<Awaited<ReturnType<typeof db.getSandbox>>>);
-    const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set([row.id]));
+    const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(true);
     try {
       const result = await workspaceSessionEffectiveToolsContext(
         { db: {} as db.Database, settings: envSettings, objectStorage: {} },
@@ -584,19 +573,8 @@ describe("server effectiveTools environment projection", () => {
       expect(result.activeSandboxBackends?.get(sandboxId)).toBe("selfhosted");
       expect(result.routerHistorySessionIds?.has(row.id)).toBe(true);
       expect(models).toHaveBeenCalledTimes(1);
-      expect(skills).toHaveBeenCalledTimes(1);
-      expect(skills.mock.calls[0]?.[1]).toEqual({
-        accountId: row.accountId,
-        workspaceId: row.workspaceId,
-        subjectId: "human",
-      });
       expect(sandbox).toHaveBeenCalledTimes(1);
       expect(history).toHaveBeenCalledTimes(1);
-      expect(history.mock.calls[0]?.[1]).toEqual({
-        accountId: row.accountId,
-        workspaceId: row.workspaceId,
-        sessionIds: [row.id],
-      });
       expect(sandbox.mock.calls[0]?.[1]).toEqual({
         accountId: row.accountId,
         workspaceId: row.workspaceId,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { configuredProviders, type ResolvedModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 
 import {
   buildProviderClient,

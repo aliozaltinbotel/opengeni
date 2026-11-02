@@ -19,7 +19,6 @@ const {
 } = require("expo/config-plugins");
 
 const { SWIFT_FILE, intentsSource, resolveOptions } = require("./call-intents.cjs");
-const { withRecording } = require("./with-recording.cjs");
 const {
   CONTROL_TARGET,
   CONTROL_SWIFT_FILE,
@@ -98,7 +97,6 @@ function withNativeCall(config, props) {
     }
     config = withCallControl(config, options, control);
   }
-  if (props?.recording) config = withRecording(config);
   return config;
 }
 

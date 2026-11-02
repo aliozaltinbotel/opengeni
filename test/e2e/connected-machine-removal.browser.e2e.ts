@@ -7,11 +7,16 @@ import {
   grantWorkspaceAccess,
   type DbClient,
 } from "@opengeni/db";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { freePort } from "@opengeni/testing/compose";
-import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  freePort,
+  runCommand,
+  startProcess,
+  testSettings,
+  type SharedTestDatabase,
+  type StartedProcess,
+} from "@opengeni/testing";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import postgres from "postgres";
 

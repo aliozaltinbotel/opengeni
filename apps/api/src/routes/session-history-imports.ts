@@ -1,4 +1,3 @@
-import { sessionCreateCreatorForRequest } from "./host-token";
 import {
   AppendArchivedSessionEventsRequest,
   ImportArchivedSessionRequest,
@@ -17,7 +16,6 @@ import {
   requireAccessGrantAuthorization,
   requireResolvedAccessGrantAuthorization,
   SessionAuthorizationDeniedError,
-  SessionCreateAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   SessionTenancyManagedHumanRequiredError,
   type AccessGrantAuthorization,
@@ -30,7 +28,6 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { sessionCreateErrorResponse } from "./sessions";
 
 /** Exact server-only routes with their own bounded, streaming JSON ingress. */
 export function isSessionHistoryImportRequest(method: string, pathname: string): boolean {
@@ -275,16 +272,9 @@ export function registerSessionHistoryImportRoutes(app: Hono, deps: ApiRouteDeps
           authorization,
           workspaceId,
           parsed.data,
-          "http",
-          sessionCreateCreatorForRequest(c, deps, authorization.grant),
         );
         return c.json(response, response.created ? 201 : 200);
       } catch (error) {
-        if (
-          error instanceof SessionCreateAuthorizationDeniedError ||
-          error instanceof SessionAuthorizationUnavailableError
-        )
-          return sessionCreateErrorResponse(c, error);
         return routeError(c, error);
       }
     });

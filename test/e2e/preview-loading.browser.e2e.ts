@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser } from "playwright";
 
 let server: StartedProcess;
@@ -81,4 +80,4 @@ test("preview loading survives refresh, settles, and respects reduced motion", a
       .evaluate((node) => getComputedStyle(node).animationName),
   ).toBe("none");
   await page.close();
-}, 30_000);
+});

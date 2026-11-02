@@ -1,7 +1,5 @@
 # Contributing To Opengeni
 
-Owned-fork policy (2026-11-01): `aliozaltinbotel/opengeni` follows [local validation and deployment](AGENTS.md#local-validation-and-deployment-cendra-fork). GitHub Actions/hosted queue/release dispatch instructions inherited below are not executable instructions for this fork. Use existing local checks and supported build/deployment owners, retain exact-source evidence and review, and preserve source/provenance/rollback contracts. Controllers requiring hosted identities need an existing-owner correction before use; never fabricate those identities. Upstream policy is unchanged.
-
 Thanks for considering a contribution.
 
 ## Development Setup
@@ -51,11 +49,9 @@ bun run test:e2e
 ## Pull Requests
 
 - Keep changes focused.
-- Main merges follow the [merge-batcher runbook](docs/merge-batcher.md): full relevant
+- Main merges follow the [merge-queue runbook](docs/merge-queue.md): full relevant
   local suites, independent agent review, exact-head evidence comment, then
-  the configured ready signal after activation. During shadow rollout, the
-  existing reviewed merge process remains in force. Fast batch green is not
-  full-suite/release green; the native queue and vendor drafts stay inactive.
+  queueing. Fast queue green is not full-suite/release green.
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.

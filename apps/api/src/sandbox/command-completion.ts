@@ -34,7 +34,6 @@ import {
   connectedCommandExitProof,
   withoutWaking,
 } from "@opengeni/runtime/sandbox";
-import type { ConnectedCommandCompletionLocator } from "./completion-locator";
 
 /**
  * The transport of an immediate stop. One absolute budget covers capability
@@ -140,8 +139,6 @@ const CONNECTED_COMMAND_COLLECTION_TIMEOUT_MS = 10_000;
 
 /** Collection deps: the bus carries replay and release; tests inject both. */
 export type ConnectedCommandCollectionDeps = {
-  /** Fresh pending-read batching owned by the ingestion consumer, never a cache. */
-  locate?: ConnectedCommandCompletionLocator | undefined;
   bus?: EventBus | undefined;
   reader?: Pick<OpStreamExecClient, "readExisting"> | undefined;
   /** Injected for tests: the control transport of the output release. */
@@ -195,14 +192,13 @@ export async function ingestConnectedCommandCompletion(
   reader?: Pick<OpStreamExecClient, "readExisting">,
   /** Injected for tests: the control transport of the output release. */
   releaseRpc?: ControlRpc,
-  locate?: ConnectedCommandCompletionLocator,
 ): Promise<void> {
   if (!completed.exit || !completed.opId || /[\s.*>]/u.test(completed.opId)) return;
   await collectConnectedCommandCompletion(
     db,
     ids,
     completed.opId,
-    { bus, reader, releaseRpc, locate },
+    { bus, reader, releaseRpc },
     { acknowledge: true },
   );
 }
@@ -227,9 +223,7 @@ export async function collectConnectedCommandCompletion(
     connectionInstanceId: ids.connectionInstanceId,
     opId,
   };
-  const command = await (deps.locate
-    ? deps.locate(identity)
-    : locateConnectedCommandCompletion(db, identity));
+  const command = await locateConnectedCommandCompletion(db, identity);
   // Foreground operations and exits before adoption have no background row.
   // Their attached consumer still owns terminal proof and the adoption race.
   if (!command) return;

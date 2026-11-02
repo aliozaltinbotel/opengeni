@@ -1,9 +1,4 @@
-import {
-  observeWorkspaceToolGatewayMcpTransport,
-  excludeWorkspaceToolGatewayTiming,
-} from "../workspace-tool-gateway-observability";
 import { fileOwnerContextForAccess } from "@opengeni/core";
-import { requireWorkspaceAttachmentsAllowed } from "../http/organization-session-policy";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   AddDocumentRequest,
@@ -69,8 +64,7 @@ import {
 } from "../workspace-tool-gateway";
 import { sanitizeFilename } from "./files";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
-import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
-import { routeRetired } from "../http/deprecation";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
@@ -176,10 +170,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!hasAccountAdminAuthority(authorization)) {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
-    const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
-      status: 400,
-      message: "invalid document migration audit query",
-    });
+    const query = ListDocumentMigrationAuditQuery.safeParse(c.req.query());
+    if (!query.success) {
+      throw new HTTPException(400, { message: "invalid document migration audit query" });
+    }
     try {
       return c.json(
         ListDocumentDefaultCollectionBackfillRunsResponse.parse(
@@ -188,7 +182,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
-            ...query,
+            ...query.data,
           }),
         ),
       );
@@ -211,13 +205,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const runId = RunDocumentDefaultCollectionBackfillRequest.shape.runId.safeParse(
       c.req.param("runId"),
     );
-    if (!runId.success) {
+    const query = GetDocumentDefaultCollectionBackfillAuditQuery.safeParse(c.req.query());
+    if (!runId.success || !query.success) {
       throw new HTTPException(400, { message: "invalid document migration audit query" });
     }
-    const query = parseRequestQuery(GetDocumentDefaultCollectionBackfillAuditQuery, c.req.query(), {
-      status: 400,
-      message: "invalid document migration audit query",
-    });
     try {
       return c.json(
         DocumentDefaultCollectionBackfillAudit.parse(
@@ -227,7 +218,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
             runId: runId.data,
-            ...query,
+            ...query.data,
           }),
         ),
       );
@@ -247,10 +238,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!hasAccountAdminAuthority(authorization)) {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
-    const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
-      status: 400,
-      message: "invalid document migration audit query",
-    });
+    const query = ListDocumentMigrationAuditQuery.safeParse(c.req.query());
+    if (!query.success) {
+      throw new HTTPException(400, { message: "invalid document migration audit query" });
+    }
     try {
       return c.json(
         ListOrganizationDocumentAuthorityReclassificationsResponse.parse(
@@ -259,7 +250,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
-            ...query,
+            ...query.data,
           }),
         ),
       );
@@ -393,7 +384,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
       try {
-        const query = parseRequestQuery(ListDocumentAuthorityReclassificationsQuery, c.req.query());
+        const query = ListDocumentAuthorityReclassificationsQuery.parse(c.req.query());
         return c.json(
           ListDocumentAuthorityReclassificationsResponse.parse(
             await listDocumentAuthorityReclassifications(db, {
@@ -585,10 +576,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   ]) {
     app.post(path, async (c) => {
       await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "documents:search");
-      throw routeRetired(
-        "POST /v1/workspaces/:workspaceId/knowledge/entries/search",
-        "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
-      );
+      throw new HTTPException(410, {
+        message:
+          "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
+      });
     });
   }
 
@@ -598,10 +589,6 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
     const { grant } = access;
-    // A person's dropped text or file is an attachment for the workspace's
-    // sessions (Knowledge reaches the model); the organization may turn them off.
-    if (grant.principalKind !== "agent_attempt")
-      await requireWorkspaceAttachmentsAllowed(deps, grant.accountId);
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -799,7 +786,6 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           deps,
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
-          { preset: oauthAccess.consentPreset },
         );
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
@@ -811,14 +797,12 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
         try {
           await server.connect(transport);
-          observeWorkspaceToolGatewayMcpTransport(deps.observability, transport);
           return await transport.handleRequest(c.req.raw);
         } finally {
           await Promise.allSettled([server.close(), prepared.close()]);
         }
       });
     }
-    excludeWorkspaceToolGatewayTiming();
     let grant: Awaited<ReturnType<typeof requireAccessGrant>>;
     try {
       grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");

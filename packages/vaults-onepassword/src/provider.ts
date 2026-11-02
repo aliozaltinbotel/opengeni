@@ -7,7 +7,6 @@ import {
   type VaultProvider,
   type VaultProviderCapabilities,
   type VaultProviderContext,
-  type VaultProviderOperations,
   VaultProviderError,
   parseTotpInput,
 } from "./contract";
@@ -19,13 +18,7 @@ import {
   onePasswordQuotaFor,
 } from "./budget";
 import { isOnePasswordSessionError, mapOnePasswordError } from "./errors";
-import {
-  applyWrite,
-  buildCreateParams,
-  mapItemFields,
-  planFileChanges,
-  toProviderItemMeta,
-} from "./mapping";
+import { applyWrite, buildCreateParams, mapItemFields, toProviderItemMeta } from "./mapping";
 import {
   ONEPASSWORD_INTEGRATION_NAME,
   type OnePasswordClientCache,
@@ -41,27 +34,6 @@ import { describeOnePasswordToken, onePasswordTokenFingerprint } from "./token";
 export const ONEPASSWORD_VALUE_CACHE_MS = 60_000;
 /** Items per `items.getAll` request when mirroring metadata. */
 export const ONEPASSWORD_GET_ALL_BATCH = 50;
-
-/**
- * What a 1Password service account can do with a vault it may write to.
- * Files are written as file fields (and a Document item's document); archive
- * is 1Password's own Archive, which is shared by everyone with the vault.
- */
-export const ONEPASSWORD_OPERATIONS: VaultProviderOperations = {
-  createItemTypes: ["login", "api_key", "note", "file", "card", "identity", "ssh_key"],
-  updateItem: true,
-  removeField: true,
-  archiveItem: true,
-  archiveKind: "archive",
-  deleteItem: false,
-  restoreItem: false,
-  readFiles: true,
-  writeFiles: true,
-  createTotp: true,
-  updateTotp: true,
-  createVault: true,
-  restoreFieldHistory: false,
-};
 
 /**
  * Group permissions granted on a managed vault: the Teams "edit" bundle
@@ -281,11 +253,6 @@ export function createOnePasswordVaultProvider(
       );
     }
     if (field.source === "notes") return { type: "text", value: item.notes };
-    if (field.source === "sshDetail") {
-      const content = field.field.details?.content as Record<string, unknown> | undefined;
-      const value = content?.[field.part];
-      return { type: "text", value: typeof value === "string" ? value : "" };
-    }
     if (field.source === "file") {
       const bytes = await call(ctx, "read", "filesRead", (client) =>
         client.items.files.read(item.vaultId, item.id, field.file),
@@ -316,13 +283,10 @@ export function createOnePasswordVaultProvider(
         write: true,
         createVault: true,
         totp: true,
-        files: true,
+        // File and Document fields are readable; writing them is not supported.
+        files: false,
         groupGrants: planTier !== "family",
         passkeys: false,
-        operations: {
-          ...ONEPASSWORD_OPERATIONS,
-          createItemTypes: [...ONEPASSWORD_OPERATIONS.createItemTypes],
-        },
       };
     },
 
@@ -343,18 +307,11 @@ export function createOnePasswordVaultProvider(
 
     async listItems(ctx, externalVaultId): Promise<ProviderItemMeta[]> {
       assertOnePasswordIds(externalVaultId);
-      // Archived items are mirrored too, marked archived, so they show as
-      // archived rather than vanishing (1Password's archive is shared).
       const overviews = await call(ctx, "list", "itemsList", (client) =>
         client.items.list(externalVaultId, {
           type: "ByState",
-          content: { active: true, archived: true },
+          content: { active: true, archived: false },
         }),
-      );
-      const archived = new Set(
-        overviews
-          .filter((overview) => overview.state === "archived")
-          .map((overview) => overview.id),
       );
       const items: ProviderItemMeta[] = [];
       for (let start = 0; start < overviews.length; start += ONEPASSWORD_GET_ALL_BATCH) {
@@ -364,9 +321,7 @@ export function createOnePasswordVaultProvider(
         );
         for (const response of batch.individualResponses) {
           // An item deleted between list and getAll simply drops out of the mirror.
-          if (response.content) {
-            items.push(toProviderItemMeta(response.content, archived.has(response.content.id)));
-          }
+          if (response.content) items.push(toProviderItemMeta(response.content));
         }
       }
       return items;
@@ -393,7 +348,6 @@ export function createOnePasswordVaultProvider(
       }
       const itemId = write.externalItemId;
       forgetItem(ctx, externalVaultId, itemId);
-      let saved: SdkItem;
       for (let attempt = 0; ; attempt += 1) {
         const current = await call(ctx, "read", "itemsGet", (client) =>
           client.items.get(externalVaultId, itemId),
@@ -409,11 +363,9 @@ export function createOnePasswordVaultProvider(
           );
         }
         const next = applyWrite(current, write);
-        // Checked before anything is sent.
-        planFileChanges(next, write);
         try {
-          saved = await call(ctx, "write", "itemsPut", (client) => client.items.put(next));
-          break;
+          const saved = await call(ctx, "write", "itemsPut", (client) => client.items.put(next));
+          return toProviderItemMeta(saved);
         } catch (error) {
           // Without an explicit expected version, a concurrent edit is re-read and
           // the same field patch re-applied once; never overwrite a stale view.
@@ -427,35 +379,6 @@ export function createOnePasswordVaultProvider(
           forgetItem(ctx, externalVaultId, itemId);
         }
       }
-      const changes = planFileChanges(saved, write);
-      try {
-        for (const change of changes) {
-          const item: SdkItem = saved;
-          saved =
-            change.kind === "attach"
-              ? await call(ctx, "write", "filesAttach", (client) =>
-                  client.items.files.attach(item, change.file),
-                )
-              : change.kind === "delete"
-                ? await call(ctx, "write", "filesDelete", (client) =>
-                    client.items.files.delete(item, change.sectionId, change.fieldId),
-                  )
-                : await call(ctx, "write", "filesReplaceDocument", (client) =>
-                    client.items.files.replaceDocument(item, {
-                      name: change.name,
-                      content: change.content,
-                    }),
-                  );
-        }
-      } catch (error) {
-        throw new VaultProviderError(
-          "provider_outcome_unknown",
-          `1Password saved the item, but its files did not all change${error instanceof Error ? ` (${error.message})` : ""}; check the item before trying again`,
-        );
-      } finally {
-        forgetItem(ctx, externalVaultId, itemId);
-      }
-      return toProviderItemMeta(saved);
     },
 
     async archiveItem(ctx, externalVaultId, externalItemId) {

@@ -1,10 +1,10 @@
-import { readRetiredWorkflow, retiredWorkflowNames } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const workflowDir = resolve(root, ".github/workflows");
 const playwrightActionPath = resolve(root, ".github/actions/playwright-browsers/action.yml");
 const PLAYWRIGHT_ACTION = "./.github/actions/playwright-browsers";
 const MAX_JOB_TIMEOUT_MINUTES = 120;
@@ -22,21 +22,6 @@ type Job = Readonly<{
   "timeout-minutes"?: unknown;
 }>;
 type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
-
-function validJobCap(file: string, jobName: string, job: Job): boolean {
-  const cap = numericCap(job["timeout-minutes"]);
-  if (cap === null) return false;
-  const priorityLane = new Map([["ci.yml:automation-admission", "pr"]]).get(`${file}:${jobName}`);
-  if (!priorityLane) return cap <= MAX_JOB_TIMEOUT_MINUTES;
-  // Five-hour bounded admission wait plus twenty minutes for setup/planning.
-  // This is not a wider cap for test/build jobs or arbitrary added workflows.
-  return (
-    cap === 320 &&
-    (job.steps ?? []).filter(
-      (step) => step.run === `bun scripts/ci/github-pr-ci.ts priority ${priorityLane}`,
-    ).length === 1
-  );
-}
 
 const EXPECTED_CAPS = [
   [
@@ -228,12 +213,12 @@ const EXPECTED_JOB_BUDGETS = {
 } as const;
 
 async function loadWorkflows(): Promise<Record<string, Workflow>> {
-  const files = retiredWorkflowNames().filter((entry) => /\.ya?ml$/u.test(entry)).sort();
+  const files = (await readdir(workflowDir)).filter((entry) => /\.ya?ml$/u.test(entry)).sort();
   return Object.fromEntries(
     await Promise.all(
       files.map(async (file) => [
         file,
-        Bun.YAML.parse(readRetiredWorkflow(file)) as Workflow,
+        Bun.YAML.parse(await readFile(resolve(workflowDir, file), "utf8")) as Workflow,
       ]),
     ),
   );
@@ -244,29 +229,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("extended admission caps require exact job, lane and bounded timeout", () => {
-    const job: Job = {
-      "timeout-minutes": 320,
-      steps: [{ run: "bun scripts/ci/github-pr-ci.ts priority pr" }],
-    };
-    expect(validJobCap("ci.yml", "automation-admission", job)).toBe(true);
-    expect(validJobCap("pr-ci.yml", "plan", job)).toBe(false);
-    expect(validJobCap("ci.yml", "unit-shards", job)).toBe(false);
-    expect(validJobCap("ci.yml", "automation-admission", { ...job, "timeout-minutes": 321 })).toBe(
-      false,
-    );
-    expect(validJobCap("ci.yml", "automation-admission", { ...job, steps: [] })).toBe(false);
-    expect(validJobCap("batch-ci.yml", "plan", job)).toBe(false);
-    expect(
-      validJobCap("batch-ci.yml", "plan", {
-        ...job,
-        steps: [{ run: "bun scripts/ci/github-pr-ci.ts priority batch" }],
-      }),
-    ).toBe(false);
-    expect(validJobCap("batch-ci.yml", "plan", { "timeout-minutes": 20, steps: [] })).toBe(true);
-    expect(validJobCap("other.yml", "plan", job)).toBe(false);
-  });
-  test("historical workflow fixture: all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
+  test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -276,7 +239,7 @@ describe("workflow timeout contract", () => {
       for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
         if (job.uses) continue;
         const jobCap = numericCap(job["timeout-minutes"]);
-        if (jobCap === null || !validJobCap(file, jobName, job)) {
+        if (jobCap === null || jobCap > MAX_JOB_TIMEOUT_MINUTES) {
           violations.push(`${file}:${jobName} has an invalid job cap`);
           continue;
         }
@@ -313,7 +276,7 @@ describe("workflow timeout contract", () => {
     }
   });
 
-  test("historical workflow fixture: the consolidated browser lane and Playwright runtime budget stay structurally bound", async () => {
+  test("the consolidated browser lane and Playwright runtime budget stay structurally bound", async () => {
     const workflows = await loadWorkflows();
     const callers = Object.entries(workflows).flatMap(([file, workflow]) =>
       Object.entries(workflow.jobs ?? {}).flatMap(([job, definition]) =>
@@ -322,13 +285,10 @@ describe("workflow timeout contract", () => {
           .map((step) => ({ file, job, step })),
       ),
     );
-    expect(callers).toHaveLength(6);
+    expect(callers).toHaveLength(5);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
       "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
-    expect(
-      callers.find(({ file }) => file === "compact-session-view.yml")?.step.with?.browsers,
-    ).toBe("chromium");
 
     const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {
       inputs: Record<string, { default?: unknown }>;
@@ -351,9 +311,9 @@ describe("workflow timeout contract", () => {
     expect(((duration + 15) * attempts) / 60).toBeLessThanOrEqual(17);
   });
 
-  test("historical workflow fixture: Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {
+  test("Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {
     for (const file of Object.keys(await loadWorkflows())) {
-      expect(readRetiredWorkflow(file)).not.toContain(
+      expect(await readFile(resolve(workflowDir, file), "utf8")).not.toContain(
         "playwright install",
       );
     }

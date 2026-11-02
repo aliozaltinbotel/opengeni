@@ -21,8 +21,14 @@ import {
   updateRigChangeStatus,
   type Database,
 } from "@opengeni/db";
-import { freePort, startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import {
+  freePort,
+  startProcess,
+  startTestServices,
+  waitFor,
+  type StartedProcess,
+  type TestServices,
+} from "@opengeni/testing";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const STATE_FILE = `${process.env.RIG_UI_STATE_DIR ?? "/tmp"}/rig-ui-stack.json`;

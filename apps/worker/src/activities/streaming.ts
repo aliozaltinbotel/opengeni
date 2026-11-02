@@ -4,7 +4,6 @@ import type { AppendEventInput } from "@opengeni/db";
 import {
   SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
   reasoningDeltaSeparator,
-  canMergeReasoningDelta,
 } from "@opengeni/events";
 import { Context } from "@temporalio/activity";
 
@@ -94,8 +93,7 @@ export function mergeAdjacentTextDeltas(events: AppendEventInput[]): AppendEvent
       run &&
       run.first.type === event.type &&
       run.head.messageId === delta.messageId &&
-      run.head.phase === delta.phase &&
-      (event.type !== "agent.reasoning.delta" || canMergeReasoningDelta(run.text, delta.text))
+      run.head.phase === delta.phase
     ) {
       const piece =
         (event.type === "agent.reasoning.delta"
@@ -147,14 +145,6 @@ export function createRuntimeBatcher<Mutation = never>(
   let awaitingFirstText = true;
   let trailingTimer: ReturnType<typeof setTimeout> | null = null;
   let activeBatchSize = 0;
-  // A flush covers the queue prefix present when requested. Deltas arriving
-  // during its append keep their own trailing window unless another explicit,
-  // leading-edge or size-triggered flush requests them. Draining every arrival
-  // immediately would make storage latency, rather than the window, set the
-  // write cadence during a sustained stream.
-  let queuedSequence = 0;
-  let flushedSequence = 0;
-  let requestedFlushSequence = 0;
   // One drain loop owns `flushEvents`, so DB-assigned sequence order always
   // matches push order. Ordinary deltas do not await this promise; structural
   // boundaries, explicit flushes, and the bounded high-water mark do.
@@ -198,7 +188,6 @@ export function createRuntimeBatcher<Mutation = never>(
       // carries any pending deltas in order (same flush, order preserved).
       const pendingEvent = { type: event.type, payload: event.payload, ...(event.occurredAt ? { occurredAt: event.occurredAt } : {}) };
       pending.push(pendingEvent);
-      queuedSequence += 1;
       if (mutation !== undefined) pendingMutations.set(pendingEvent, mutation);
       if (pushOptions.defer) {
         if (activeBatchSize + pending.length >= MAX_BUFFERED_EVENTS) await flush();
@@ -230,7 +219,7 @@ export function createRuntimeBatcher<Mutation = never>(
   };
 
   function armTrailingTimer() {
-    if (trailingTimer !== null || pending.length === 0) {
+    if (trailingTimer !== null) {
       return;
     }
     trailingTimer = setTimeout(() => {
@@ -259,7 +248,6 @@ export function createRuntimeBatcher<Mutation = never>(
   }
 
   function startDrain(): Promise<void> {
-    requestedFlushSequence = queuedSequence;
     if (drainPromise) {
       return drainPromise;
     }
@@ -270,24 +258,14 @@ export function createRuntimeBatcher<Mutation = never>(
       return Promise.resolve();
     }
     clearTrailingTimer();
-    // Clear `drainPromise` in the same step that finishes the requested prefix,
-    // so a new flush never joins a drain that has already finished its work.
-    // Publish ownership before invoking the sink: a synchronous callback may
-    // enqueue another boundary, which must join this drain rather than start one.
-    let resolveDrain!: () => void;
-    let rejectDrain!: (reason: unknown) => void;
-    const running = new Promise<void>((resolve, reject) => {
-      resolveDrain = resolve;
-      rejectDrain = reject;
-    });
-    drainPromise = running;
-    void (async () => {
+    // Clear `drainPromise` in the same step that observes an empty queue, so a
+    // push can never join a drain that has already finished its last batch
+    // (that fragment would then wait for the trailing timer).
+    let finished = false;
+    const running = (async () => {
       try {
-        while (flushedSequence < requestedFlushSequence) {
-          const batch = pending.splice(
-            0,
-            Math.min(MAX_BATCH_EVENTS, requestedFlushSequence - flushedSequence),
-          );
+        while (pending.length > 0) {
+          const batch = pending.splice(0, MAX_BATCH_EVENTS);
           const events = mergeAdjacentTextDeltas(batch);
           const mutations: Mutation[] = [];
           for (const event of batch) {
@@ -300,7 +278,6 @@ export function createRuntimeBatcher<Mutation = never>(
           try {
             if (mutations.length > 0) await flushEvents(events, mutations);
             else await flushEvents(events);
-            flushedSequence += batch.length;
           } catch (error) {
             flushFailed = true;
             flushFailure = error;
@@ -320,10 +297,13 @@ export function createRuntimeBatcher<Mutation = never>(
           }
         }
       } finally {
+        finished = true;
         drainPromise = null;
-        if (!flushFailed) armTrailingTimer();
       }
-    })().then(resolveDrain, rejectDrain);
+    })();
+    if (!finished) {
+      drainPromise = running;
+    }
     return running;
   }
 

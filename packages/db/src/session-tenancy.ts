@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
-import * as schema from "./schema";
-import { and, eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import {
   SessionTenancyBlocker as SessionTenancyBlockerSchema,
-  mergeToolRefs,
-  ToolRef,
   type SessionTenancyBlocker,
 } from "@opengeni/contracts";
 import {
@@ -216,9 +213,6 @@ export type TransitionSessionVisibilityResult = {
 };
 
 export type ForkSessionContentInput = {
-  hostSessionCreatePending?: boolean;
-  hostRequiredMcpServerIds?: readonly string[];
-
   sourceEventId?: string;
   sourceWorkspaceId: string;
   sourceSessionId: string;
@@ -906,56 +900,6 @@ async function carrySourceMachineToFork(
   });
 }
 
-/** Runs inside the same transaction as SQL's fork insertion, before the shell becomes visible. */
-async function prepareForkHostSessionCreate(
-  db: Database,
-  accountId: string,
-  input: ForkSessionContentInput,
-  result: ForkSessionContentResult,
-): Promise<void> {
-  if (result.replay || (!input.hostSessionCreatePending && !input.hostRequiredMcpServerIds?.length))
-    return;
-  const [session] = await db
-    .select()
-    .from(schema.sessions)
-    .where(
-      and(
-        eq(schema.sessions.accountId, accountId),
-        eq(schema.sessions.workspaceId, input.destinationWorkspaceId),
-        eq(schema.sessions.id, result.sessionId),
-      ),
-    )
-    .limit(1);
-  if (!session) throw new Error("HOST_SESSION_CREATE_NOT_FOUND");
-  const ids = [
-    ...new Set([
-      ...(session.toolPolicy.hostRequiredMcpServerIds ?? []),
-      ...(input.hostRequiredMcpServerIds ?? []),
-    ]),
-  ];
-  await db
-    .update(schema.sessions)
-    .set({
-      hostSessionCreateState: input.hostSessionCreatePending ? "pending" : "ready",
-      ...(ids.length
-        ? {
-            toolPolicy: { ...session.toolPolicy, hostRequiredMcpServerIds: ids },
-            tools: mergeToolRefs(
-              ToolRef.array().parse(session.tools),
-              ids.map((id) => ({ kind: "mcp" as const, id, eager: true })),
-            ),
-          }
-        : {}),
-    })
-    .where(
-      and(
-        eq(schema.sessions.accountId, accountId),
-        eq(schema.sessions.workspaceId, input.destinationWorkspaceId),
-        eq(schema.sessions.id, result.sessionId),
-      ),
-    );
-}
-
 export async function forkSessionContent(
   db: Database,
   input: ForkSessionContentInput,
@@ -1021,7 +965,6 @@ export async function forkSessionContent(
           );
           const result = rows[0];
           if (!result) throw new Error("Session fork returned no result");
-          await prepareForkHostSessionCreate(scopedDb, accountId, input, result);
           await carrySourceMachineToFork(scopedDb, accountId, input, result);
           await input.beforeCommit?.(scopedDb);
           return result;
@@ -1056,7 +999,6 @@ export async function forkSessionContent(
         );
         const result = rows[0];
         if (!result) throw new Error("Session fork returned no result");
-        await prepareForkHostSessionCreate(scopedDb, accountId, input, result);
         await carrySourceMachineToFork(scopedDb, accountId, input, result);
         await input.beforeCommit?.(scopedDb);
         return result;

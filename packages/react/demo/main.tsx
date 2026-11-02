@@ -299,7 +299,7 @@ function DemoNavigation({
         className={`${itemClass} ${activeView === "schedules" && !workspaceOpen ? selectedClass : idleClass}`}
       >
         <CalendarClockIcon className="size-4" aria-hidden />
-        <span className="truncate">Automations</span>
+        <span className="truncate">Schedules</span>
       </button>
       <button
         ref={workspaceTriggerRef}
@@ -330,7 +330,7 @@ function DemoPrimary({ compact, view }: { compact: boolean; view: DemoView }) {
       </div>
       <div
         role={!compact ? "complementary" : undefined}
-        aria-label={!compact ? "Fleet and automations" : undefined}
+        aria-label={!compact ? "Fleet and scheduled tasks" : undefined}
         tabIndex={!compact ? 0 : undefined}
         className={
           compact
@@ -512,16 +512,16 @@ function Schedules({ standalone }: { standalone: boolean }) {
               : "mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle"
           }
         >
-          Automations
+          Scheduled tasks
         </h2>
         {standalone ? (
           <p className="mt-0.5 text-[11px] text-og-fg-subtle">
-            Agent work that runs on a schedule or when something happens
+            Recurring autonomous work configured for this workspace
           </p>
         ) : null}
       </div>
       <ul
-        aria-label={standalone ? "Automations" : undefined}
+        aria-label={standalone ? "Scheduled tasks" : undefined}
         tabIndex={standalone ? 0 : undefined}
         className={
           standalone

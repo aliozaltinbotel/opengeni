@@ -35,9 +35,9 @@ import {
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 import {
   getSandbox,
-  hasWorkspaceManagedSkill,
+  listSkillDescriptors,
   requireWorkspace,
-  sessionsWithToolRouterHistory,
+  sessionHasToolRouterHistory,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
@@ -99,13 +99,9 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   const policy = input.toolPolicy;
   const availableIds = new Set(input.availableMcpServerIds);
   const defaultIds = new Set(input.defaultMcpServerIds ?? []);
-  const hostRequiredIds = new Set(policy.hostRequiredMcpServerIds ?? []);
-  const mandatoryIds = sortedIds([
-    ...MANDATORY_SESSION_MCP_SERVER_IDS.filter((id) => availableIds.has(id)),
-    ...hostRequiredIds,
-  ]);
-  if ([...hostRequiredIds].some((id) => !availableIds.has(id)))
-    throw new Error("HOST_REQUIRED_MCP_SERVER_UNAVAILABLE");
+  const mandatoryIds: string[] = MANDATORY_SESSION_MCP_SERVER_IDS.filter((id) =>
+    availableIds.has(id),
+  );
   const mandatoryIdSet = new Set<string>(mandatoryIds);
   const tracksWorkspaceDefaults = policy.mode === "workspace_default";
   const excludedIds = new Set(tracksWorkspaceDefaults ? policy.excludedMcpServerIds : []);
@@ -131,11 +127,7 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   }
   toolRefs = mergeToolRefs(
     toolRefs,
-    mandatoryIds.map((id) => ({
-      kind: "mcp" as const,
-      id,
-      ...(hostRequiredIds.has(id) ? { eager: true as const } : {}),
-    })),
+    mandatoryIds.map((id) => ({ kind: "mcp" as const, id })),
   );
 
   // `effectiveIds` is the requested policy truth, including unavailable
@@ -153,11 +145,7 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   const effectiveIds = sortedIds(
     mergeToolRefs(
       requestedEffectiveRefs,
-      mandatoryIds.map((id) => ({
-        kind: "mcp" as const,
-        id,
-        ...(hostRequiredIds.has(id) ? { eager: true as const } : {}),
-      })),
+      mandatoryIds.map((id) => ({ kind: "mcp" as const, id })),
     ).map((tool) => tool.id),
   );
   const configuredIds = effectiveIds.filter((id) => availableIds.has(id));
@@ -253,14 +241,7 @@ export function resolveTurnToolPolicy(
     toolPolicy: input.toolPolicy,
     sessionTools: scheduledIds ? input.turn.tools : input.session.tools,
     availableMcpServerIds: scheduledIds
-      ? [
-          ...new Set([
-            ...scheduledIds.filter((id) => availableIds.has(id)),
-            ...(input.toolPolicy.hostRequiredMcpServerIds ?? []).filter((id) =>
-              availableIds.has(id),
-            ),
-          ]),
-        ]
+      ? scheduledIds.filter((id) => availableIds.has(id))
       : availableIds,
     defaultMcpServerIds: scheduledIds ?? input.defaultMcpServerIds ?? [],
   });
@@ -378,7 +359,7 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory] = await Promise.all([
+  const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
     workspaceRead ?? requireWorkspace(deps.db, workspaceId),
     resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: configured[0]!.accountId,
@@ -386,12 +367,12 @@ export async function workspaceSessionEffectiveToolsContext(
       retainedProductModelIds: configured.map((session) => session.model),
     }),
     configured.some((session) => session.agent?.capabilities.skills === "read")
-      ? hasWorkspaceManagedSkill(deps.db, {
+      ? listSkillDescriptors(deps.db, {
           accountId: configured[0]!.accountId,
           workspaceId,
           subjectId,
         })
-      : Promise.resolve(false),
+      : Promise.resolve([]),
     deps.settings.sandboxSelfhostedEnabled
       ? Promise.all(
           sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
@@ -407,24 +388,34 @@ export async function workspaceSessionEffectiveToolsContext(
           ),
         )
       : Promise.resolve([]),
-    sessionsWithToolRouterHistory(deps.db, {
-      accountId: configured[0]!.accountId,
-      workspaceId,
-      sessionIds: [...new Set(configured.map((session) => session.id))],
-    }),
+    Promise.all(
+      [...new Map(configured.map((session) => [session.id, session])).values()].map(
+        async (session) =>
+          [
+            session.id,
+            await sessionHasToolRouterHistory(deps.db, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: session.id,
+            }),
+          ] as const,
+      ),
+    ),
   ]);
   return {
     ...baseline,
     settings: catalog.settings,
     workspaceSettings: workspace.settings,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
-    hasWorkspaceSkills,
+    hasWorkspaceSkills: descriptors.some((entry) => entry.activationMode === "workspace_managed"),
     activeSandboxBackends: new Map(
       sandboxes.flatMap(([id, sandbox]) =>
         sandbox?.kind === "selfhosted" ? [[id, "selfhosted" as const]] : [],
       ),
     ),
-    routerHistorySessionIds: routerHistory,
+    routerHistorySessionIds: new Set(
+      routerHistory.filter(([, present]) => present).map(([id]) => id),
+    ),
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -459,9 +450,6 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
     if (id === "builtin:secrets") return tools.has("secret_search");
-    if (id === "builtin:event-triggers") {
-      return tools.has("scheduled_tasks_create") && tools.has("event_sources_list");
-    }
     return true;
   });
 }

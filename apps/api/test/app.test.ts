@@ -50,8 +50,7 @@ import {
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import * as opengeniDb from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
@@ -451,7 +450,6 @@ describe("API helpers", () => {
     expect(temporalOverlapPolicy("allow_concurrent")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
     expect(temporalOverlapPolicy("skip")).toBe(ScheduleOverlapPolicy.SKIP);
     expect(temporalOverlapPolicy("buffer_one")).toBe(ScheduleOverlapPolicy.BUFFER_ONE);
-    expect(temporalOverlapPolicy("steer")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
   });
 
   test("only creates a schedule after update when Temporal reports not found", () => {
@@ -870,7 +868,6 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
-    expect(errorCodeForStatus(410)).toBe("gone");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });
 
@@ -906,40 +903,6 @@ describe("API helpers", () => {
       expect(response.headers.get("www-authenticate")).toContain(
         `resource_metadata="https://api.example.test/.well-known/oauth-protected-resource${path}"`,
       );
-    }
-  });
-
-  test("challenges a workspace MCP request the deployment perimeter refuses", async () => {
-    const workspaceId = "00000000-0000-4000-8000-000000000001";
-    const app = createApp({
-      settings: testSettings({
-        productAccessMode: "configured",
-        authRequired: true,
-        accessKey: "configured-deployment-access-key",
-        mcpOauthEnabled: true,
-        publicBaseUrl: "https://api.example.test",
-      }),
-      db: { execute: async () => [] } as never,
-      bus: {} as never,
-      workflowClient: {} as never,
-      managedAuth: null,
-    });
-
-    for (const headers of [{}, { authorization: "Bearer not-a-prefixed-token" }]) {
-      const path = `/v1/workspaces/${workspaceId}/mcp`;
-      const response = await app.request(`http://attacker.example${path}`, {
-        method: "POST",
-        headers: { ...headers, "x-forwarded-host": "attacker.example" },
-      });
-      expect(response.status).toBe(401);
-      expect(response.headers.get("www-authenticate")).toBe(
-        `Bearer resource_metadata="https://api.example.test/.well-known/oauth-protected-resource${path}", scope="mcp:access"`,
-      );
-      expect(await response.json()).toEqual({ error: "unauthorized" });
-
-      const rest = await app.request(`/v1/workspaces/${workspaceId}/tools/catalog`, { headers });
-      expect(rest.status).toBe(401);
-      expect(rest.headers.get("www-authenticate")).toBeNull();
     }
   });
 
@@ -2180,21 +2143,6 @@ describe("GET /v1/config/client", () => {
       testSettings({ productAccessMode: "managed", managedAuthNewSignupsEnabled: false }),
     );
     expect(paused.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: false });
-  });
-
-  test("projects the server's own email verification requirement", async () => {
-    const required = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
-    expect(required.auth).toMatchObject({
-      mode: "managedSession",
-      emailVerificationRequired: true,
-    });
-    const optional = await fetchClientConfig(
-      testSettings({ productAccessMode: "managed", managedAuthRequireEmailVerification: false }),
-    );
-    expect(optional.auth).toMatchObject({
-      mode: "managedSession",
-      emailVerificationRequired: false,
-    });
   });
 
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {

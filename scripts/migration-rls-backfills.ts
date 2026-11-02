@@ -54,8 +54,6 @@ const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
   // 0855 statements 3 and 4: patch both fork routines, then check the patch.
   "0b02e5d3e8647e158836970622896e15d0ecc8c0bbd9c1a06583594e648639a3",
   "2ec24b44e91326ab518e13ea90d1b65bbebafb24ec1361ce589032ebe9c7904b",
-  // 0904: one patch of the event cursor trigger's session projection.
-  "9943693884ffedecf77e8b3a535cb03202d793f91bd1a241e9ff4aec1a54d44e",
 ]);
 
 /**
@@ -559,13 +557,13 @@ function stripCatalogRoutinePatchLiterals(statement: string): Readonly<{ source:
     // Anchor length/containment checks over catalog source produce only scalar
     // metadata. Any other use, reassignment or execution remains opaque.
     if (use[2] === variable) {
-      const catalogSources = [definition, ...(catalogBinding?.bodyVariables ?? [])].join("|");
+      const sources = [definition, ...(catalogBinding?.bodyVariables ?? [])].join("|");
       remainder = remainder
-        .replace(new RegExp(`\\blength\\(\\s*replace\\(\\s*(?:${catalogSources})\\s*,\\s*${variable}\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\blength\\(\\s*replace\\(\\s*(?:${sources})\\s*,\\s*${variable}\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
         .replace(new RegExp(`\\blength\\(\\s*${variable}\\s*\\)`, "gi"), "")
-        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?strpos\\(\\s*(?:${catalogSources})\\s*,\\s*${variable}\\s*\\)`, "gi"), "")
-        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?position\\(\\s*${variable}\\s+IN\\s+(?:${catalogSources})\\s*\\)`, "gi"), "")
-        .replace(new RegExp(`\\b(?:${catalogSources})\\s+(?:NOT\\s+)?LIKE\\s*'%'\\s*\\|\\|\\s*${variable}\\s*\\|\\|\\s*'%'`, "gi"), "");
+        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?strpos\\(\\s*(?:${sources})\\s*,\\s*${variable}\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?position\\(\\s*${variable}\\s+IN\\s+(?:${sources})\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:${sources})\\s+(?:NOT\\s+)?LIKE\\s*'%'\\s*\\|\\|\\s*${variable}\\s*\\|\\|\\s*'%'`, "gi"), "");
     }
     const variableUses = remainder.replace(/\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/g, "''");
     if (new RegExp(`\\b${variable}\\b`, "i").test(variableUses)) return whole;

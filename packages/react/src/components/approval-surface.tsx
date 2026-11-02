@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { dequal } from "dequal";
 import { ChevronLeftIcon, ChevronRightIcon, ShieldCheckIcon } from "lucide-react";
-import { OpenGeniApiError, toolReviewDetails, type ToolActionReview } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+  type ToolActionReview,
+} from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
-import {
-  approvalAnswerLabels,
-  approvalToolName,
-  formatApprovalToolName,
-  pendingApprovalReview,
-} from "../approval-review-model";
+import { toolDisplayName } from "../timeline/tool-display-name";
+import { builtInToolStep } from "../timeline/tool-steps";
 import {
   ToolActionReviewCard,
   ToolActionReviewDetails,
@@ -39,10 +41,18 @@ export const defaultApprovalSurfaceMessages = (t: OpenGeniText): ApprovalSurface
   reject: t("approvalSurface.decline"),
   approving: t("approvalSurface.approving"),
   rejecting: t("approvalSurface.declining"),
-  formatToolName: (name) => formatApprovalToolName(t, name),
+  formatToolName: (name) =>
+    name.includes("__") || /^[a-f0-9]{64}$/.test(name) || builtInToolStep(name)
+      ? toolDisplayName(t, name, undefined, "running")
+      : humanToolName(name.replaceAll("_", " ").replaceAll(".", " › ")),
   showDetails: t("approvalSurface.viewFullDetails"),
   hideDetails: t("approvalSurface.backToReview"),
 });
+/** "batch modify messages" → "Modify messages": how a call is grouped is not what it does. */
+function humanToolName(name: string): string {
+  const phrase = name.replace(/^batch\s+/i, "").trim();
+  return phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : name;
+}
 export type ApprovalSurfaceProps = {
   approvals: PendingApproval[];
   onApprove: (approval: PendingApproval) => void | Promise<void>;
@@ -60,6 +70,17 @@ export type ApprovalSurfaceProps = {
   className?: string | undefined;
 };
 export type ApprovalField = { key: string; label: string; value: string };
+/** @deprecated Prefer the versioned server review; retained for small custom renderers. */
+export function approvalArgumentFields(value: unknown): ApprovalField[] | null {
+  const projected = toolReviewFields(value);
+  return projected.fields.length
+    ? projected.fields.map((field) => ({
+        key: field.path.slice(1),
+        label: field.label,
+        value: field.preview,
+      }))
+    : null;
+}
 
 /** Hosts provide decisions; this surface never mutates the approved payload. */
 export function ApprovalSurface({
@@ -272,10 +293,30 @@ function ApprovalRequest({
   }, [request]);
   const stableApproval = request.approval;
   const { formatToolName, approve: approveLabel } = messages;
-  const toolName = approvalToolName(stableApproval);
-  const answer = approvalAnswerLabels(t, toolName);
   const fallback = useMemo<ToolActionReview>(
-    () => pendingApprovalReview(stableApproval, { formatToolName, approveLabel }),
+    () => ({
+      version: 1,
+      id: stableApproval.id,
+      actionDigest: "",
+      revision: "legacy",
+      status: "pending",
+      ...toolReviewAction(stableApproval.name, stableApproval.arguments, {
+        kind: "generic",
+        title:
+          stableApproval.display?.title ??
+          formatToolName(stableApproval.display?.toolName ?? stableApproval.name),
+      }),
+      ...(stableApproval.display?.accountLabel
+        ? { accountLabel: stableApproval.display.accountLabel }
+        : {}),
+      ...toolReviewFields(stableApproval.arguments),
+      reason: "",
+      createdAt: "",
+      updatedAt: "",
+      approveLabel,
+      availableActions: stableApproval.arguments === undefined ? [] : ["approve", "reject"],
+      detailsAvailable: stableApproval.arguments !== undefined,
+    }),
     [stableApproval, formatToolName, approveLabel],
   );
   const loadLegacyDetails = useCallback<ToolReviewDetailsLoader>(
@@ -332,7 +373,7 @@ function ApprovalRequest({
             <DeclineButton
               busy={Boolean(actions.disabled || actions.submitting)}
               submitting={actions.submitting === "reject"}
-              label={answer?.reject ?? messages.reject}
+              label={messages.reject}
               onClick={actions.onReject}
             />
           </div>
@@ -366,7 +407,7 @@ function ApprovalRequest({
               <DeclineButton
                 busy={Boolean(actions.disabled || actions.submitting)}
                 submitting={actions.submitting === "reject"}
-                label={answer?.reject ?? messages.reject}
+                label={messages.reject}
                 onClick={actions.onReject}
               />
             </div>
@@ -376,8 +417,7 @@ function ApprovalRequest({
         </ToolReviewFrame>
       </div>
     );
-  const saved = loaded ?? fallback;
-  const review = answer ? { ...saved, approveLabel: answer.approve } : saved;
+  const review = loaded ?? fallback;
   if (detailPath !== null)
     return (
       <ToolActionReviewDetails
@@ -410,7 +450,7 @@ function ApprovalRequest({
         review={review}
         {...actions}
         pendingLabel={messages.title}
-        rejectLabel={answer?.reject ?? messages.reject}
+        rejectLabel={messages.reject}
         onViewDetails={
           loaded && onViewDetails
             ? (path) => onViewDetails(review, path)

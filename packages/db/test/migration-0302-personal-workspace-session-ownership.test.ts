@@ -21,7 +21,7 @@ import {
   acquireSharedTestDatabase,
   type OwnerMigratedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   createDb,
   createSession,

@@ -22,7 +22,6 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
-import type { SpeechToTextDeployment } from "./transcription-service/deployment";
 import type { ModelCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
@@ -32,12 +31,6 @@ import type {
   EditableArtifactOfficeImportPort,
 } from "./editable-artifacts";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import type {
-  HostWebhookDeliveryRequest,
-  OrganizationGovernancePort,
-  McpOAuthHostConsentPort,
-} from "@opengeni/contracts/organization-governance";
-import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
 import type { NativeAccessContinuation } from "./access";
@@ -60,15 +53,6 @@ export type SessionWorkflowClient = {
   queryKnowledge?: (input: KnowledgeQueryWorkflowRequest) => Promise<KnowledgeEntryListResponse>;
   prepareKnowledge?: (input: KnowledgePreparationWorkflowRequest) => Promise<KnowledgeSavePreparationResponse>;
   startRealtimeUsageObservation?: (input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string }) => Promise<void>;
-  /**
-   * Start one durable host webhook delivery (`settings.hostWebhooks`), before
-   * the change it reports is written; the worker sends it once it sees the
-   * change committed. Idempotent on `deliveryId`. The implementation bounds
-   * the start with its own deadline (the API's Temporal client: 3 seconds):
-   * the change waits for it, and a start that fails or times out is only
-   * reported.
-   */
-  startHostWebhookDelivery?: (input: HostWebhookDeliveryRequest) => Promise<void>;
   triggerAutomationRun?: (input: {
     accountId: string;
     workspaceId: string;
@@ -137,45 +121,6 @@ export type SessionWorkflowClient = {
     changeId?: string;
     versionId?: string;
     workflowId?: string;
-  }) => Promise<void>;
-  /**
-   * Durably deletes objects a request staged in storage once `deleteAfter`
-   * passes, whether or not the request ever finishes. Repeating the same keys
-   * is a no-op. Optional for embedded clients; callers without it must clean
-   * up within the request.
-   */
-  scheduleTransientObjectDeletion?: (input: {
-    workspaceId: string;
-    objectKeys: string[];
-    deleteAfter: Date;
-  }) => Promise<void>;
-  /**
-   * Start a recording's transcript or deletion workflow. Starting one that is
-   * already running does nothing. Optional for embedded clients; the worker's
-   * recovery sweep starts any it misses.
-   */
-  startRecordingWorkflow?: (input: {
-    kind: "transcript" | "deletion";
-    accountId: string;
-    workspaceId: string;
-    recordingId: string;
-    versionId: string | null;
-    ownerSubjectId: string;
-  }) => Promise<void>;
-  /**
-   * Record an agent's browser recording whose frame bundle is uploaded and
-   * make its video. Starting it again for the same recording while it runs,
-   * or after it finished, does nothing.
-   */
-  startBrowserRecordingVideo?: (input: {
-    accountId: string;
-    workspaceId: string;
-    recordingId: string;
-    ownerSubjectId: string;
-    visibility: "private" | "workspace";
-    startedAt: string;
-    durationMilliseconds: number;
-    bundle: { byteLength: number; sha256: string };
   }) => Promise<void>;
   check?: () => Promise<void>;
 };
@@ -299,54 +244,6 @@ export type AppDependencies = {
    * an unavailable or invalid host decision.
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
-  /**
-   * Optional embedding-host membership governance. Unset (or null) preserves
-   * standalone administration; once bound, a governed organization refuses each
-   * membership, role and credential mutation the host does not allow, and the
-   * host's own commands are served under `/v1/host/organizations/*`.
-   */
-  organizationGovernance?: OrganizationGovernancePort | null;
-  /** Optional human-authenticated handoff; durable HOST admission remains required. */
-  mcpOAuthHostConsent?: McpOAuthHostConsentPort | null;
-  /**
-   * Optional embedding-host tool servers for the workspace tool gateway (the
-   * workspace MCP server, HTTP `/tools/*`, Sites and current-human calls).
-   * Called once per gateway preparation with the caller's grant; it returns
-   * fresh in-process MCP servers, which the gateway closes after the request.
-   * It must honour `signal` (the caller's request lifetime). A throw or
-   * rejection fails the whole catalog closed for that request. A returned
-   * server whose connect or `tools/list` fails is only left out: its tools are
-   * absent from the catalog and the preparation records it in
-   * `unavailableMcpServers`, as for a failed connector. A call to a tool of a
-   * server left out is refused like any tool not in the catalog, and a listed
-   * tool's failing call still fails loud.
-   *
-   * A registration is used only when its id names a deployment-static
-   * `settings.mcpServers` entry configured for the request, replacing that
-   * entry's remote transport; other ids are ignored. Workspace-installed
-   * servers (capabilities, API integrations) never adopt a host server: a
-   * static host entry wins over a workspace server of the same id. The entry's
-   * settings (allowed tools, approval policy) and the connector tool policy
-   * apply exactly as for any MCP server. An id equal to a first-party server
-   * (`opengeni`, `files`, `docs`), `codex_apps`, a workspace-installed server
-   * without a static entry, or another host registration is refused with
-   * `HOST_TOOL_SERVER_ID_CONFLICT`. Return the same servers for every grant and
-   * scope by grant inside each server's tools: a configured entry the port
-   * omits keeps its remote transport, like any other configured server.
-   *
-   * A used registration's `extensionMethods` are served on the workspace MCP
-   * server only and advertised under `capabilities.experimental[<id>]`. Each
-   * call runs the same reauthorize step as `tools/list`, then the handler with
-   * the request's grant. A malformed name, a core MCP method, a name in a core
-   * method's namespace, or a method two registrations declare is refused with
-   * `HOST_MCP_METHOD_CONFLICT`. MCP OAuth consent scopes extension methods per
-   * host server, not per method: a connection consented to any of a host
-   * server's tools can call all of that server's extension methods.
-   */
-  workspaceToolServers?: (input: {
-    grant: AccessGrant;
-    signal?: AbortSignal;
-  }) => Promise<readonly LocalMcpServerRegistration[]>;
   managedAuth?: ManagedAuth | null;
   /** Provider-neutral browser login-slot adapter; required by dual/broker managed auth. */
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
@@ -368,8 +265,6 @@ export type AppDependencies = {
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
-  /** Injectable transport for reading event sources (MCP servers and Gmail), for tests. */
-  eventSourceFetch?: typeof fetch;
   /** Injectable Fiken API transport for deterministic connector tests. */
   fikenFetch?: typeof fetch;
   /** Injectable Integration Definition OAuth/API transport for deterministic tests. */
@@ -383,11 +278,6 @@ export type AppDependencies = {
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
   oauthCallbackDeadlineMs?: number;
-  /**
-   * The deployment's speech-to-text providers, shared by voice input and
-   * recordings; built from settings when omitted.
-   */
-  speechToText?: SpeechToTextDeployment;
   /** Optional host-owned voice-input transcription service. */
   transcription?: TranscriptionService | null;
   /** Optional host-owned long-form audio normalization/segmentation service. */
@@ -441,7 +331,6 @@ export type AcceptSessionUserMessageDependencies = Pick<
   | "sessionAuthorization"
   | "schedulePromptPostCommit"
   | "observability"
-  | "organizationGovernance"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

@@ -8,7 +8,5 @@ export {
   organizationsForSubject,
   shortAccountId,
   workspacesInOrg,
-  workspacesByOrganization,
   type OrgOption,
-  type OrgWorkspaces,
 } from "../../organization-model";
