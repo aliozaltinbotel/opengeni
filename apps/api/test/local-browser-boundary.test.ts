@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings, type Settings } from "@opengeni/config";
 import { createObservability } from "@opengeni/observability";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 
 import { createApp } from "../src/app";
 import {

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   bootstrapWorkspace,
   claimPendingSessionSystemUpdateOutbox,

@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 /** Optional pre-migrated, disposable native PostgreSQL fixture; CI uses the shared harness. */
 export async function listingDatabase(): Promise<SharedTestDatabase> {

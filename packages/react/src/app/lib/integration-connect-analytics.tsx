@@ -57,9 +57,6 @@ export const MODEL_CONNECTION_CLASSES = [
   "anthropic",
   "claude_subscription",
   "opper",
-  "elevenlabs",
-  "openai",
-  "azure_openai",
 ] as const satisfies readonly ModelClass[];
 
 export type IntegrationClass = ConnectionClass | ModelClass;
@@ -147,11 +144,8 @@ export function modelConnectionClass(provider: string): ModelClass | null {
     case "supergrok":
     case "openrouter":
     case "opper":
-    case "openai":
-    case "azure_openai":
     case "anthropic":
     case "claude_subscription":
-    case "elevenlabs":
       return provider;
     case "ai-gateway":
     case "vercel_gateway":

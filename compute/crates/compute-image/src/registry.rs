@@ -336,9 +336,7 @@ impl Registry {
             image.rootfs.diff_ids.len()
         );
         tokio::fs::create_dir_all(dir).await?;
-        // Collected first: a stream over a lazy `map` of async blocks is not
-        // provably `Send`, and builds run on the host agent's tasks.
-        let downloads: Vec<_> = layers
+        let downloads = layers
             .iter()
             .zip(&image.rootfs.diff_ids)
             .map(|(layer, diff_id)| {
@@ -355,8 +353,7 @@ impl Registry {
                         diff_id: diff_id.clone(),
                     })
                 }
-            })
-            .collect();
+            });
         let layers = futures::stream::iter(downloads)
             .buffered(PARALLEL)
             .collect::<Vec<Result<Layer>>>()

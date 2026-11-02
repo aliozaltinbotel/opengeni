@@ -6,7 +6,7 @@ import {
   estimateTokens,
   type CompactionItem,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   summarizeWithCodexOverflowTrimming,
   type CompactionSummarizer,

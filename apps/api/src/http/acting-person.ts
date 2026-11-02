@@ -1,4 +1,3 @@
-import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
 import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context } from "hono";
@@ -74,7 +73,7 @@ export function isAgentWithFullAccess(c: Context): boolean {
   return (
     proof !== null &&
     proof.workspaceScope.kind === "all" &&
-    FULL_ACCESS.every((permission) => permissionSetCovers(proof.permissions, permission))
+    FULL_ACCESS.every((permission) => proof.permissions.includes(permission))
   );
 }
 

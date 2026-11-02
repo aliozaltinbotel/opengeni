@@ -49,10 +49,6 @@ export type MintStreamTokenInput = {
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
   authorityEpoch?: number;
-  /** A Connected Machine relay stream's exact channel. When set, the token's
-   *  workspace is the channel's (where the machine is enrolled) and the relay
-   *  only accepts it for this machine and stream instance. */
-  relayChannel?: { workspaceId: string; agentId: string; channelId: string };
 };
 
 /**
@@ -69,7 +65,7 @@ export async function mintStreamToken(
   const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
   const ttlSeconds = input.ttlSeconds ?? STREAM_TOKEN_DEFAULT_TTL_SECONDS;
   const payload: StreamTokenPayloadType = StreamTokenPayload.parse({
-    workspaceId: input.relayChannel?.workspaceId ?? input.workspaceId,
+    workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     viewerId: input.viewerId,
     leaseEpoch: input.leaseEpoch,
@@ -78,9 +74,6 @@ export async function mintStreamToken(
     exp: nowSeconds + ttlSeconds,
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
-    ...(input.relayChannel
-      ? { agentId: input.relayChannel.agentId, channelId: input.relayChannel.channelId }
-      : {}),
   });
   return signStreamToken(secret, payload);
 }

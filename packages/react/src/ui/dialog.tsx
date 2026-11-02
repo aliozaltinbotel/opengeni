@@ -10,32 +10,26 @@ import { containedPortal } from "./portal-container";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
-function Dialog({ ...props }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Root>) {
+function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;
 }
 
-const DialogTrigger = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DialogPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Trigger>
->(function DialogTrigger({ ...props }, ref) {
-  return <DialogPrimitive.Trigger data-slot="dialog-trigger" ref={ref} {...props} />;
-});
+function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
+  return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />;
+}
 
-function DialogPortal({ ...props }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Portal>) {
+function DialogPortal({ ...props }: React.ComponentProps<typeof DialogPrimitive.Portal>) {
   return <DialogContainedPortal data-slot="dialog-portal" {...props} />;
 }
 
-const DialogClose = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DialogPrimitive.Close>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Close>
->(function DialogClose({ ...props }, ref) {
-  return <DialogPrimitive.Close data-slot="dialog-close" ref={ref} {...props} />;
-});
+function DialogClose({ ...props }: React.ComponentProps<typeof DialogPrimitive.Close>) {
+  return <DialogPrimitive.Close data-slot="dialog-close" {...props} />;
+}
 
-const DialogOverlay = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DialogPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(function DialogOverlay({ className, ...props }, ref) {
+function DialogOverlay({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
   return (
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
@@ -43,18 +37,19 @@ const DialogOverlay = /* @__PURE__ */ React.forwardRef<
         "fixed inset-0 z-50 bg-black/50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DialogContent = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
-    showCloseButton?: boolean | undefined;
-  }
->(function DialogContent({ className, children, showCloseButton = true, ...props }, ref) {
+function DialogContent({
+  className,
+  children,
+  showCloseButton = true,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  showCloseButton?: boolean | undefined;
+}) {
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
@@ -74,7 +69,6 @@ const DialogContent = /* @__PURE__ */ React.forwardRef<
           "sm:data-[state=closed]:zoom-out-95 sm:data-[state=open]:zoom-in-95",
           className,
         )}
-        ref={ref}
         {...props}
       >
         {children}
@@ -90,33 +84,30 @@ const DialogContent = /* @__PURE__ */ React.forwardRef<
       </DialogPrimitive.Content>
     </DialogPortal>
   );
-});
+}
 
-const DialogHeader = /* @__PURE__ */ React.forwardRef<
-  HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div">
->(function DialogHeader({ className, ...props }, ref) {
+function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
       className={cn("flex flex-col gap-2 text-center sm:text-left", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DialogFooter = /* @__PURE__ */ React.forwardRef<
-  HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div"> & {
-    showCloseButton?: boolean | undefined;
-  }
->(function DialogFooter({ className, showCloseButton = false, children, ...props }, ref) {
+function DialogFooter({
+  className,
+  showCloseButton = false,
+  children,
+  ...props
+}: React.ComponentProps<"div"> & {
+  showCloseButton?: boolean | undefined;
+}) {
   return (
     <div
       data-slot="dialog-footer"
       className={cn("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
-      ref={ref}
       {...props}
     >
       {children}
@@ -127,35 +118,30 @@ const DialogFooter = /* @__PURE__ */ React.forwardRef<
       )}
     </div>
   );
-});
+}
 
-const DialogTitle = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DialogPrimitive.Title>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
->(function DialogTitle({ className, ...props }, ref) {
+function DialogTitle({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Title>) {
   return (
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn("text-lg leading-none font-semibold", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DialogDescription = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DialogPrimitive.Description>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
->(function DialogDescription({ className, ...props }, ref) {
+function DialogDescription({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Description>) {
   return (
     <DialogPrimitive.Description
       data-slot="dialog-description"
       className={cn("text-sm text-muted-foreground", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 export {
   Dialog,

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ToolCallError } from "@openai/agents-core";
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { ModalClient } from "modal";
 import {
   OpenGeniModalSandboxClient,

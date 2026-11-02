@@ -1,5 +1,4 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
 import { modelUnavailableHttpException } from "@opengeni/core";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
@@ -60,7 +59,7 @@ import {
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
+import { parseRequestJson } from "../http/request-body";
 
 /**
  * Create, change, delete or fire an automation: a workspace admin, but never
@@ -196,7 +195,6 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAutomationWriter(c, deps, workspaceId);
     const request = await parseRequestJson(c, CreateAutomationTriggerRequest);
-    await requireScheduledWorkAdmissible(deps, grant.accountId, request.sessionTemplate.resources);
     const credentialRestriction = await automationCredentialRestrictionForGrant(deps.db, grant);
     requireAutomationCredentialRestrictionPermissions(
       credentialRestriction,
@@ -268,11 +266,6 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "automation trigger not found",
       });
     assertGenericTriggerMutable(existing);
-    await requireScheduledWorkAdmissible(
-      deps,
-      grant.accountId,
-      (request.sessionTemplate ?? existing.sessionTemplate).resources,
-    );
     const credentialRestriction =
       existing.sessionTemplate.credentialRestriction ??
       (await automationCredentialRestrictionForGrant(deps.db, grant));
@@ -551,14 +544,6 @@ export async function acceptAutomationEvent(
       message: `automation event matches more than ${AUTOMATION_MAX_MATCHED_TRIGGERS} triggers`,
     });
   }
-  // A manual event or a webhook starts the matching triggers' work: their
-  // organization's policy row exists first, and a template that attaches files
-  // is refused where attachments are off (the worker refuses it again).
-  await requireScheduledWorkAdmissible(
-    deps,
-    source.accountId,
-    matchingByEvent.flatMap((trigger) => trigger.sessionTemplate.resources),
-  );
   const stored =
     matchingByEvent.length === 0
       ? await recordAutomationEvent(deps.db, {
@@ -782,5 +767,33 @@ export async function readAutomationWebhookBody(
   request: Request,
   maxBytes: number,
 ): Promise<Uint8Array> {
-  return await readBoundedRawBody(request, maxBytes, "automation webhook payload is too large");
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new HTTPException(413, {
+      message: "automation webhook payload is too large",
+    });
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel();
+      throw new HTTPException(413, {
+        message: "automation webhook payload is too large",
+      });
+    }
+    chunks.push(value);
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
 }

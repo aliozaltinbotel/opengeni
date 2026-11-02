@@ -21,9 +21,12 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import postgres from "postgres";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
+import {
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+  MemoryEventBus,
+} from "@opengeni/testing";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import type { OpStreamConnection } from "@opengeni/events";
 import {

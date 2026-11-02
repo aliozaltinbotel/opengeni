@@ -39,6 +39,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
+import { eq } from "drizzle-orm";
 import {
   CompactionNeededError,
   AnthropicRequestSizeError,
@@ -51,10 +52,13 @@ import {
   normalizeProtocolJsonValue,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  ScriptedModel,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createActivityTestHarness } from "../src/activities";
 import {
   isContextWindowExceeded,

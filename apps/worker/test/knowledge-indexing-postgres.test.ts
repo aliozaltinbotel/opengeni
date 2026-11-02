@@ -18,7 +18,7 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import { knowledgeIndexChunks, type DocumentServices } from "@opengeni/documents";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createKnowledgeIndexingActivities } from "../src/activities/knowledge-indexing";
 import type { ControlActivityServices } from "../src/activities/types";
 

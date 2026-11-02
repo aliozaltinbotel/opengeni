@@ -44,10 +44,9 @@ import { HTTPException } from "hono/http-exception";
 import { projectClientModel } from "../model-catalog";
 import { readXaiCoreStatus } from "../xai-subscription-core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import { databaseUnavailableHttpError } from "../http/api-error";
 import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
-import { parseRequestBody } from "../http/request-body";
 
 type SuperGrokConnectState = {
   externalContinuationEncrypted?: string;
@@ -60,6 +59,8 @@ type SuperGrokConnectState = {
   iat: number;
 };
 
+const connectStartBody = SupergrokConnectStartRequest;
+
 /**
  * SuperGrok on the shared subscription core (provider id `xai`), its only
  * runtime: the legacy pool runtime was deleted after the SuperGrok cutover.
@@ -71,6 +72,7 @@ const SUPERGROK_CORE: SubscriptionPoolCore = {
 };
 const supergrokRoute = (deps: ApiRouteDeps, accountId: () => Promise<string>) =>
   requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", accountId);
+const connectPollBody = SubscriptionConnectPollRequest;
 
 function requireEnabled(deps: ApiRouteDeps): void {
   if (!deps.settings.supergrokSubscriptionEnabled) {
@@ -244,15 +246,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(`${organizationPath}/connect/poll`, async (c) => {
     const actor = await organizationActor(c, true);
     await supergrokRoute(deps, async () => actor.organizationId);
-    const parsed = parseRequestBody(
-      SubscriptionConnectPollRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "SuperGrok state is required",
-      },
-    );
-    const state = readSignedState(parsed.state, deps.githubStateSecret) as {
+    const parsed = connectPollBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "SuperGrok state is required" });
+    const state = readSignedState(parsed.data.state, deps.githubStateSecret) as {
       organizationId?: string;
       actorSubjectId?: string;
       deviceCode?: string;
@@ -306,23 +302,17 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/supergrok/connect/start", async (c) => {
     requireEnabled(deps);
     const workspaceId = c.req.param("workspaceId");
-    const parsed = parseRequestBody(
-      SupergrokConnectStartRequest,
-      await c.req.json().catch(() => ({})),
-      {
-        status: 400,
-        message: "invalid SuperGrok scope",
-      },
-    );
+    const parsed = connectStartBody.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid SuperGrok scope" });
     // On the core a private account is connected only from the person's own
     // Personal workspace: refused here, before the xAI sign-in, elsewhere.
     const runtime = await workspaceRuntime(c, deps, workspaceId);
-    const authority = await requireScopeMutation(c, deps, workspaceId, parsed.scope, runtime);
+    const authority = await requireScopeMutation(c, deps, workspaceId, parsed.data.scope, runtime);
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
       workspaceId,
-      parsed.scope === "workspace" ? "workspace:admin" : "connections:write",
+      parsed.data.scope === "workspace" ? "workspace:admin" : "connections:write",
     );
     const continuation = externalActorContinuationForAuthorization(authorization);
     const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
@@ -339,10 +329,10 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         verificationUriComplete: start.verificationUriComplete,
         intervalSeconds: start.intervalSeconds,
         expiresInSeconds: start.expiresInSeconds,
-        scope: parsed.scope,
+        scope: parsed.data.scope,
         state: createSignedState(deps.githubStateSecret, {
           workspaceId,
-          scope: parsed.scope,
+          scope: parsed.data.scope,
           subjectId: authority.subjectId,
           deviceCode: start.deviceCode,
           intervalSeconds: start.intervalSeconds,
@@ -365,16 +355,10 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/supergrok/connect/poll", async (c) => {
     requireEnabled(deps);
     const workspaceId = c.req.param("workspaceId");
-    const parsed = parseRequestBody(
-      SubscriptionConnectPollRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "SuperGrok state is required",
-      },
-    );
+    const parsed = connectPollBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "SuperGrok state is required" });
     const state = readSignedState(
-      parsed.state,
+      parsed.data.state,
       deps.githubStateSecret,
     ) as SuperGrokConnectState | null;
     if (

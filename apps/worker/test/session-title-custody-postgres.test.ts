@@ -3,9 +3,12 @@ import * as titleDb from "@opengeni/db";
 import * as titlePolicy from "../src/activities/agent-turn/tool-policy";
 import { resolveTurnModel } from "@opengeni/runtime";
 import { recordModelTransportStarted } from "../../../packages/runtime/src/model-preparation-diagnostics";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  MemoryEventBus,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { codexRequestStorage } from "@opengeni/codex";
 import { xaiSubscriptionRequestStorage } from "@opengeni/xai-subscription";
 import {

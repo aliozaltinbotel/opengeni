@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
-import { startTestMcpServer } from "@opengeni/testing/mcp";
-import { testSettings } from "@opengeni/testing/settings";
+import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import { createFirstPartyAttemptClient } from "../src/first-party-client";
 import { prepareAgentTools } from "../src/index";
 import { createFirstPartyInteractionAttemptToolDefinitions } from "../src/interaction-tools";

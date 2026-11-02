@@ -4,10 +4,8 @@ import {
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
 } from "@opengeni/config";
-import { turnAttachmentsAllowed } from "./agent-turn/session-tool-families";
 import {
   applySessionAgentConfigWriteThrough,
-  newSessionKnowledgeSearchTools,
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   resolveSessionAgentConfigForCreate,
@@ -25,7 +23,7 @@ import {
   requireWorkspace,
 } from "@opengeni/db";
 import { SessionSkills } from "@opengeni/contracts";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 import type {
   ControlActivityServices,
   DispatchAutomationRunInput,
@@ -124,20 +122,6 @@ export function createAutomationActivities(
           });
           return { action: "failed", reason: "credential_restriction_violation" };
         }
-        // The organization's session policy may turn attachments off after the
-        // trigger was saved: its template's files never reach a session.
-        if (
-          template.resources.some((resource) => resource.kind === "file") &&
-          !(await turnAttachmentsAllowed(service.db, input.accountId))
-        ) {
-          await settle(service.db, {
-            workspaceId: input.workspaceId,
-            runId: run.id,
-            status: "failed",
-            errorCode: "attachments_disabled",
-          });
-          return { action: "failed", reason: "attachments_disabled" };
-        }
         const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
         const catalogSettings =
           requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
@@ -227,12 +211,7 @@ export function createAutomationActivities(
             config: resolution.config,
             instructions: resolution.instructions,
             firstPartyMcpTools: written.firstPartyMcpTools,
-            tools: newSessionKnowledgeSearchTools(
-              written.tools,
-              resolution.config,
-              written.firstPartyMcpTools,
-              catalogSettings.mcpServers,
-            ),
+            tools: written.tools,
           };
         } catch (error) {
           if (!isUnprocessableEntity(error)) throw error;

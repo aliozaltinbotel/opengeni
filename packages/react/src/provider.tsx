@@ -158,9 +158,7 @@ export function OpenGeniProvider({
         reconcilersRef.current.set(sessionId, sessionReconcilers);
         return () => {
           const current = reconcilersRef.current.get(sessionId);
-          // Two views can register the same key for one session (a sub-session's
-          // page and its parent's request card); only remove this one's.
-          if (current?.get(key) === reconcile) current.delete(key);
+          current?.delete(key);
           if (current?.size === 0) reconcilersRef.current.delete(sessionId);
         };
       },

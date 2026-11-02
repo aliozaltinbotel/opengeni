@@ -21,6 +21,7 @@ import {
   withSubscriptionCoreRefreshLock,
   type SubscriptionCorePlacementWorldRequest,
   type SubscriptionCorePlacementWorldResult,
+  type SubscriptionCoreRefreshCredential,
   type SubscriptionCoreRefreshResult,
 } from "./subscription-core-placement-world";
 import {
@@ -29,6 +30,7 @@ import {
 } from "./subscription-core-repository";
 
 export type SubscriptionCoreCodexRefreshResult<T> = SubscriptionCoreRefreshResult<T>;
+export type SubscriptionCoreCodexRefreshCredential = SubscriptionCoreRefreshCredential;
 
 /** The Codex placement world of one exact accepted turn. */
 export function withSubscriptionCorePlacementWorld<T>(

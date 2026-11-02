@@ -28,11 +28,10 @@ export function createVerificationClient(settings: Settings) {
       settings.azureOpenaiBaseUrl ||
       (settings.azureOpenaiEndpoint && settings.azureOpenaiDeployment)
     ) ||
-    (settings.azureOpenaiAuthMode === "static" &&
-      !(settings.azureOpenaiApiKey || settings.azureOpenaiAdToken))
+    !(settings.azureOpenaiApiKey || settings.azureOpenaiAdToken)
   )
     throw new CompactionVerificationError(
-      "Configure Azure with a base URL or endpoint/deployment, an API key, AD token or identity auth mode, and a model.",
+      "Configure Azure with a base URL or endpoint/deployment, an API key or AD token, and a model.",
     );
   return buildOpenAIClientFromSettings(settings);
 }
@@ -140,7 +139,7 @@ export async function main(args: string[] = process.argv.slice(2)) {
   let replacement: Item[];
   if (args.includes("--durable")) {
     const { compactDurableFixture } = await import("./compaction-durable");
-    const { acquireSharedTestDatabase } = await import("@opengeni/testing/shared-pg");
+    const { acquireSharedTestDatabase } = await import("@opengeni/testing");
     const shared = await acquireSharedTestDatabase("portable-compaction-live");
     if (!shared) throw new CompactionVerificationError("Disposable PostgreSQL unavailable");
     try {

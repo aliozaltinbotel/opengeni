@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection, type WorkflowHandle } from "@temporalio/client";
 import { bundleWorkflowCode, NativeConnection, Worker } from "@temporalio/worker";
-import { startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { waitFor } from "@opengeni/testing/process";
+import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import type { MaybeContinueGoalResult } from "../../apps/worker/src/activities/types";
 

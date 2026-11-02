@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Permission } from "./permissions";
@@ -10,7 +9,9 @@ import { Permission } from "./permissions";
 // text that the driver would replace or PostgreSQL cannot represent.
 const encoder = new TextEncoder();
 function opaqueText(maxBytes: number) {
-  return primitives.nonEmptyString
+  return z
+    .string()
+    .min(1)
     .max(maxBytes)
     .refine(
       (value) =>
@@ -25,9 +26,11 @@ function opaqueText(maxBytes: number) {
 const externalId = opaqueText(1024);
 const source = opaqueText(200);
 const externalSubject = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(
-    /^external_user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/,
-  ),
+  z
+    .string()
+    .regex(
+      /^external_user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/,
+    ),
 );
 const nativeSubject = /* @__PURE__ */ defineSchema(() =>
   z
@@ -52,7 +55,7 @@ export const AddExternalWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(()
       identity: ExternalIdentityReference,
       permissions: z.array(Permission).min(1).max(Permission.options.length),
       /** Opt-in durable operation identity; unkeyed legacy requests are not cancellable. */
-      operationId: primitives.optionalUuid,
+      operationId: z.string().uuid().optional(),
     })
     .strict(),
 );
@@ -78,11 +81,11 @@ export const ExternalIdentityLookup = /* @__PURE__ */ defineSchema(() =>
       .object({
         found: z.literal(true),
         subjectId: externalSubject,
-        organizationMembershipId: primitives.uuid,
+        organizationMembershipId: z.string().uuid(),
         identityStatus: z.enum(["active", "disabled", "revoked"]),
-        identityAuthorizationRevision: primitives.positiveInteger.safe(),
+        identityAuthorizationRevision: z.number().int().positive().safe(),
         membershipStatus: z.enum(["provisioning", "active", "suspended", "revoked"]),
-        membershipAuthorizationRevision: primitives.positiveInteger.safe(),
+        membershipAuthorizationRevision: z.number().int().positive().safe(),
       })
       .strict(),
   ]),
@@ -94,8 +97,8 @@ export type ExternalIdentityLookup = z.infer<typeof ExternalIdentityLookup>;
 export const CancelExternalWorkspaceMemberGrantRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      cancelGrantOperationId: primitives.uuid,
+      operationId: z.string().uuid(),
+      cancelGrantOperationId: z.string().uuid(),
     })
     .strict()
     .refine((value) => value.operationId !== value.cancelGrantOperationId, {
@@ -108,9 +111,9 @@ export type CancelExternalWorkspaceMemberGrantRequest = z.infer<
 export const CancelExternalWorkspaceMemberGrantResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      removed: primitives.boolean,
-      replay: primitives.boolean,
-      fencedGrantOperationId: primitives.uuid,
+      removed: z.boolean(),
+      replay: z.boolean(),
+      fencedGrantOperationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -125,7 +128,7 @@ export const UpdateExternalWorkspaceMemberRequest = /* @__PURE__ */ defineSchema
   z
     .object({
       permissions: z.array(Permission).min(1).max(Permission.options.length),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -135,12 +138,12 @@ export type UpdateExternalWorkspaceMemberRequest = z.infer<
 export const UpdateExternalWorkspaceMemberResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      subjectId: primitives.string,
-      organizationMembershipId: primitives.uuid,
+      subjectId: z.string(),
+      organizationMembershipId: z.string().uuid(),
       permissions: z.array(Permission),
       /** True when a previously held permission was removed. */
-      narrowed: primitives.boolean,
-      replay: primitives.boolean,
+      narrowed: z.boolean(),
+      replay: z.boolean(),
     })
     .strict(),
 );
@@ -154,8 +157,8 @@ export const UpdateExternalIdentityMembershipRequest = /* @__PURE__ */ defineSch
   z
     .object({
       kind: z.enum(["suspend", "reactivate", "offboard"]),
-      expectedAuthorizationRevision: primitives.positiveInteger.safe(),
-      operationId: primitives.uuid,
+      expectedAuthorizationRevision: z.number().int().positive().safe(),
+      operationId: z.string().uuid(),
       reason: z.string().max(512).optional(),
     })
     .strict(),
@@ -178,8 +181,8 @@ export const ExternalActorSelection = /* @__PURE__ */ defineSchema(() =>
       .object({
         mode: z.literal("linked_native"),
         identity: ExternalIdentityReference,
-        linkId: primitives.uuid,
-        expectedLinkRevision: primitives.positiveInteger.safe(),
+        linkId: z.string().uuid(),
+        expectedLinkRevision: z.number().int().positive().safe(),
       })
       .strict(),
   ]),
@@ -189,15 +192,15 @@ export type ExternalActorSelection = z.infer<typeof ExternalActorSelection>;
 export const ExternalIdentity = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      accountId: primitives.uuid,
+      id: z.string().uuid(),
+      accountId: z.string().uuid(),
       source,
       externalId,
       subjectId: externalSubject,
-      organizationMembershipId: primitives.uuid,
-      personalWorkspaceId: primitives.uuid,
+      organizationMembershipId: z.string().uuid(),
+      personalWorkspaceId: z.string().uuid(),
       status: z.enum(["active", "disabled", "revoked"]),
-      authorizationRevision: primitives.positiveInteger.safe(),
+      authorizationRevision: z.number().int().positive().safe(),
     })
     .strict(),
 );
@@ -208,15 +211,15 @@ export type ExternalIdentity = z.infer<typeof ExternalIdentity>;
 export const ExternalActorAttribution = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      accountId: primitives.uuid,
-      authenticatingApiKeyId: primitives.uuid,
-      externalIdentityId: primitives.uuid,
+      accountId: z.string().uuid(),
+      authenticatingApiKeyId: z.string().uuid(),
+      externalIdentityId: z.string().uuid(),
       externalSubjectId: externalSubject,
-      externalAuthorizationRevision: primitives.positiveInteger.safe(),
+      externalAuthorizationRevision: z.number().int().positive().safe(),
       effectiveSubjectId: z.string().min(1).max(1024),
       actingMode: z.enum(["external", "linked_native"]),
-      linkId: primitives.optionalUuid,
-      linkRevision: primitives.positiveInteger.safe().optional(),
+      linkId: z.string().uuid().optional(),
+      linkRevision: z.number().int().positive().safe().optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -259,15 +262,15 @@ export type ExternalActorContinuation = z.infer<typeof ExternalActorContinuation
 export const ExternalIdentityLink = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      accountId: primitives.uuid,
-      externalIdentityId: primitives.uuid,
+      id: z.string().uuid(),
+      accountId: z.string().uuid(),
+      externalIdentityId: z.string().uuid(),
       externalIdentity: ExternalIdentityReference.optional(),
       nativeSubjectId: nativeSubject.nullable(),
       status: z.enum(["pending", "active", "revoked", "expired"]),
-      revision: primitives.positiveInteger.safe(),
+      revision: z.number().int().positive().safe(),
       permissions: z.array(Permission).max(Permission.options.length),
-      expiresAt: primitives.string.datetime({ offset: true }).nullable(),
+      expiresAt: z.string().datetime({ offset: true }).nullable(),
     })
     .strict()
     .refine(
@@ -281,7 +284,7 @@ export const ExternalIdentityLinkPage = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       links: z.array(ExternalIdentityLink).max(50),
-      nextCursor: primitives.nullableUuid,
+      nextCursor: z.string().uuid().nullable(),
     })
     .strict(),
 );
@@ -293,7 +296,7 @@ export const BeginExternalIdentityLinkRequest = /* @__PURE__ */ defineSchema(() 
   z
     .object({
       permissions: z.array(Permission).min(1).max(Permission.options.length),
-      expiresAt: primitives.string.datetime({ offset: true }).nullable().default(null),
+      expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
     })
     .strict(),
 );
@@ -301,8 +304,8 @@ export type BeginExternalIdentityLinkRequest = z.input<typeof BeginExternalIdent
 export const ConfirmExternalIdentityLinkRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      challenge: primitives.string.regex(/^[A-Za-z0-9_-]{43}$/),
-      expectedRevision: primitives.positiveInteger.safe(),
+      challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      expectedRevision: z.number().int().positive().safe(),
       permissions: z.array(Permission).min(1).max(Permission.options.length),
     })
     .strict(),
@@ -312,8 +315,8 @@ export const BeginExternalIdentityLinkResponse = /* @__PURE__ */ defineSchema(()
   z
     .object({
       link: ExternalIdentityLink,
-      challenge: primitives.string.regex(/^[A-Za-z0-9_-]{43}$/),
-      confirmBefore: primitives.string.datetime({ offset: true }),
+      challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      confirmBefore: z.string().datetime({ offset: true }),
     })
     .strict(),
 );
@@ -324,7 +327,7 @@ export const ExternalIdentityLinkPreview = /* @__PURE__ */ defineSchema(() =>
       link: ExternalIdentityLink,
       externalIdentity: ExternalIdentityReference,
       nativeSubjectId: nativeSubject,
-      organizationId: primitives.uuid,
+      organizationId: z.string().uuid(),
     })
     .strict(),
 );

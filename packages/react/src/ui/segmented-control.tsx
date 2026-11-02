@@ -1,13 +1,4 @@
-import {
-  forwardRef,
-  useId,
-  useState,
-  type ComponentPropsWithoutRef,
-  type ForwardedRef,
-  type ReactElement,
-  type ReactNode,
-  type RefAttributes,
-} from "react";
+import { useId, useState, type ComponentProps, type ReactNode } from "react";
 import { Loader2Icon } from "lucide-react";
 import { ToggleGroup as ToggleGroupPrimitive } from "radix-ui";
 import { cn } from "../lib/cn";
@@ -48,7 +39,7 @@ export interface SegmentedControlOption<Value extends string = string> {
 }
 
 export interface SegmentedControlProps<Value extends string = string> extends Omit<
-  ComponentPropsWithoutRef<"div">,
+  ComponentProps<"div">,
   "defaultValue" | "onChange" | "dir" | "children"
 > {
   /** 2 to 4 options. Use a select for more. */
@@ -66,25 +57,22 @@ export interface SegmentedControlProps<Value extends string = string> extends Om
   fullWidth?: boolean | undefined;
 }
 
-function SegmentedControlRender<Value extends string = string>(
-  {
-    options,
-    value: valueProp,
-    defaultValue,
-    onValueChange,
-    variant = "filled",
-    size = "md",
-    disabled = false,
-    pending = false,
-    fullWidth = false,
-    className,
-    "aria-label": ariaLabel,
-    "aria-labelledby": ariaLabelledByProp,
-    "aria-describedby": ariaDescribedByProp,
-    ...props
-  }: SegmentedControlProps<Value>,
-  ref: ForwardedRef<HTMLDivElement>,
-) {
+export function SegmentedControl<Value extends string = string>({
+  options,
+  value: valueProp,
+  defaultValue,
+  onValueChange,
+  variant = "filled",
+  size = "md",
+  disabled = false,
+  pending = false,
+  fullWidth = false,
+  className,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledByProp,
+  "aria-describedby": ariaDescribedByProp,
+  ...props
+}: SegmentedControlProps<Value>) {
   const field = useSettingRowField();
   const reasonBaseId = useId();
   const [uncontrolled, setUncontrolled] = useState<Value | undefined>(
@@ -110,7 +98,6 @@ function SegmentedControlRender<Value extends string = string>(
   return (
     <>
       <ToggleGroupPrimitive.Root
-        ref={ref}
         type="single"
         data-slot="segmented-control"
         data-variant={variant}
@@ -151,10 +138,7 @@ function SegmentedControlRender<Value extends string = string>(
               className={cn(
                 itemClasses(variant, size),
                 option.iconOnly && variant !== "underline" && "px-2",
-                // Equal-width segments center their label, so side padding only
-                // decides when a long label truncates in a narrow row.
                 fullWidth && "flex-1",
-                fullWidth && variant !== "underline" && "px-1.5",
               )}
             >
               {/* While saving, the content fades and a spinner takes its place, so
@@ -218,13 +202,6 @@ function SegmentedControlRender<Value extends string = string>(
     </>
   );
 }
-
-/** `forwardRef` drops type parameters, so the export restores `Value`. */
-export const SegmentedControl = /* @__PURE__ */ forwardRef(SegmentedControlRender) as <
-  Value extends string = string,
->(
-  props: SegmentedControlProps<Value> & RefAttributes<HTMLDivElement>,
-) => ReactElement | null;
 
 // States key on aria-checked, not data-state: a disabled-reason tooltip trigger
 // replaces data-state on the items it wraps.

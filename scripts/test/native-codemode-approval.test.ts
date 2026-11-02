@@ -1,5 +1,3 @@
-// opengeni:test-saturates-cpu: `cargo test` compiles the agent crate on every
-// CPU, so the unit shard runs this file alone instead of beside other files.
 import { expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 

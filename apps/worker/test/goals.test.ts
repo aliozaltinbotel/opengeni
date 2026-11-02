@@ -4,7 +4,7 @@ import {
   goalContinuationModelDecision,
   goalContinuationPrompt,
 } from "../src/activities/goals";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 
 describe("goalContinuationPrompt", () => {
   test("audits durable report delivery without classifying every answer or file as a report", () => {

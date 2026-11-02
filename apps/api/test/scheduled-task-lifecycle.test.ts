@@ -11,7 +11,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ScheduledTask } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { reconcileExhaustedScheduledTasks } from "../src/scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "../src/temporal-schedule-sync";
 

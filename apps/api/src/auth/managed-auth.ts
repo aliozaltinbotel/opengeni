@@ -1,10 +1,4 @@
-import { requireSignupChallenge } from "./signup-challenge";
-import {
-  canonicalPublicOrigin,
-  consoleAllowedOriginEntries,
-  managedUserEmailAllowed,
-  type Settings,
-} from "@opengeni/config";
+import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
@@ -25,8 +19,6 @@ import type { Observability } from "@opengeni/observability";
 import { betterAuth } from "better-auth";
 import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
-import { jwt } from "better-auth/plugins/jwt";
-import { twoFactor } from "better-auth/plugins/two-factor";
 import { sql } from "drizzle-orm";
 import { Pool, type PoolConfig } from "pg";
 
@@ -34,7 +26,7 @@ import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
 import {
   createManagedAuthEmailThrottleHook,
-  MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
+  MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
 import {
@@ -42,7 +34,6 @@ import {
   type ManagedAuthNewSignupsGate,
 } from "./new-signups-gate";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
-import { recordSessionAuthentication, signInAuthenticationMethod } from "./session-authentication";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
@@ -171,10 +162,8 @@ function logBetterAuthMessage(
 /**
  * Bounded pool settings for Better Auth's dedicated `pg` pool. A connection
  * attempt fails after 10 s instead of queueing requests indefinitely while the
- * database is unreachable, and connections close when idle and recycle within
- * 30 minutes so a pooler- or failover-replaced backend is not held forever.
- * This pool runs only Better Auth's few unnamed statements, so its backends stay
- * small; the application pools' OPENGENI_DATABASE_POOL_* settings do not apply.
+ * database is unreachable, and connections recycle like the main postgres-js
+ * pool so a pooler- or failover-replaced backend is not held forever.
  */
 export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
   max: 10,
@@ -266,14 +255,13 @@ export function createManagedAuth(
     options.newSignupsGate ??
     createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
   const auth = betterAuth({
-    appName: settings.productName,
+    appName: "Opengeni",
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
     secret: settings.betterAuthSecret,
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
     logger: { log: logBetterAuthMessage },
-    ...managedAuthPluginOptions(settings),
     hooks: {
       before: createManagedAuthEmailThrottleHook(
         db,
@@ -310,7 +298,7 @@ export function createManagedAuth(
       fields: {
         lastRequest: "last_request",
       },
-      customRules: MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
+      customRules: MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
     },
     user: {
       modelName: "auth_users",
@@ -448,15 +436,18 @@ export function createManagedAuth(
           const url = await verificationUrl(settings, user.email);
           await sendManagedAuthEmail(
             managedEmailTransport,
-            emailVerificationMessage(settings.productName, user.email, url),
+            emailVerificationMessage(user.email, url),
           );
         }
       },
       sendResetPassword: async ({ user, url }) => {
-        await sendManagedAuthEmail(
-          managedEmailTransport,
-          passwordResetMessage(settings.productName, user.email, url),
-        );
+        await sendManagedAuthEmail(managedEmailTransport, {
+          kind: "password_reset",
+          to: user.email,
+          subject: "Reset your Opengeni password",
+          text: `Reset your Opengeni password: ${url}`,
+          html: `<p>Reset your Opengeni password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
+        });
       },
     },
     emailVerification: {
@@ -469,7 +460,7 @@ export function createManagedAuth(
       sendVerificationEmail: async ({ user, url }) => {
         await sendManagedAuthEmail(
           managedEmailTransport,
-          emailVerificationMessage(settings.productName, user.email, url),
+          emailVerificationMessage(user.email, url),
         );
       },
       afterEmailVerification: async (user) => {
@@ -500,12 +491,7 @@ export function createManagedAuth(
               currentManagedSignInConnectIntent()
             )
               return;
-            await deliverManagedSignInNotification(
-              db,
-              managedEmailTransport,
-              settings.productName,
-              account.id,
-            );
+            await deliverManagedSignInNotification(db, managedEmailTransport, account.id);
           },
         },
       },
@@ -613,21 +599,17 @@ export function createManagedAuth(
               },
             };
           },
-          after: async (session, context) => {
+          after: async (session) => {
             funnel?.recordSignIn();
             recordCurrentManagedAuthSession(session.id);
-            if (shouldDiscardCurrentManagedAuthProviderSession()) {
-              await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
-              return;
-            }
-            await recordSignInAuthentication(db, session, context);
+            if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
+            await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
           },
         },
       },
       user: {
         create: {
           before: async (user) => {
-            requireSignupChallenge(settings);
             const admission = managedAuthUserCreateAdmission(
               settings,
               user,
@@ -654,193 +636,6 @@ export function createManagedAuth(
   }) as ManagedAuth;
   configureManagedUserAdmission(auth, settings.allowedUserEmails);
   return auth;
-}
-
-/**
- * Record the sign-in that created a session as its first authentication, at
- * the session's creation time. Only a password or Google/GitHub sign-in
- * endpoint counts; any other session creation (email verification links, a
- * native app device session) records nothing here and is not an
- * authentication.
- */
-async function recordSignInAuthentication(
-  db: Database,
-  session: { id: string; createdAt: Date | string },
-  context: { path?: string; params?: Record<string, unknown> | undefined } | null | undefined,
-): Promise<void> {
-  const providerId =
-    typeof context?.params?.id === "string" ? context.params.id : currentManagedAuthProviderId();
-  const method = signInAuthenticationMethod(context?.path, providerId);
-  if (!method) return;
-  await recordSessionAuthentication(db, {
-    authSessionId: session.id,
-    amr: [method],
-    authenticatedAt: new Date(session.createdAt),
-  });
-}
-
-/**
- * The opt-in Better Auth plugins. With neither the host session token nor TOTP
- * configured no `plugins` key is set, so the configuration is the stock one.
- */
-function managedAuthPluginOptions(settings: Settings) {
-  const plugins = [
-    ...(settings.hostTokenAudience ? [hostSessionTokenPlugin(settings)] : []),
-    ...(settings.managedAuthTotpEnabled ? [reauthenticationTotpPlugin(settings.productName)] : []),
-  ];
-  return plugins.length > 0 ? { plugins } : {};
-}
-
-/**
- * Better Auth's twoFactor plugin, used for TOTP as a re-authentication second
- * factor only. Its sign-in interception (an `after` hook that replaces the
- * session of an enrolled person's email sign-in with a two-factor challenge)
- * is removed: sign-in, including the session-set sign-in, is unchanged, and
- * `POST /v1/auth/reauthenticate` asks for the code. The plugin's own
- * `/two-factor/*` routes are refused (they rotate the session, which would
- * reset its sign-in time); the product TOTP routes use its enable endpoint and
- * its storage. Factors live in `auth_two_factors`.
- */
-function reauthenticationTotpPlugin(productName: string) {
-  const plugin = twoFactor({
-    issuer: productName,
-    // A person without a password (Google or GitHub only) can enroll too; the
-    // plugin still requires the password whenever one exists, and the product
-    // route requires a fresh sign-in from everyone else.
-    allowPasswordless: true,
-    schema: {
-      user: { fields: { twoFactorEnabled: "two_factor_enabled" } },
-      twoFactor: {
-        modelName: "auth_two_factors",
-        fields: {
-          secret: "secret",
-          backupCodes: "backup_codes",
-          userId: "user_id",
-          verified: "verified",
-          failedVerificationCount: "failed_verification_count",
-          lockedUntil: "locked_until",
-        },
-      },
-    },
-  });
-  return { ...plugin, hooks: undefined };
-}
-
-type ManagedAuthTotpApi = {
-  enableTwoFactor(input: {
-    body: { password?: string };
-    headers: Headers;
-  }): Promise<{ totpURI: string; backupCodes: string[] }>;
-};
-
-/**
- * Start a TOTP enrollment through the plugin's enable endpoint, as the session
- * the proof headers carry. It stores a fresh encrypted secret as an
- * unverified factor and returns its `otpauth://` URI; it never rotates the
- * session. The plugin also stores backup codes, which this product never
- * offers or accepts.
- */
-export async function beginManagedAuthTotpEnrollment(
-  auth: ManagedAuth,
-  input: { headers: Headers; password?: string },
-): Promise<string> {
-  const plugins: ReadonlyArray<{ id?: unknown }> = auth.options.plugins ?? [];
-  if (!plugins.some((plugin) => plugin.id === "two-factor")) {
-    throw new Error("Managed auth was created without the TOTP plugin");
-  }
-  const api = auth.api as unknown as ManagedAuthTotpApi;
-  const result = await api.enableTwoFactor({
-    body: input.password === undefined ? {} : { password: input.password },
-    headers: input.headers,
-  });
-  return result.totpURI;
-}
-
-/**
- * Better Auth's jwt plugin, configured only for the host session token. Keys
- * are ES256 and stored in `auth_jwks`. The plugin's ambient JWT surfaces stay
- * off: no `set-auth-jwt` header on `/get-session`, and `/v1/auth/token` is
- * refused by the host token routes. The plugin's default audience stays its
- * base URL, so only the host token route ever signs for the host audience.
- */
-function hostSessionTokenPlugin(settings: Settings) {
-  return jwt({
-    jwks: { keyPairConfig: { alg: "ES256" } },
-    jwt: {
-      issuer: canonicalPublicOrigin(settings.publicBaseUrl) ?? undefined,
-      expirationTime: `${settings.hostTokenTtlSeconds}s`,
-    },
-    disableSettingJwtHeader: true,
-    schema: {
-      jwks: {
-        modelName: "auth_jwks",
-        fields: {
-          publicKey: "public_key",
-          privateKey: "private_key",
-          createdAt: "created_at",
-          expiresAt: "expires_at",
-        },
-      },
-    },
-  });
-}
-
-/** The claims every host session token carries. */
-type HostSessionTokenCommonClaims = {
-  iss: string;
-  aud: string;
-  sub: string;
-  sid: string;
-  auth_time: number;
-  amr: string[];
-  identity_status: "active";
-  /** The identity's active login binding (its id, and that binding's revision). */
-  login_binding_id: string;
-  login_binding_revision: number;
-  iat: number;
-  exp: number;
-  jti: string;
-};
-
-/**
- * The exact claim set of a host session token: a workspace token (`org`,
- * `ws`), or a registration-purpose token, which names no organization or
- * workspace (the keys are absent) and carries the verified email instead.
- */
-export type HostSessionTokenClaims =
-  | (HostSessionTokenCommonClaims & { org: string; ws: string })
-  | (HostSessionTokenCommonClaims & {
-      purpose: "registration";
-      email: string;
-      email_verified: true;
-    });
-
-export type HostSessionTokenJwks = { keys: Array<Record<string, unknown>> };
-
-type HostSessionTokenApi = {
-  signJWT(input: { body: { payload: HostSessionTokenClaims } }): Promise<{ token: string }>;
-  getJwks(): Promise<HostSessionTokenJwks>;
-};
-
-function hostSessionTokenApi(auth: ManagedAuth): HostSessionTokenApi {
-  const plugins: ReadonlyArray<{ id?: unknown }> = auth.options.plugins ?? [];
-  if (!plugins.some((plugin) => plugin.id === "jwt")) {
-    throw new Error("Managed auth was created without the host session token plugin");
-  }
-  return auth.api as unknown as HostSessionTokenApi;
-}
-
-/** Sign with the jwt plugin's own key store (it creates the first key on demand). */
-export async function signHostSessionToken(
-  auth: ManagedAuth,
-  claims: HostSessionTokenClaims,
-): Promise<string> {
-  return (await hostSessionTokenApi(auth).signJWT({ body: { payload: claims } })).token;
-}
-
-/** The jwt plugin's public JWKS: ES256 public keys only. */
-export async function hostSessionTokenJwks(auth: ManagedAuth): Promise<HostSessionTokenJwks> {
-  return await hostSessionTokenApi(auth).getJwks();
 }
 
 export type ManagedAuthOAuthAttempt = {
@@ -979,10 +774,7 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
   if (settings.publicBaseUrl) {
     origins.add(new URL(settings.publicBaseUrl).origin);
   }
-  for (const origin of [
-    ...splitCsv(settings.betterAuthTrustedOrigins),
-    ...consoleAllowedOriginEntries(settings.consoleAllowedOrigins),
-  ]) {
+  for (const origin of splitCsv(settings.betterAuthTrustedOrigins)) {
     origins.add(origin);
   }
   return [...origins];
@@ -998,36 +790,14 @@ export async function sendManagedAuthEmail(
 
 // Verification can sign the clicker in (autoSignInAfterVerification), so an
 // unsolicited verification email must say plainly that it can be ignored.
-function emailVerificationMessage(
-  productName: string,
-  to: string,
-  url: string,
-): Omit<ManagedEmailMessage, "from"> {
-  const product = escapeHtml(productName);
-  // "an Opengeni account", "a Hostbrand account": the article follows the name's first letter.
-  const article = /^[aeiou]/iu.test(productName) ? "an" : "a";
-  const ignore = (name: string) =>
-    `If you did not create ${article} ${name} account, ignore this email.`;
+function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
+  const ignore = "If you did not create an Opengeni account, ignore this email.";
   return {
     kind: "email_verification",
     to,
-    subject: `Verify your ${productName} email`,
-    text: `Verify your ${productName} email: ${url}\n\n${ignore(productName)}`,
-    html: `<p>Verify your ${product} email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore(product)}</p>`,
-  };
-}
-
-function passwordResetMessage(
-  productName: string,
-  to: string,
-  url: string,
-): Omit<ManagedEmailMessage, "from"> {
-  return {
-    kind: "password_reset",
-    to,
-    subject: `Reset your ${productName} password`,
-    text: `Reset your ${productName} password: ${url}`,
-    html: `<p>Reset your ${escapeHtml(productName)} password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
+    subject: "Verify your Opengeni email",
+    text: `Verify your Opengeni email: ${url}\n\n${ignore}`,
+    html: `<p>Verify your Opengeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
   };
 }
 

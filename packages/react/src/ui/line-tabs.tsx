@@ -5,17 +5,14 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type ReactNode,
-  forwardRef,
-  type ComponentRef,
-  type ComponentPropsWithoutRef,
 } from "react";
 import { cva } from "class-variance-authority";
 import { Slot, Tabs as TabsPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
-import { useMergedRefs } from "../lib/refs";
 
 /**
  * Page tabs: the Capabilities tab row as a reusable primitive.
@@ -233,21 +230,17 @@ function useScrollEdges() {
    Radix-backed tabs (in-page panels).
    -------------------------------------------------------------------------- */
 
-export const LineTabs = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof TabsPrimitive.Root>,
-  ComponentPropsWithoutRef<typeof TabsPrimitive.Root>
->(function LineTabs({ className, ...props }, ref) {
+export function LineTabs({ className, ...props }: ComponentProps<typeof TabsPrimitive.Root>) {
   return (
     <TabsPrimitive.Root
       data-slot="line-tabs"
       className={cn("flex min-w-0 flex-col", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-export interface LineTabsListProps extends ComponentPropsWithoutRef<typeof TabsPrimitive.List> {
+export interface LineTabsListProps extends ComponentProps<typeof TabsPrimitive.List> {
   variant?: LineTabsVariant | undefined;
   /** Pinned to the right of the row, on the same rule: "+ Add". */
   trailing?: ReactNode | undefined;
@@ -255,15 +248,15 @@ export interface LineTabsListProps extends ComponentPropsWithoutRef<typeof TabsP
   barClassName?: string | undefined;
 }
 
-export const LineTabsList = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof TabsPrimitive.List>,
-  LineTabsListProps
->(function LineTabsList(
-  { variant = "underline", trailing, className, barClassName, children, ...props },
-  forwardedRef,
-) {
-  const { ref: scrollRef, style, edges } = useScrollEdges();
-  const ref = useMergedRefs(scrollRef, forwardedRef);
+export function LineTabsList({
+  variant = "underline",
+  trailing,
+  className,
+  barClassName,
+  children,
+  ...props
+}: LineTabsListProps) {
+  const { ref, style, edges } = useScrollEdges();
   return (
     <VariantContext.Provider value={variant}>
       <div
@@ -290,11 +283,9 @@ export const LineTabsList = /* @__PURE__ */ forwardRef<
       </div>
     </VariantContext.Provider>
   );
-});
+}
 
-export interface LineTabsTriggerProps extends ComponentPropsWithoutRef<
-  typeof TabsPrimitive.Trigger
-> {
+export interface LineTabsTriggerProps extends ComponentProps<typeof TabsPrimitive.Trigger> {
   /** Shown as an 11px badge after the label. */
   count?: ReactNode | undefined;
   countTone?: LineTabsCountTone | undefined;
@@ -302,16 +293,19 @@ export interface LineTabsTriggerProps extends ComponentPropsWithoutRef<
   countLabel?: string | undefined;
 }
 
-export const LineTabsTrigger = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof TabsPrimitive.Trigger>,
-  LineTabsTriggerProps
->(function LineTabsTrigger({ className, children, count, countTone, countLabel, ...props }, ref) {
+export function LineTabsTrigger({
+  className,
+  children,
+  count,
+  countTone,
+  countLabel,
+  ...props
+}: LineTabsTriggerProps) {
   const variant = useContext(VariantContext);
   return (
     <TabsPrimitive.Trigger
       data-slot="line-tabs-trigger"
       className={cn(lineTabVariants({ variant }), className)}
-      ref={ref}
       {...props}
     >
       {children}
@@ -320,70 +314,71 @@ export const LineTabsTrigger = /* @__PURE__ */ forwardRef<
       )}
     </TabsPrimitive.Trigger>
   );
-});
+}
 
-export const LineTabsContent = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof TabsPrimitive.Content>,
-  ComponentPropsWithoutRef<typeof TabsPrimitive.Content>
->(function LineTabsContent({ className, ...props }, ref) {
+export function LineTabsContent({
+  className,
+  ...props
+}: ComponentProps<typeof TabsPrimitive.Content>) {
   return (
     <TabsPrimitive.Content
       data-slot="line-tabs-content"
       className={cn("min-w-0 outline-hidden", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 /* ----------------------------------------------------------------------------
    Link tabs (routes and URL state).
    -------------------------------------------------------------------------- */
 
-export interface LineTabsNavProps extends ComponentPropsWithoutRef<"nav"> {
+export interface LineTabsNavProps extends ComponentProps<"nav"> {
   variant?: LineTabsVariant | undefined;
   trailing?: ReactNode | undefined;
   barClassName?: string | undefined;
 }
 
-export const LineTabsNav = /* @__PURE__ */ forwardRef<HTMLElement, LineTabsNavProps>(
-  function LineTabsNav(
-    { variant = "underline", trailing, className, barClassName, children, ...props },
-    navRef,
-  ) {
-    const { ref, style, edges } = useScrollEdges();
-    return (
-      <VariantContext.Provider value={variant}>
-        <nav ref={navRef} data-slot="line-tabs-nav" className={cn("min-w-0", className)} {...props}>
+export function LineTabsNav({
+  variant = "underline",
+  trailing,
+  className,
+  barClassName,
+  children,
+  ...props
+}: LineTabsNavProps) {
+  const { ref, style, edges } = useScrollEdges();
+  return (
+    <VariantContext.Provider value={variant}>
+      <nav data-slot="line-tabs-nav" className={cn("min-w-0", className)} {...props}>
+        <div
+          data-slot="line-tabs-bar"
+          data-variant={variant}
+          className={cn(barVariants({ variant }), barClassName)}
+        >
           <div
-            data-slot="line-tabs-bar"
-            data-variant={variant}
-            className={cn(barVariants({ variant }), barClassName)}
+            ref={ref}
+            role="list"
+            data-slot="line-tabs-list"
+            data-overflow-start={edges.start || undefined}
+            data-overflow-end={edges.end || undefined}
+            style={style}
+            className={scrollerVariants({ variant })}
           >
-            <div
-              ref={ref}
-              role="list"
-              data-slot="line-tabs-list"
-              data-overflow-start={edges.start || undefined}
-              data-overflow-end={edges.end || undefined}
-              style={style}
-              className={scrollerVariants({ variant })}
-            >
-              {children}
-            </div>
-            {trailing ? (
-              <div data-slot="line-tabs-trailing" className="flex shrink-0 items-center gap-2 py-1">
-                {trailing}
-              </div>
-            ) : null}
+            {children}
           </div>
-        </nav>
-      </VariantContext.Provider>
-    );
-  },
-);
+          {trailing ? (
+            <div data-slot="line-tabs-trailing" className="flex shrink-0 items-center gap-2 py-1">
+              {trailing}
+            </div>
+          ) : null}
+        </div>
+      </nav>
+    </VariantContext.Provider>
+  );
+}
 
-export interface LineTabsLinkProps extends ComponentPropsWithoutRef<"a"> {
+export interface LineTabsLinkProps extends ComponentProps<"a"> {
   /** Render your router's link as the child (`<Link to="..." />`). */
   asChild?: boolean | undefined;
   active?: boolean | undefined;
@@ -392,38 +387,32 @@ export interface LineTabsLinkProps extends ComponentPropsWithoutRef<"a"> {
   countLabel?: string | undefined;
 }
 
-export const LineTabsLink = /* @__PURE__ */ forwardRef<HTMLAnchorElement, LineTabsLinkProps>(
-  function LineTabsLink(
-    {
-      asChild = false,
-      active = false,
-      count,
-      countTone,
-      countLabel,
-      className,
-      children,
-      ...props
-    },
-    ref,
-  ) {
-    const variant = useContext(VariantContext);
-    const Comp = asChild ? Slot.Root : "a";
-    return (
-      <div role="listitem" className="flex shrink-0">
-        <Comp
-          data-slot="line-tabs-link"
-          data-state={active ? "active" : "inactive"}
-          aria-current={active ? "page" : undefined}
-          className={cn(lineTabVariants({ variant }), className)}
-          ref={ref}
-          {...props}
-        >
-          <Slot.Slottable>{children}</Slot.Slottable>
-          {count === undefined || count === null ? null : (
-            <LineTabCount count={count} tone={countTone} label={countLabel} />
-          )}
-        </Comp>
-      </div>
-    );
-  },
-);
+export function LineTabsLink({
+  asChild = false,
+  active = false,
+  count,
+  countTone,
+  countLabel,
+  className,
+  children,
+  ...props
+}: LineTabsLinkProps) {
+  const variant = useContext(VariantContext);
+  const Comp = asChild ? Slot.Root : "a";
+  return (
+    <div role="listitem" className="flex shrink-0">
+      <Comp
+        data-slot="line-tabs-link"
+        data-state={active ? "active" : "inactive"}
+        aria-current={active ? "page" : undefined}
+        className={cn(lineTabVariants({ variant }), className)}
+        {...props}
+      >
+        <Slot.Slottable>{children}</Slot.Slottable>
+        {count === undefined || count === null ? null : (
+          <LineTabCount count={count} tone={countTone} label={countLabel} />
+        )}
+      </Comp>
+    </div>
+  );
+}

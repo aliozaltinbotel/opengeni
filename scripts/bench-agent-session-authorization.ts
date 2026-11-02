@@ -11,7 +11,7 @@ import {
   initializeSessionStartAtomically,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
-import { startTestServices } from "@opengeni/testing/compose";
+import { startTestServices } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 

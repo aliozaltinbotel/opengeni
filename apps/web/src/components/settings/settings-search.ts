@@ -3,7 +3,9 @@
 // "invoices"). The index is built from the rail itself, so search never offers
 // a page the person can't use: a setting is listed only when its page is.
 import { cloneElement, isValidElement, type ReactElement } from "react";
-import type { SettingsRailIcon, SettingsRailSection } from "./settings-sidebar";
+import type { LucideIcon } from "lucide-react";
+
+import type { SettingsRailSection } from "./settings-sidebar";
 
 export interface SettingsSearchEntry {
   id: string;
@@ -11,7 +13,7 @@ export interface SettingsSearchEntry {
   label: string;
   /** Where it lives: "Workspace · General", or "Organization" for a page. */
   location: string;
-  icon: SettingsRailIcon;
+  icon: LucideIcon;
   /** The router link, without children. */
   link: ReactElement;
   keywords: readonly string[];
@@ -55,18 +57,6 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "laptop",
     "server",
     "self-hosted",
-  ],
-  "workspace:/workspaces/$workspaceId/computer-use": [
-    "permissions",
-    "computer use",
-    "this computer",
-    "screen control",
-    "screen recording",
-    "accessibility",
-    "chrome extension",
-    "app-shots",
-    "microphone",
-    "privacy",
   ],
   "organization:general": ["organization name", "organization id", "rename organization"],
   "organization:people": ["members", "invite", "roles", "owner", "admin", "team"],
@@ -116,7 +106,6 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "recovery",
     "data",
     "admin access",
-    "full access",
   ],
   "account:security": [
     "password",
@@ -184,11 +173,7 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   ],
   "organization:security": [
     { label: "Data retention", keywords: ["retention", "delete data"] },
-    {
-      label: "Actions in chat",
-      keywords: ["agents", "confirm", "invite", "share", "settings in chat"],
-    },
-    { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
+    { label: "Admin access for agent sessions", keywords: ["agents", "admin"] },
   ],
   "account:security": [
     { label: "Password", keywords: ["change password", "sign in"] },

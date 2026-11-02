@@ -1,5 +1,10 @@
 import type { WorkbookChange } from "./spreadsheet";
-import type { NativeArtifactSession } from "./native";
+import type {
+  NativeArtifactSession,
+  NativeDocumentSession,
+  NativePresentationSession,
+  NativeSpreadsheetSession,
+} from "./native";
 
 const ROOT_KEY = "$root";
 const PROXY_METADATA = new WeakMap<object, ProxyMetadata>();
@@ -639,6 +644,12 @@ export function unwrapArtifactValue(value: unknown): unknown {
   for (const key of Reflect.ownKeys(value))
     output[key] = unwrapArtifactValue(Reflect.get(value, key));
   return output;
+}
+
+export function nativeSessionOf(
+  state: CompositeArtifactState<object>,
+): NativeSpreadsheetSession | NativeDocumentSession | NativePresentationSession {
+  return state.native;
 }
 
 function rootLocator<Root extends object>(): Locator<Root> {

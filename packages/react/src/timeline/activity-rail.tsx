@@ -12,6 +12,7 @@ import {
   BrainCircuitIcon,
   MessageSquareTextIcon,
   SendIcon,
+  WrenchIcon,
 } from "lucide-react";
 import {
   Component,
@@ -42,8 +43,6 @@ import {
 } from "./shared";
 import { invokedToolCall } from "./invoked-tool";
 import { toolDisplayName } from "./tool-display-name";
-import { ToolKindIcon } from "./tool-icon";
-import { genericToolIconKind } from "./tool-presentation";
 import type { ActivityItem, AgentMessageItem, MemoryItem, ToolCallItem, WorkerItem } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -406,7 +405,7 @@ function ToolOutputExactRow({
   return (
     <div data-og-tool-output-loading="" aria-busy="true">
       <ActivityDisclosure
-        icon={<ToolKindIcon kind={genericToolIconKind(item.name)} className="size-3.5" />}
+        icon={<WrenchIcon className="size-3.5" />}
         title={toolDisplayName(msg, item.name, item.display)}
         preview={msg("timeline.toolRenderers.loadingOutput")}
         expandable={false}

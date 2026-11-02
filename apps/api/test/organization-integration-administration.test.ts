@@ -14,8 +14,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { registerOrganizationIntegrationPolicyRoutes } from "../src/routes/organization-integration-policy";
 import { registerOrganizationIntegrationRoutes } from "../src/routes/organization-integrations";
 import { registerWorkspaceIntegrationRoutes } from "../src/routes/workspace-integrations";

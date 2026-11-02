@@ -14,8 +14,7 @@ import {
   prepareAgentTools,
   runAgentStream,
 } from "@opengeni/runtime";
-import { assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+import { assistantMessage, functionCall, testSettings } from "@opengeni/testing";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 
@@ -184,9 +183,6 @@ async function buildWorkerAgent(
       defaultModelId: null,
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
-    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
-      async (_db, input) => input.governance,
-    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   ];
   try {

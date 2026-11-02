@@ -1,11 +1,8 @@
-// Before any module that injects <style>: the page's CSP nonce, if it has one.
-import "./lib/csp-nonce-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
 // Backs the shared session UI with this app's router and API helpers.
 import "./app-host";
-import { reportCaughtError } from "@opengeni/react/app/lib/host-boundary-diagnostics";
 import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
@@ -26,7 +23,6 @@ import {
 } from "@opengeni/react/app/lib/client-signals";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
 import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
-import { recordErrorToasts } from "@opengeni/react/app/lib/recent-errors";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,
@@ -34,13 +30,8 @@ import {
   installVitePreloadRecovery,
 } from "./lib/vite-preload-recovery";
 import "./styles.css";
-// The host extension's stylesheet (empty for the stock console), after the base styles.
-import "@opengeni/web-host-extension/style.css";
-import { toast } from "sonner";
 
 retainIdentityLinkContinuation(window);
-// Errors the person was shown go with their next feedback report.
-recordErrorToasts(toast);
 // Before the first paint: slim scrollbars where the platform draws classic ones.
 markClassicScrollbars(document);
 // Error counter and diagnostics (scrubbed, bounded error text); see
@@ -99,7 +90,7 @@ const ClerkConsoleAuth = React.lazy(() =>
 );
 
 function renderApp() {
-  createRoot(document.getElementById("root")!, { onCaughtError: reportCaughtError }).render(
+  createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <AppearanceProvider>
         {import.meta.env.VITE_CLERK_PUBLISHABLE_KEY?.trim() ? (

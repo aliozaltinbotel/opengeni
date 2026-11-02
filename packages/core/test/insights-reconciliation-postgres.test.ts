@@ -16,8 +16,11 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 
 import { getWorkspaceInsights } from "../src/domain/insights";
 

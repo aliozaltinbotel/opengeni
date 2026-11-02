@@ -20,7 +20,6 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { authorizeOrganizationIntegrationAdministration } from "./organization-integration-policy";
-import { requestValidationError } from "../http/request-body";
 
 export function registerSlackBotAccessRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/connections";
@@ -85,13 +84,8 @@ export function registerSlackBotAccessRoutes(app: Hono, deps: ApiRouteDeps): voi
     const request = UpdateOpenGeniSlackBotOrganizationAccess.safeParse(
       await context.req.json().catch(() => null),
     );
-    if (!connectionId.success)
+    if (!connectionId.success || !request.success)
       throw new HTTPException(422, { message: "Invalid bot access setting" });
-    if (!request.success)
-      throw requestValidationError(request.error, "body", {
-        status: 422,
-        message: "Invalid bot access setting",
-      });
     context.header("cache-control", "private, no-store");
     try {
       const result = await setOrganizationSlackBotAccess(

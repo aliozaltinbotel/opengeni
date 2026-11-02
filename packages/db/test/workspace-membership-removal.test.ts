@@ -4,7 +4,7 @@
 // self-removal and actor-administration guards fail closed. The last-admin
 // guard remains for workspace-only control; organization control stays authoritative.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   acceptOrganizationInvitation,

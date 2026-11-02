@@ -13,9 +13,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { waitFor } from "@opengeni/testing/process";
+import {
+  acquireSharedTestDatabase,
+  startTestServices,
+  type SharedTestDatabase,
+  type TestServices,
+  waitFor,
+} from "@opengeni/testing";
 import {
   armSubscriptionCoreCodexCapacityWait,
   claimSessionWorkForAttempt,

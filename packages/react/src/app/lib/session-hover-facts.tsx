@@ -5,7 +5,6 @@ import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../timeline-mo
 
 import type { SemanticTone } from "../../ui/status-dot";
 import { formatAbsoluteTime, inSentence } from "../../ui/relative-time";
-import { sessionAutomationWaitWords } from "../../components/automations/automation-model";
 import { sessionStatusLabel, sessionInputWait } from "./session-rail";
 import type { RailSession } from "./session-list-entry";
 import { sessionSiteOrigin } from "./session-site-origin";
@@ -23,12 +22,7 @@ export type SessionHoverFacts = {
   context: string[];
   /** The agent's own waiting reason or the pause reason, verbatim. */
   reason: string | null;
-  /**
-   * Where the chat comes from or what will post into it next: a Site, an
-   * automation waiting for an event or its schedule, or the automation that
-   * started it.
-   */
-  origin: { kind: "site" | "event" | "schedule" | "automation"; label: string } | null;
+  origin: { kind: "schedule" | "site"; label: string } | null;
   model: { id: string; effort: string | null } | null;
   subAgents: {
     total: string;
@@ -214,13 +208,12 @@ export function sessionHoverFacts(
   const reason = wait?.reason.trim() || pauseReason || null;
 
   const site = sessionSiteOrigin(session);
-  const automationWait = sessionAutomationWaitWords(t, session, { now: new Date(now) });
-  const origin: SessionHoverFacts["origin"] = site
-    ? { kind: "site", label: `Started from ${site.title}` }
-    : automationWait
-      ? { kind: automationWait.kind, label: automationWait.label }
-      : scheduledTaskIdOf(session)
-        ? { kind: "automation", label: "Started by an automation" }
+  const origin = site
+    ? { kind: "site" as const, label: `Started from ${site.title}` }
+    : scheduledTaskIdOf(session)
+      ? { kind: "schedule" as const, label: "Started by a schedule" }
+      : session.hasSchedules
+        ? { kind: "schedule" as const, label: "On a schedule" }
         : null;
 
   const modelId = session.model?.trim();

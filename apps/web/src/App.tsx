@@ -19,15 +19,10 @@
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
-//   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source)
-//   /workspaces/:id/automations/:automationId → one automation (overview + runs)
-//   /workspaces/:id/automations/:automationId/edit → edit automation
-//   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
-//   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
-//   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
-//   /workspaces/:id/meetings                 → meetings list with the recorder
-//   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
+//   /workspaces/:id/schedules                → schedules list
+//   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
+//   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
+//   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
 //   /workspaces/:id/playground               → playground: Opengeni inside a sample product, with a guided tour
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
@@ -35,14 +30,11 @@
 //   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
-//   /workspaces/:id/<extension path>         → host extension pages (host-extension/routes.tsx)
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
-//   /reauthenticate?return=<path>            → confirm it's you, then return (same-origin paths only)
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
-//   /dev/composer-stack                      → DEV-only session column preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 // The shared session UI renders through this app's router and API helpers.
@@ -54,7 +46,6 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
-  notFound,
   useParams,
   useSearch,
 } from "@tanstack/react-router";
@@ -76,7 +67,6 @@ import {
 } from "@opengeni/react/app/lib/session-search-route";
 import {
   artifactReturnSearch,
-  siteViewSearch,
   parseCheckoutOutcome,
   type CheckoutOutcome,
 } from "@opengeni/react/app/lib/routes";
@@ -131,27 +121,8 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
-import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
-// Installs the build's host extension before this module's routes read it.
-import { hostExtension } from "@/host-extension/startup";
-import { WorkspaceLandingRedirect } from "@/host-extension/landing";
-import { hiddenNativeDestinations, hiddenNativeSections } from "@/host-extension/registry";
-import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
-import {
-  hostFilteredWorkspaces,
-  isOrganizationSectionHidden,
-  isNativeSectionHidden,
-  isNativeCapabilityDetailHidden,
-  capabilitiesSectionFromSearch,
-  type NativeCapabilitiesSection,
-} from "@opengeni/react/app/host-extension";
-import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
-import {
-  buildHostExtensionOutsideWorkspaceRoutes,
-  buildHostExtensionWorkspaceRoutes,
-} from "@/host-extension/routes";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -172,20 +143,12 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   "IntegrationsReturnRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
-const LazyTeamsConnectRoute = lazyRouteComponent(
-  () => import("@/routes/teams-connect"),
-  "TeamsConnectRoute",
-);
 const LazyConnectAgentRoute = lazyRouteComponent(
   () => import("@/routes/connect-agent"),
   "ConnectAgentRoute",
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
-const LazyComputerUseRoute = lazyRouteComponent(
-  () => import("@/routes/computer-use"),
-  "ComputerUseRoute",
-);
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
@@ -215,14 +178,6 @@ const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
 );
-// Served from the Personal security entry, which already loads the same
-// managed-human modules. A lazy entry of its own that imports `@/api`
-// regroups the entry-aware startup chunks (about 3 MB of session code in the
-// first load, refused by the eager-graph check).
-const LazyReauthenticateRoute = lazyRouteComponent(
-  () => import("@/routes/personal-security"),
-  "ReauthenticateRoute",
-);
 const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
   "NativeSignInRoute",
@@ -249,38 +204,14 @@ const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
 );
-const LazyAutomationsRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "AutomationsRoute",
+const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
+const LazyScheduleDetailRoute = lazyRouteComponent(
+  () => import("@/routes/schedules"),
+  "ScheduleDetailRoute",
 );
-const LazyMeetingsRoute = lazyRouteComponent(() => import("@/routes/meetings"), "MeetingsRoute");
-const LazyMeetingDetailRoute = lazyRouteComponent(
-  () => import("@/routes/meetings"),
-  "MeetingDetailRoute",
-);
-const LazyAutomationDetailRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "AutomationDetailRoute",
-);
-const LazyAutomationFormRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "AutomationFormRoute",
-);
-const LazyEventSourcesRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "EventSourcesRoute",
-);
-const LazyEventSourceNewRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "EventSourceNewRoute",
-);
-const LazyEventSourceDetailRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "EventSourceDetailRoute",
-);
-const LazyAutomationTemplatesRoute = lazyRouteComponent(
-  () => import("@/routes/automations"),
-  "AutomationTemplatesRoute",
+const LazyScheduleFormRoute = lazyRouteComponent(
+  () => import("@/routes/schedules"),
+  "ScheduleFormRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -306,10 +237,6 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
 const LazyArtifactsRoute = lazyRouteComponent(
   () => import("@opengeni/react/app/routes/artifacts"),
   "ArtifactsRoute",
-);
-const LazySiteViewRoute = lazyRouteComponent(
-  () => import("@opengeni/react/app/routes/site-view"),
-  "SiteViewRoute",
 );
 const LazyRetainedArtifactRoute = lazyRouteComponent(
   () => import("@opengeni/react/app/routes/retained-artifact"),
@@ -388,11 +315,6 @@ const integrationsReturnRoute = createRoute({
 // code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
 // Where an agent's sign-in to the organization MCP server lands: the person
 // picks the organization, what the agent can do and where (/v1/mcp OAuth).
-const teamsConnectRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "teams/connect",
-  component: LazyTeamsConnectRoute,
-});
 const connectAgentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "connect-agent",
@@ -457,16 +379,6 @@ const personalSecurityRoute = createRoute({
   path: "settings/security",
   component: LazyPersonalSecurityRoute,
 });
-// Confirm it's you before a sensitive change (a host's step-up), then return to
-// `?return=`. Behind the managed sign-in gate like Personal security; the page
-// itself keeps only same-origin return paths.
-const reauthenticateRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "reauthenticate",
-  validateSearch: (search: Record<string, unknown>): { return?: string } =>
-    typeof search.return === "string" && search.return ? { return: search.return } : {},
-  component: Reauthenticate,
-});
 // Where the Opengeni phone app's sign-in opens in the system auth browser:
 // sign in with any web method, then allow the device (code + PKCE).
 const nativeSignInRoute = createRoute({
@@ -517,19 +429,6 @@ const devSessionTimelineRoute = createRoute({
   path: "dev/session-timeline",
   component: LazyDevSessionTimelineRoute,
 });
-// DEV-only: full-height session column (timeline, status stack, composer) for
-// composer-stack screenshots and measurements. Created only in development so
-// its fixtures are never emitted into a production build.
-const composerStackPreviewRoute = import.meta.env.DEV
-  ? createRoute({
-      getParentRoute: () => rootRoute,
-      path: "dev/composer-stack",
-      component: lazyRouteComponent(
-        () => import("@/routes/composer-stack"),
-        "ComposerStackPreviewRoute",
-      ),
-    })
-  : null;
 // DEV-only component studio. Created only in development so the kit chunk is
 // never emitted into a production build.
 const uiKitRoute = import.meta.env.DEV
@@ -657,11 +556,6 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
-const workspaceComputerUseRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "computer-use",
-  component: LazyComputerUseRoute,
-});
 // Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
 // so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
@@ -699,157 +593,75 @@ const workspaceInsightsRoute = createRoute({
   }),
   component: Insights,
 });
-function capabilitiesSearch(search: Record<string, unknown>): { section?: NativeCapabilitiesSection } {
-  const section = capabilitiesSectionFromSearch(search.section);
-  return section ? { section } : {};
-}
-function refuseHiddenCapabilities(search: { section?: NativeCapabilitiesSection }, searchStr: string): void {
-  const hidden = hiddenNativeSections();
-  if (isNativeSectionHidden("capabilities", search.section ?? "all", [], hidden) ||
-      isNativeCapabilityDetailHidden(new URLSearchParams(searchStr).get("open"), hidden)) throw notFound();
-}
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  validateSearch: capabilitiesSearch,
-  beforeLoad: ({ search, location }) => refuseHiddenCapabilities(search, location.searchStr),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
+  }),
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: capabilitiesSearch,
-  beforeLoad: ({ search, location }) => refuseHiddenCapabilities(search, location.searchStr),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
+  }),
   component: CapabilitiesLegacyRedirect,
 });
-const AUTOMATIONS_SEARCH_UUID =
+const SCHEDULES_SEARCH_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-type AutomationsSearch = { sourceSessionId?: string; taskId?: string; targetSessionId?: string };
-function automationsSearch(search: Record<string, unknown>): AutomationsSearch {
-  return {
+const workspaceSchedulesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { sourceSessionId?: string; taskId?: string; targetSessionId?: string } => ({
     ...(typeof search.sourceSessionId === "string" &&
-    AUTOMATIONS_SEARCH_UUID.test(search.sourceSessionId)
+    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
       : {}),
     ...(typeof search.targetSessionId === "string" &&
-    AUTOMATIONS_SEARCH_UUID.test(search.targetSessionId)
+    SCHEDULES_SEARCH_UUID.test(search.targetSessionId)
       ? { targetSessionId: search.targetSessionId }
       : {}),
-    // Set when arriving from a session that an automation started, so the page
-    // can reveal that one automation instead of leaving the reader to find it.
-    ...(typeof search.taskId === "string" && AUTOMATIONS_SEARCH_UUID.test(search.taskId)
+    // Set when arriving from a session that a schedule started, so the page can
+    // reveal that one task instead of leaving the reader to find it.
+    ...(typeof search.taskId === "string" && SCHEDULES_SEARCH_UUID.test(search.taskId)
       ? { taskId: search.taskId }
       : {}),
-  };
-}
-// Template ids and source kinds are only shape-checked here; the pages ignore
-// one they don't know, so the router never keeps a second list of them.
-const AUTOMATIONS_SEARCH_SLUG = /^[a-z][a-z0-9-]{0,39}$/u;
-type NewAutomationSearch = {
-  template?: string;
-  from?: string;
-  sourceSessionId?: string;
-  /** Start with a trigger on this event source. */
-  source?: string;
-};
-function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
-  return {
-    // A built-in template's id, or the id of one saved in the workspace.
-    ...(typeof search.template === "string" &&
-    (AUTOMATIONS_SEARCH_SLUG.test(search.template) || AUTOMATIONS_SEARCH_UUID.test(search.template))
+  }),
+  component: Schedules,
+});
+const SCHEDULE_TEMPLATE_IDS = new Set(["morning-brief", "dependency-pr", "cost-check"]);
+const workspaceScheduleNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/new",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { template?: string; from?: string; sourceSessionId?: string } => ({
+    ...(typeof search.template === "string" && SCHEDULE_TEMPLATE_IDS.has(search.template)
       ? { template: search.template }
       : {}),
-    ...(typeof search.from === "string" && AUTOMATIONS_SEARCH_UUID.test(search.from)
+    ...(typeof search.from === "string" && SCHEDULES_SEARCH_UUID.test(search.from)
       ? { from: search.from }
       : {}),
     ...(typeof search.sourceSessionId === "string" &&
-    AUTOMATIONS_SEARCH_UUID.test(search.sourceSessionId)
+    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
       : {}),
-    ...(typeof search.source === "string" && AUTOMATIONS_SEARCH_UUID.test(search.source)
-      ? { source: search.source }
-      : {}),
-  };
-}
-const workspaceAutomationsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "automations",
-  validateSearch: automationsSearch,
-  component: Automations,
+  }),
+  component: ScheduleNew,
 });
-const workspaceAutomationNewRoute = createRoute({
+const workspaceScheduleDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "automations/new",
-  validateSearch: newAutomationSearch,
-  component: AutomationNew,
+  path: "schedules/$scheduleId",
+  component: ScheduleDetail,
 });
-const workspaceAutomationDetailRoute = createRoute({
+const workspaceScheduleEditRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "automations/$automationId",
-  component: AutomationDetail,
-});
-const workspaceAutomationEditRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "automations/$automationId/edit",
-  component: AutomationEdit,
-});
-const workspaceEventSourcesRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "automations/sources",
-  component: EventSources,
-});
-const workspaceEventSourceNewRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "automations/sources/new",
-  validateSearch: (search: Record<string, unknown>): { kind?: string } =>
-    typeof search.kind === "string" && AUTOMATIONS_SEARCH_SLUG.test(search.kind)
-      ? { kind: search.kind }
-      : {},
-  component: EventSourceNew,
-});
-const workspaceEventSourceDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "automations/sources/$sourceId",
-  component: EventSourceDetail,
-});
-const workspaceAutomationTemplatesRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "automations/templates",
-  component: AutomationTemplates,
-});
-// Automations were called Schedules; their links in old messages and
-// bookmarks still land on the same page.
-const workspaceLegacySchedulesRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "schedules",
-  validateSearch: automationsSearch,
-  component: LegacySchedulesRedirect,
-});
-const workspaceLegacyScheduleNewRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "schedules/new",
-  validateSearch: newAutomationSearch,
-  component: LegacyScheduleNewRedirect,
-});
-const workspaceLegacyScheduleDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "schedules/$automationId",
-  component: LegacyScheduleDetailRedirect,
-});
-const workspaceLegacyScheduleEditRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "schedules/$automationId/edit",
-  component: LegacyScheduleEditRedirect,
-});
-const workspaceMeetingsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "meetings",
-  component: Meetings,
-});
-const workspaceMeetingDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "meetings/$recordingId",
-  component: MeetingDetail,
+  path: "schedules/$scheduleId/edit",
+  component: ScheduleEdit,
 });
 const workspacePlaygroundRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -924,9 +736,6 @@ const workspaceSettingsRoute = createRoute({
       ...parseReturnTo(search),
     };
   },
-  beforeLoad: ({ search }) => {
-    if (isNativeSectionHidden("workspace", search.section ?? "general", [], hiddenNativeSections())) throw notFound();
-  },
   component: WorkspaceSettings,
 });
 const workspaceStateRoute = createRoute({
@@ -944,19 +753,9 @@ const workspaceArtifactsRoute = createRoute({
 });
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  // A Site's details, by tab; without a tab it opens the Site view instead.
   path: "artifacts/$artifactId",
   validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
-});
-// A Site with its conversations beside it, where it is edited live. Every
-// way into a Site opens it: the rail, the Artifacts list, links and Edit with
-// Opengeni (`?new`, a new conversation with its composer focused).
-const workspaceSiteViewRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "sites/$siteId",
-  validateSearch: siteViewSearch,
-  component: SiteViewPage,
 });
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1048,11 +847,6 @@ const workspaceOrganizationRoute = createRoute({
       ...parseReturnTo(search),
     };
   },
-  // A section showing a destination the host extension hides has no page.
-  beforeLoad: ({ search }) => {
-    if (search.section && isOrganizationSectionHidden(search.section, hiddenNativeDestinations(), hiddenNativeSections()))
-      throw notFound();
-  },
   component: Organization,
 });
 // Legacy URL: the old "account" surface is now "organization". Forward, keeping
@@ -1066,27 +860,13 @@ const workspaceAccountRoute = createRoute({
   },
   component: AccountRedirect,
 });
-// The host extension's pages, after every native route. Registration refused
-// any path that collides with a native one; the stub adds none.
-export const hostExtensionWorkspaceRoutes = buildHostExtensionWorkspaceRoutes(
-  workspaceRoute,
-  hostExtension.routes,
-);
-// The host extension's pages outside any workspace: registration refused any
-// path that shares a first segment with a native top-level route.
-export const hostExtensionOutsideWorkspaceRoutes = buildHostExtensionOutsideWorkspaceRoutes(
-  rootRoute,
-  hostExtension.outsideWorkspaceRoutes,
-  hostExtension.outsideWorkspaceProviders,
-);
-export const routeTree = rootRoute.addChildren([
+const routeTree = rootRoute.addChildren([
   indexRoute,
   sessionDeepLinkRoute,
   billingReturnRoute,
   integrationsReturnRoute,
   deviceRoute,
   connectAgentRoute,
-  teamsConnectRoute,
   resetPasswordRoute,
   excelAddinRoute,
   desktopReturnRoute,
@@ -1094,7 +874,6 @@ export const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
-  reauthenticateRoute,
   nativeSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
@@ -1105,71 +884,46 @@ export const routeTree = rootRoute.addChildren([
         devSessionTimelineRoute,
       ]
     : []),
-  ...(import.meta.env.DEV && composerStackPreviewRoute ? [composerStackPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
-  // Typed `never` like the workspace pages below, so the typed tree stays native.
-  ...(hostExtensionOutsideWorkspaceRoutes as readonly unknown[] as readonly never[]),
-  // A destination the host extension hides has no route: its URL renders the
-  // root not-found page, like any unknown URL.
-  workspaceRoute.addChildren(
-    visibleNativeRoutes(
-      [
-        workspaceIndexRoute,
-        workspaceAgentRoute,
-        workspaceRetiredPriorityRoute,
-        workspaceRetiredAgentsRoute,
-        workspaceSessionsRoute,
-        workspaceSessionRoute,
-        workspaceSecretsRoute.addChildren([
-          workspaceSecretsIndexRoute,
-          workspaceSecretsVaultRoute,
-          workspaceSecretsItemRoute,
-        ]),
-        workspaceVariableSetsRoute,
-        workspaceVariableSetDetailRoute,
-        workspaceEnvironmentsRoute,
-        workspaceRigsRoute,
-        workspaceRigDetailRoute,
-        workspaceReadOnlyChatsRoute,
-        workspaceInboxRoute,
-        workspaceMachinesRoute,
-        workspaceComputerUseRoute,
-        workspaceInsightsRoute,
-        workspaceCapabilitiesRoute,
-        workspaceLegacyCapabilitiesRoute,
-        workspaceAutomationsRoute,
-        workspaceAutomationNewRoute,
-        workspaceAutomationDetailRoute,
-        workspaceAutomationEditRoute,
-        workspaceEventSourcesRoute,
-        workspaceEventSourceNewRoute,
-        workspaceEventSourceDetailRoute,
-        workspaceAutomationTemplatesRoute,
-        workspaceLegacySchedulesRoute,
-        workspaceLegacyScheduleNewRoute,
-        workspaceLegacyScheduleDetailRoute,
-        workspaceLegacyScheduleEditRoute,
-        workspaceMeetingsRoute,
-        workspaceMeetingDetailRoute,
-        workspacePlaygroundRoute,
-        workspaceDocumentsRoute,
-        workspaceMemoryRoute,
-        workspaceStateRoute,
-        workspaceArtifactsRoute,
-        workspaceRetainedArtifactRoute,
-        workspaceArtifactDetailRoute,
-        workspaceSiteViewRoute,
-        workspaceEditableArtifactRoute,
-        workspaceSettingsRoute,
-        workspaceOrganizationRoute,
-        workspaceAccountRoute,
-        // Typed `never` so the dynamic paths stay out of the typed route tree: an
-        // `AnyRoute` child would make every `/workspaces/$workspaceId/…` link valid.
-        ...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),
-      ],
-      hiddenNativeDestinations(),
-    ),
-  ),
+  workspaceRoute.addChildren([
+    workspaceIndexRoute,
+    workspaceAgentRoute,
+    workspaceRetiredPriorityRoute,
+    workspaceRetiredAgentsRoute,
+    workspaceSessionsRoute,
+    workspaceSessionRoute,
+    workspaceSecretsRoute.addChildren([
+      workspaceSecretsIndexRoute,
+      workspaceSecretsVaultRoute,
+      workspaceSecretsItemRoute,
+    ]),
+    workspaceVariableSetsRoute,
+    workspaceVariableSetDetailRoute,
+    workspaceEnvironmentsRoute,
+    workspaceRigsRoute,
+    workspaceRigDetailRoute,
+    workspaceReadOnlyChatsRoute,
+    workspaceInboxRoute,
+    workspaceMachinesRoute,
+    workspaceInsightsRoute,
+    workspaceCapabilitiesRoute,
+    workspaceLegacyCapabilitiesRoute,
+    workspaceSchedulesRoute,
+    workspaceScheduleNewRoute,
+    workspaceScheduleDetailRoute,
+    workspaceScheduleEditRoute,
+    workspacePlaygroundRoute,
+    workspaceDocumentsRoute,
+    workspaceMemoryRoute,
+    workspaceStateRoute,
+    workspaceArtifactsRoute,
+    workspaceRetainedArtifactRoute,
+    workspaceArtifactDetailRoute,
+    workspaceEditableArtifactRoute,
+    workspaceSettingsRoute,
+    workspaceOrganizationRoute,
+    workspaceAccountRoute,
+  ]),
 ]);
 // Every match needs its own Suspense boundary. Without a default pending
 // component, a cold lazy workspace page suspends through WorkspaceShell and is
@@ -1184,20 +938,14 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
-// Each page with its destination, so a page the host extension hides is never warmed.
-warmDesktopPages(
-  visibleNativeItems(
-    [
-      { to: "/workspaces/$workspaceId/sessions/$sessionId", page: LazySessionRoute },
-      { to: "/workspaces/$workspaceId/sessions", page: LazySessionsIndexRoute },
-      { to: "/workspaces/$workspaceId/inbox", page: LazyInboxRoute },
-      { to: "/workspaces/$workspaceId/plugins", page: LazyCapabilitiesRoute },
-      { to: "/workspaces/$workspaceId/automations", page: LazyAutomationsRoute },
-      { to: "/workspaces/$workspaceId/artifacts", page: LazyArtifactsRoute },
-    ],
-    hiddenNativeDestinations(),
-  ).map((entry) => entry.page),
-);
+warmDesktopPages([
+  LazySessionRoute,
+  LazySessionsIndexRoute,
+  LazyInboxRoute,
+  LazyCapabilitiesRoute,
+  LazySchedulesRoute,
+  LazyArtifactsRoute,
+]);
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {
@@ -1239,12 +987,7 @@ function RootIndexRoute() {
     rememberedWorkspaceId: readLastWorkspaceId(
       workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
     ),
-    // Never land in a Personal workspace the organization turned off, nor in
-    // one the host extension's filter leaves out (even when requested by link).
-    workspaces: hostFilteredWorkspaces(
-      navigableWorkspaces(context.workspaces, context.managedSelfContext, requestedWorkspaceId),
-      hostExtension.workspaceFilter,
-    ),
+    workspaces: context.workspaces,
     accessContext: context.accessContext,
   });
   if (!workspaceId) {
@@ -1255,12 +998,12 @@ function RootIndexRoute() {
       />
     );
   }
-  return <WorkspaceLandingRedirect workspaceId={workspaceId} />;
+  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
 }
 
 function WorkspaceIndexRedirect() {
   const { workspaceId } = workspaceRoute.useParams();
-  return <WorkspaceLandingRedirect workspaceId={workspaceId} />;
+  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
 }
 
 function WorkspaceShell() {
@@ -1390,11 +1133,11 @@ function Capabilities() {
   );
 }
 
-function Automations() {
-  const { workspaceId } = workspaceAutomationsRoute.useParams();
-  const { sourceSessionId, taskId, targetSessionId } = workspaceAutomationsRoute.useSearch();
+function Schedules() {
+  const { workspaceId } = workspaceSchedulesRoute.useParams();
+  const { sourceSessionId, taskId, targetSessionId } = workspaceSchedulesRoute.useSearch();
   return (
-    <LazyAutomationsRoute
+    <LazySchedulesRoute
       workspaceId={workspaceId}
       sourceSessionId={sourceSessionId}
       focusTaskId={taskId}
@@ -1403,78 +1146,13 @@ function Automations() {
   );
 }
 
-function AutomationNew() {
-  const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source } = workspaceAutomationNewRoute.useSearch();
+function ScheduleNew() {
+  const { workspaceId } = workspaceScheduleNewRoute.useParams();
+  const { template, from, sourceSessionId } = workspaceScheduleNewRoute.useSearch();
   return (
-    <LazyAutomationFormRoute
+    <LazyScheduleFormRoute
       workspaceId={workspaceId}
-      mode={{ kind: "create", template, from, sourceSessionId, eventSourceId: source }}
-    />
-  );
-}
-
-function EventSources() {
-  const { workspaceId } = workspaceEventSourcesRoute.useParams();
-  return <LazyEventSourcesRoute workspaceId={workspaceId} />;
-}
-
-function EventSourceNew() {
-  const { workspaceId } = workspaceEventSourceNewRoute.useParams();
-  const { kind } = workspaceEventSourceNewRoute.useSearch();
-  return <LazyEventSourceNewRoute workspaceId={workspaceId} kind={kind} />;
-}
-
-function EventSourceDetail() {
-  const { workspaceId, sourceId } = workspaceEventSourceDetailRoute.useParams();
-  return <LazyEventSourceDetailRoute workspaceId={workspaceId} sourceId={sourceId} />;
-}
-
-function AutomationTemplates() {
-  const { workspaceId } = workspaceAutomationTemplatesRoute.useParams();
-  return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
-}
-
-function LegacySchedulesRedirect() {
-  const { workspaceId } = workspaceLegacySchedulesRoute.useParams();
-  const search = workspaceLegacySchedulesRoute.useSearch();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/automations"
-      params={{ workspaceId }}
-      search={search}
-      replace
-    />
-  );
-}
-
-function LegacyScheduleNewRedirect() {
-  const { workspaceId } = workspaceLegacyScheduleNewRoute.useParams();
-  const search = workspaceLegacyScheduleNewRoute.useSearch();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/automations/new"
-      params={{ workspaceId }}
-      search={search}
-      replace
-    />
-  );
-}
-
-function LegacyScheduleDetailRedirect() {
-  const params = workspaceLegacyScheduleDetailRoute.useParams();
-  return (
-    <Navigate to="/workspaces/$workspaceId/automations/$automationId" params={params} replace />
-  );
-}
-
-function LegacyScheduleEditRedirect() {
-  const params = workspaceLegacyScheduleEditRoute.useParams();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/automations/$automationId/edit"
-      params={params}
-      replace
+      mode={{ kind: "create", template, from, sourceSessionId }}
     />
   );
 }
@@ -1484,29 +1162,14 @@ function Playground() {
   return <LazyPlaygroundRoute key={workspaceId} workspaceId={workspaceId} />;
 }
 
-function AutomationDetail() {
-  const { workspaceId, automationId } = workspaceAutomationDetailRoute.useParams();
-  return <LazyAutomationDetailRoute workspaceId={workspaceId} scheduleId={automationId} />;
+function ScheduleDetail() {
+  const { workspaceId, scheduleId } = workspaceScheduleDetailRoute.useParams();
+  return <LazyScheduleDetailRoute workspaceId={workspaceId} scheduleId={scheduleId} />;
 }
 
-function Meetings() {
-  const { workspaceId } = workspaceMeetingsRoute.useParams();
-  return <LazyMeetingsRoute workspaceId={workspaceId} />;
-}
-
-function MeetingDetail() {
-  const { workspaceId, recordingId } = workspaceMeetingDetailRoute.useParams();
-  return <LazyMeetingDetailRoute workspaceId={workspaceId} recordingId={recordingId} />;
-}
-
-function AutomationEdit() {
-  const { workspaceId, automationId } = workspaceAutomationEditRoute.useParams();
-  return (
-    <LazyAutomationFormRoute
-      workspaceId={workspaceId}
-      mode={{ kind: "edit", scheduleId: automationId }}
-    />
-  );
+function ScheduleEdit() {
+  const { workspaceId, scheduleId } = workspaceScheduleEditRoute.useParams();
+  return <LazyScheduleFormRoute workspaceId={workspaceId} mode={{ kind: "edit", scheduleId }} />;
 }
 
 function Documents() {
@@ -1603,20 +1266,6 @@ function ArtifactDetail() {
   const params = workspaceArtifactDetailRoute.useParams();
   const { fromSession } = workspaceArtifactDetailRoute.useSearch();
   return <LazyArtifactsRoute {...params} fromSession={fromSession} />;
-}
-
-function SiteViewPage() {
-  const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
-  return (
-    <LazySiteViewRoute
-      key={`${workspaceId}:${siteId}`}
-      workspaceId={workspaceId}
-      siteId={siteId}
-      conversation={conversation}
-      startNew={startNew === true}
-    />
-  );
 }
 
 function EditableArtifact() {
@@ -1731,11 +1380,6 @@ function ResetPassword() {
 
 function SetupAccount() {
   return <LazySetupAccountRoute />;
-}
-
-function Reauthenticate() {
-  const search = reauthenticateRoute.useSearch();
-  return <LazyReauthenticateRoute returnTo={search.return} />;
 }
 
 function AccountAuth() {

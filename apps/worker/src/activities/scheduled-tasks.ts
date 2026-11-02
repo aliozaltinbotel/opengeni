@@ -1,16 +1,10 @@
-import {
-  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
-  isRetiredNativeGoogleDriveTask,
-} from "@opengeni/contracts/google-drive-native-retirement";
-import { turnAttachmentsAllowed } from "./agent-turn/session-tool-families";
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
-import { scheduledTaskSessionTitle } from "./scheduled-task-title";
-export { scheduledTaskSessionTitle } from "./scheduled-task-title";
 import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
 } from "@opengeni/contracts/atlassian-native-retirement";
+import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -25,6 +19,7 @@ import {
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
   SessionMemoryScope,
+  normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
@@ -36,9 +31,6 @@ import {
   type ScheduledTaskDegradedAccount,
   type ScheduledTaskRun,
   type ResolvedAgentConfig,
-  type SessionSystemUpdatePayload,
-  type ToolRef,
-  type TurnInitiator,
 } from "@opengeni/contracts";
 import {
   openGeniSlackBotMetadata,
@@ -52,23 +44,21 @@ import {
   scheduledSlackBotConnectionId,
   freezeConnectionAccounts,
   ConnectionAccountSelectionError,
+  scheduledConnectionSurfaceEligibility,
   scheduledConnectionTools,
   scheduledTaskRunTools,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
   applySessionAgentConfigWriteThrough,
-  newSessionKnowledgeSearchTools,
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
   recordUserMessageAccepted,
-  scheduledOccurrenceEvents,
   type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
-  getEventOccurrenceForScheduledTaskRun,
   bindScheduledTaskRunSessionInTransaction,
   checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
@@ -135,7 +125,7 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -162,64 +152,13 @@ type ScheduledTemporalActivityIdentity = {
   activityId: string;
 };
 
-/**
- * A run someone or something asked for explicitly, carrying its own charging
- * identity and initiator. Schedule and event runs act with the automation's
- * own authority instead.
- */
-export function isManualScheduledTaskTrigger(
-  input: DispatchScheduledTaskRunInput,
-): input is Extract<DispatchScheduledTaskRunInput, { initiator: TurnInitiator }> {
-  return input.triggerType !== "scheduled" && input.triggerType !== "event";
-}
-
-/** A run's chat update. An event run also carries the events that caused it. */
-async function scheduledOccurrencePayloadForRun(
-  db: Database,
-  input: {
-    task: ScheduledTask;
-    run: Pick<ScheduledTaskRun, "id" | "workspaceId" | "triggerType">;
-    tools: ToolRef[];
-    degradedAccounts: readonly { serverId: string }[];
-  },
-): Promise<Extract<SessionSystemUpdatePayload, { type: "scheduled_occurrence" }>> {
-  const payload = scheduledUserMessagePayload(
-    input.task.agentConfig.prompt,
-    input.task.agentConfig.resources,
-    input.tools,
-    input.task.id,
-    input.run.id,
-    input.degradedAccounts,
-  );
-  if (input.run.triggerType !== "event") return payload;
-  const occurrence = await getEventOccurrenceForScheduledTaskRun(
-    db,
-    input.run.workspaceId,
-    input.run.id,
-  );
-  if (!occurrence) return payload;
-  const used = Buffer.byteLength(JSON.stringify(payload), "utf8");
-  return {
-    ...payload,
-    events: scheduledOccurrenceEvents({
-      occurrenceId: occurrence.id,
-      eventCount: occurrence.eventCount,
-      gapBefore: occurrence.gapBefore,
-      summaries: occurrence.summaries,
-      events: occurrence.events,
-      // Room left under the internal-update bound, less the key and some slack.
-      budgetBytes: SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - used - 512,
-    }),
-  };
-}
-
 export function scheduledTaskRunExecutionPolicy(
   policy: TurnExecutionPolicyV1,
   input: DispatchScheduledTaskRunInput,
   creatorRestriction?: "developer_setup",
 ): TurnExecutionPolicyV1 {
   return creatorRestriction === "developer_setup" ||
-    (isManualScheduledTaskTrigger(input) && input.credentialRestriction === "developer_setup")
+    (input.triggerType !== "scheduled" && input.credentialRestriction === "developer_setup")
     ? { ...policy, credentialRestriction: "developer_setup" }
     : policy;
 }
@@ -242,7 +181,7 @@ export function scheduledTaskRunProducerKey(
   suppliedActivityIdentity?: ScheduledTemporalActivityIdentity,
 ): string {
   if (input.producerKey) return input.producerKey;
-  if (isManualScheduledTaskTrigger(input)) return input.agentRunUsageIdempotencyKey;
+  if (input.triggerType !== "scheduled") return input.agentRunUsageIdempotencyKey;
 
   let info = suppliedActivityIdentity;
   if (!info) {
@@ -313,6 +252,10 @@ function recordScheduledSessionCreated(observability: ProductUsageMetricsSink | 
     createdByKind: "service",
     parentSessionId: null,
   });
+}
+
+export function scheduledTaskSessionTitle(taskName: string): string {
+  return normalizeAutomaticSessionTitle(taskName) ?? "Scheduled run";
 }
 
 /**
@@ -386,7 +329,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // Histories created before the manual-initiator workflow patch already
       // contain this activity command. Reject their incomplete wire input here
       // so replay consumes the recorded command and the retry loop settles.
-      if (isManualScheduledTaskTrigger(input) && !input.initiator) {
+      if (input.triggerType !== "scheduled" && !input.initiator) {
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
       const { db, bus, wakeSessionWorkflow } = baseService;
@@ -426,18 +369,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             return scheduledRunTerminalResult(priorRun.error);
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
-        }
-        if (
-          priorRun.status === "queued" &&
-          isRetiredNativeGoogleDriveTask(acceptedExecution.task)
-        ) {
-          await markScheduledTaskRunFailedIfQueued(
-            db,
-            priorRun.workspaceId,
-            priorRun.id,
-            GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
-          );
-          return scheduledRunTerminalResult(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
         }
         if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
           await markScheduledTaskRunFailedIfQueued(
@@ -516,8 +447,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      if (isRetiredNativeGoogleDriveTask(task))
-        return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
       if (isRetiredNativeAtlassianTask(task))
         return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
       if (task.action.kind !== "agent_turn") {
@@ -525,14 +454,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       }
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
-      }
-      // The organization's session policy may turn attachments off after the
-      // schedule was saved: its files never reach a session.
-      if (
-        task.agentConfig.resources.some((resource) => resource.kind === "file") &&
-        !(await turnAttachmentsAllowed(db, task.accountId))
-      ) {
-        return { action: "blocked", reason: "attachments_disabled" };
       }
       if (task.agentConfig.knowledgeSource && knowledgeSourceSyncEffectivelyPaused(task)) {
         return { action: "blocked", reason: "knowledge_source_paused" };
@@ -728,12 +649,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             productServerIds: runTools.map((tool) => tool.id),
           });
           firstPartyMcpTools = written.firstPartyMcpTools;
-          taskTools = newSessionKnowledgeSearchTools(
-            written.tools,
-            resolvedAgentConfig,
-            firstPartyMcpTools,
-            settings.mcpServers,
-          );
+          taskTools = written.tools;
         } catch (error) {
           const status =
             error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
@@ -776,6 +692,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // its connectors and the owner's current accounts.
       let runPins: McpConnectionAccountSelection[] =
         task.runMode === "existing_session" ? [] : [...(task.agentConfig.pinnedAccounts ?? [])];
+      const surfaceEligibility = scheduledConnectionSurfaceEligibility(
+        settings,
+        connectionTarget ?? {
+          firstPartyMcpTools,
+          firstPartyMcpPermissions,
+        },
+        toolWorkspaceSettings,
+      );
       const resolveTaskConnections = () =>
         freezeConnectionAccounts({
           db,
@@ -793,6 +717,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
             : { kind: "none" },
           authoritySelections: runPins,
+          ...surfaceEligibility,
         }).catch((error: unknown) => {
           if (error instanceof ConnectionAccountSelectionError) return error;
           throw error;
@@ -827,6 +752,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             (serverId) => !runPins.some((pin) => pin.serverId === serverId),
           ),
         );
+        if (droppedServerIds.has(GOOGLE_DRIVE_PUBLICATION_SERVER_ID)) {
+          surfaceEligibility.googleDrivePublicationEnabled = false;
+        }
         connectionTools = connectionTools.filter(
           (tool) => !(tool.kind === "mcp" && droppedServerIds.has(tool.id)),
         );
@@ -1994,12 +1922,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sourceId: run.id,
                 dedupeKey: `scheduled-task-run:${run.id}`,
                 summary: task.agentConfig.prompt,
-                payload: await scheduledOccurrencePayloadForRun(dispatchDb, {
-                  task,
-                  run,
-                  tools: taskTools,
+                payload: scheduledUserMessagePayload(
+                  task.agentConfig.prompt,
+                  task.agentConfig.resources,
+                  taskTools,
+                  task.id,
+                  run.id,
                   degradedAccounts,
-                }),
+                ),
                 lineage: {
                   scheduledTaskId: task.id,
                   scheduledTaskRunId: run.id,
@@ -2132,12 +2062,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sourceId: run.id,
                 dedupeKey: `scheduled-task-run:${run.id}`,
                 summary: task.agentConfig.prompt,
-                payload: await scheduledOccurrencePayloadForRun(dispatchDb, {
-                  task,
-                  run,
-                  tools: taskTools,
+                payload: scheduledUserMessagePayload(
+                  task.agentConfig.prompt,
+                  task.agentConfig.resources,
+                  taskTools,
+                  task.id,
+                  run.id,
                   degradedAccounts,
-                }),
+                ),
                 lineage: {
                   scheduledTaskId: task.id,
                   scheduledTaskRunId: run.id,
@@ -2489,8 +2421,6 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
-  if (error === GOOGLE_DRIVE_NATIVE_RETIRED_REASON)
-    return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
   if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
     return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
   if (error === "scheduled_authority_exhausted") {
@@ -3197,12 +3127,14 @@ async function recoverBoundScheduledTaskDispatch(input: {
       sourceId: input.run.id,
       dedupeKey: `scheduled-task-run:${input.run.id}`,
       summary: task.agentConfig.prompt,
-      payload: await scheduledOccurrencePayloadForRun(input.db, {
-        task,
-        run: input.run,
-        tools: input.acceptedExecution.resolvedTools,
-        degradedAccounts: input.acceptedExecution.degradedAccounts ?? [],
-      }),
+      payload: scheduledUserMessagePayload(
+        task.agentConfig.prompt,
+        task.agentConfig.resources,
+        input.acceptedExecution.resolvedTools,
+        task.id,
+        input.run.id,
+        input.acceptedExecution.degradedAccounts ?? [],
+      ),
       lineage: {
         scheduledTaskId: task.id,
         scheduledTaskRunId: input.run.id,

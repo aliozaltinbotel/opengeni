@@ -23,29 +23,27 @@ const DropdownMenuContainedPortal = containedPortal(DropdownMenuPrimitive.Portal
 const MENU_MOTION_CLASS =
   "data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95";
 
-function DropdownMenu({
-  ...props
-}: React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Root>) {
+function DropdownMenu({ ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
   return <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />;
 }
 
 function DropdownMenuPortal({
   ...props
-}: React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Portal>) {
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Portal>) {
   return <DropdownMenuContainedPortal data-slot="dropdown-menu-portal" {...props} />;
 }
 
-const DropdownMenuTrigger = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Trigger>
->(function DropdownMenuTrigger({ ...props }, ref) {
-  return <DropdownMenuPrimitive.Trigger data-slot="dropdown-menu-trigger" ref={ref} {...props} />;
-});
+function DropdownMenuTrigger({
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Trigger>) {
+  return <DropdownMenuPrimitive.Trigger data-slot="dropdown-menu-trigger" {...props} />;
+}
 
-const DropdownMenuContent = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(function DropdownMenuContent({ className, sideOffset = 4, ...props }, ref) {
+function DropdownMenuContent({
+  className,
+  sideOffset = 4,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   return (
     <DropdownMenuContainedPortal>
       <DropdownMenuPrimitive.Content
@@ -57,28 +55,27 @@ const DropdownMenuContent = /* @__PURE__ */ React.forwardRef<
           MENU_MOTION_CLASS,
           className,
         )}
-        ref={ref}
         {...props}
       />
     </DropdownMenuContainedPortal>
   );
-});
+}
 
-const DropdownMenuGroup = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.Group>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Group>
->(function DropdownMenuGroup({ ...props }, ref) {
-  return <DropdownMenuPrimitive.Group data-slot="dropdown-menu-group" ref={ref} {...props} />;
-});
+function DropdownMenuGroup({ ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.Group>) {
+  return <DropdownMenuPrimitive.Group data-slot="dropdown-menu-group" {...props} />;
+}
 
-const DropdownMenuItem = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.Item>,
-  Omit<React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item>, "disabled"> & {
-    disabled?: boolean | undefined;
-    inset?: boolean | undefined;
-    variant?: "default" | "destructive" | undefined;
-  }
->(function DropdownMenuItem({ className, inset, variant = "default", disabled, ...props }, ref) {
+function DropdownMenuItem({
+  className,
+  inset,
+  variant = "default",
+  disabled,
+  ...props
+}: Omit<React.ComponentProps<typeof DropdownMenuPrimitive.Item>, "disabled"> & {
+  disabled?: boolean | undefined;
+  inset?: boolean | undefined;
+  variant?: "default" | "destructive" | undefined;
+}) {
   return (
     <DropdownMenuPrimitive.Item
       data-slot="dropdown-menu-item"
@@ -86,22 +83,22 @@ const DropdownMenuItem = /* @__PURE__ */ React.forwardRef<
       data-variant={variant}
       className={cn(MENU_ITEM_CLASS, "data-[inset]:pl-9", className)}
       {...(disabled === undefined ? {} : { disabled })}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DropdownMenuCheckboxItem = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.CheckboxItem>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
->(function DropdownMenuCheckboxItem({ className, children, checked, ...props }, ref) {
+function DropdownMenuCheckboxItem({
+  className,
+  children,
+  checked,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.CheckboxItem>) {
   return (
     <DropdownMenuPrimitive.CheckboxItem
       data-slot="dropdown-menu-checkbox-item"
       className={cn(MENU_ITEM_CLASS, className)}
       {...(checked === undefined ? {} : { checked })}
-      ref={ref}
       {...props}
     >
       {children}
@@ -112,29 +109,27 @@ const DropdownMenuCheckboxItem = /* @__PURE__ */ React.forwardRef<
       </span>
     </DropdownMenuPrimitive.CheckboxItem>
   );
-});
+}
 
-const DropdownMenuRadioGroup = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.RadioGroup>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioGroup>
->(function DropdownMenuRadioGroup({ ...props }, ref) {
-  return (
-    <DropdownMenuPrimitive.RadioGroup data-slot="dropdown-menu-radio-group" ref={ref} {...props} />
-  );
-});
+function DropdownMenuRadioGroup({
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.RadioGroup>) {
+  return <DropdownMenuPrimitive.RadioGroup data-slot="dropdown-menu-radio-group" {...props} />;
+}
 
-const DropdownMenuRadioItem = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.RadioItem>,
-  Omit<React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioItem>, "disabled"> & {
-    disabled?: boolean | undefined;
-  }
->(function DropdownMenuRadioItem({ className, children, disabled, ...props }, ref) {
+function DropdownMenuRadioItem({
+  className,
+  children,
+  disabled,
+  ...props
+}: Omit<React.ComponentProps<typeof DropdownMenuPrimitive.RadioItem>, "disabled"> & {
+  disabled?: boolean | undefined;
+}) {
   return (
     <DropdownMenuPrimitive.RadioItem
       data-slot="dropdown-menu-radio-item"
       className={cn(MENU_ITEM_CLASS, className)}
       {...(disabled === undefined ? {} : { disabled })}
-      ref={ref}
       {...props}
     >
       {children}
@@ -145,86 +140,77 @@ const DropdownMenuRadioItem = /* @__PURE__ */ React.forwardRef<
       </span>
     </DropdownMenuPrimitive.RadioItem>
   );
-});
+}
 
-const DropdownMenuLabel = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.Label>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Label> & {
-    inset?: boolean | undefined;
-  }
->(function DropdownMenuLabel({ className, inset, ...props }, ref) {
+function DropdownMenuLabel({
+  className,
+  inset,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Label> & {
+  inset?: boolean | undefined;
+}) {
   return (
     <DropdownMenuPrimitive.Label
       data-slot="dropdown-menu-label"
       data-inset={inset}
       className={cn(MENU_LABEL_CLASS, "data-[inset]:pl-9", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DropdownMenuSeparator = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.Separator>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Separator>
->(function DropdownMenuSeparator({ className, ...props }, ref) {
+function DropdownMenuSeparator({
+  className,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Separator>) {
   return (
     <DropdownMenuPrimitive.Separator
       data-slot="dropdown-menu-separator"
       className={cn(MENU_SEPARATOR_CLASS, className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DropdownMenuShortcut = /* @__PURE__ */ React.forwardRef<
-  HTMLSpanElement,
-  React.ComponentPropsWithoutRef<"span">
->(function DropdownMenuShortcut({ className, ...props }, ref) {
+function DropdownMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
-      // The item carries the key in aria-keyshortcuts; glyphs like "⇧⌘,"
-      // would only garble its accessible name.
-      aria-hidden
       data-slot="dropdown-menu-shortcut"
-      className={cn(MENU_META_CLASS, "tracking-widest pointer-coarse:hidden", className)}
-      ref={ref}
+      className={cn(MENU_META_CLASS, "tracking-widest", className)}
       {...props}
     />
   );
-});
+}
 
-function DropdownMenuSub({
-  ...props
-}: React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Sub>) {
+function DropdownMenuSub({ ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.Sub>) {
   return <DropdownMenuPrimitive.Sub data-slot="dropdown-menu-sub" {...props} />;
 }
 
-const DropdownMenuSubTrigger = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.SubTrigger>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubTrigger> & {
-    inset?: boolean | undefined;
-  }
->(function DropdownMenuSubTrigger({ className, inset, children, ...props }, ref) {
+function DropdownMenuSubTrigger({
+  className,
+  inset,
+  children,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger> & {
+  inset?: boolean | undefined;
+}) {
   return (
     <DropdownMenuPrimitive.SubTrigger
       data-slot="dropdown-menu-sub-trigger"
       data-inset={inset}
       className={cn(MENU_ITEM_CLASS, "data-[inset]:pl-9", className)}
-      ref={ref}
       {...props}
     >
       {children}
       <ChevronRightIcon aria-hidden="true" className={cn(MENU_CHEVRON_CLASS, "ml-auto")} />
     </DropdownMenuPrimitive.SubTrigger>
   );
-});
+}
 
-const DropdownMenuSubContent = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.SubContent>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
->(function DropdownMenuSubContent({ className, ...props }, ref) {
+function DropdownMenuSubContent({
+  className,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
   return (
     <DropdownMenuPrimitive.SubContent
       data-slot="dropdown-menu-sub-content"
@@ -234,26 +220,17 @@ const DropdownMenuSubContent = /* @__PURE__ */ React.forwardRef<
         MENU_MOTION_CLASS,
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 /** Right-side meta on a row: a count or the current value. */
-const DropdownMenuMeta = /* @__PURE__ */ React.forwardRef<
-  HTMLSpanElement,
-  React.ComponentPropsWithoutRef<"span">
->(function DropdownMenuMeta({ className, ...props }, ref) {
+function DropdownMenuMeta({ className, ...props }: React.ComponentProps<"span">) {
   return (
-    <span
-      data-slot="dropdown-menu-meta"
-      className={cn(MENU_META_CLASS, className)}
-      ref={ref}
-      {...props}
-    />
+    <span data-slot="dropdown-menu-meta" className={cn(MENU_META_CLASS, className)} {...props} />
   );
-});
+}
 
 /**
  * The selected option's check, on the right of its row. Every option of a
@@ -273,19 +250,9 @@ function DropdownMenuCheck({ checked, className }: { checked: boolean; className
 }
 
 /** A plain sentence in a menu (empty, loading, unavailable): said once, never boxed. */
-const DropdownMenuNote = /* @__PURE__ */ React.forwardRef<
-  HTMLParagraphElement,
-  React.ComponentPropsWithoutRef<"p">
->(function DropdownMenuNote({ className, ...props }, ref) {
-  return (
-    <p
-      data-slot="dropdown-menu-note"
-      className={cn(MENU_NOTE_CLASS, className)}
-      ref={ref}
-      {...props}
-    />
-  );
-});
+function DropdownMenuNote({ className, ...props }: React.ComponentProps<"p">) {
+  return <p data-slot="dropdown-menu-note" className={cn(MENU_NOTE_CLASS, className)} {...props} />;
+}
 
 export {
   DropdownMenu,

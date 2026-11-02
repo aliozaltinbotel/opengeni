@@ -1,6 +1,5 @@
 import {
   createContext,
-  Fragment,
   useContext,
   useMemo,
   useRef,
@@ -21,11 +20,7 @@ import {
   interactivePreviewKind,
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
-import { prepareMathMarkdown } from "@opengeni/react/markdown-math";
 import { Icon } from "./icon";
-import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
-import { DisplayMath, InlineMath } from "./markdown-math";
-import { markdownItMath } from "./markdown-math-parser";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
 import {
@@ -46,14 +41,6 @@ import { useNativeTimelineMessages } from "./messages";
 const PARSER = (() => {
   const parser = MarkdownIt({ typographer: false, linkify: true });
   parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
-  return parser;
-})();
-
-/** The same parser plus `$$` math, used only for messages that contain math. */
-const MATH_PARSER = (() => {
-  const parser = MarkdownIt({ typographer: false, linkify: true });
-  parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
-  parser.use(markdownItMath);
   return parser;
 })();
 
@@ -477,59 +464,13 @@ function webRules(
   theme: NativeTimelineTheme,
   tone: "body" | "muted",
   onCopy?: (text: string) => void,
-  media: MarkdownMediaOptions & MarkdownLinkOptions = {},
+  media: MarkdownMediaOptions = {},
 ): RenderRules {
   const line = tone === "muted" ? 24 : 28;
   return {
     ...renderRules,
-    // Every run of text is selectable, as on the web: a long press selects
-    // words (and, inside a timeline message, offers Add note). A standalone
-    // link the host drew as a block sits in a view instead, since a block
-    // nested in text does not lay out. The view spans the message: a paragraph
-    // lays its children out in a wrapping row, where a plain view would size
-    // to its content.
-    textgroup: (node, children, _parent, styles) =>
-      BLOCK_LINK_GROUPS.has(node) ? (
-        <View key={node.key} style={{ width: "100%" }}>
-          {children}
-        </View>
-      ) : (
-        <Text key={node.key} selectable style={styles.textgroup}>
-          {children}
-        </Text>
-      ),
-    link: (node, children, parent, styles, onLinkPress) => {
-      const href = node.attributes?.href;
-      if (
-        media.renderLink &&
-        typeof href === "string" &&
-        href &&
-        !parseOpenGeniLink(href) &&
-        !isReservedOpenGeniLink(href)
-      ) {
-        const group = parent[0];
-        const standalone = group !== undefined && isStandaloneLinkGroup(group, parent[1]);
-        const drawn = media.renderLink({ href, children, standalone });
-        if (drawn !== undefined) {
-          // Children render before their parent, so the group's rule sees this.
-          if (standalone && group) BLOCK_LINK_GROUPS.add(group);
-          return <Fragment key={node.key}>{drawn}</Fragment>;
-        }
-      }
-      return renderRules.link!(node, children, parent, styles, onLinkPress);
-    },
     // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
     list_item: (node, children, parent, styles, inheritedStyles = {}) => {
-      // A host-drawn block link is its own marker: the item drops the bullet or
-      // number and its indent, so it lines up with the same card on its own line.
-      const group = soleTextGroupOf(node);
-      if (group && BLOCK_LINK_GROUPS.has(group)) {
-        return (
-          <View key={node.key} style={{ marginBottom: 4 }}>
-            {children}
-          </View>
-        );
-      }
       if (parent.some((entry: { type: string }) => entry.type === "bullet_list")) {
         // A drawn disc: the text bullet glyph renders noticeably smaller than
         // the browser's list-disc marker at the same line height.
@@ -611,33 +552,6 @@ function webRules(
         <MarkdownImage key={node.key} src={src} alt={alt} />
       );
     },
-    // `$$…$$` math (messages with math only; see MATH_PARSER).
-    math_inline: (node, _children, _parent, styles, inheritedStyles = {}) => {
-      const inherited = inheritedStyles as TextStyle;
-      const body = styles.body as TextStyle;
-      return (
-        <InlineMath
-          key={node.key}
-          tex={typeof node.content === "string" ? node.content : ""}
-          fontSize={inherited.fontSize ?? body.fontSize ?? theme.size.md}
-          lineHeight={inherited.lineHeight ?? body.lineHeight}
-          color={String(inherited.color ?? body.color ?? theme.colors.fg)}
-          fallbackStyle={styles.code_inline as TextStyle}
-        />
-      );
-    },
-    math_block: (node, _children, _parent, styles) => {
-      const body = styles.body as TextStyle;
-      return (
-        <DisplayMath
-          key={node.key}
-          tex={typeof node.content === "string" ? node.content : ""}
-          fontSize={body.fontSize ?? theme.size.md}
-          color={String(body.color ?? theme.colors.fg)}
-          fallbackStyle={styles.code_block as TextStyle}
-        />
-      );
-    },
   };
 }
 
@@ -665,36 +579,6 @@ export interface MarkdownMediaOptions {
    */
   renderInteractiveBlock?: ((block: NativeInteractiveBlock) => ReactNode) | undefined;
 }
-
-/**
- * One ordinary link in an agent's Markdown that the host may draw itself: its
- * own scheme (`myapp:order/42`), an in-app path, or a web URL. The native
- * counterpart of the web `OpenGeniHostLink`.
- */
-export type NativeHostLink = {
-  /** The destination exactly as the agent wrote it. It is not sanitized: check it before use. */
-  href: string;
-  /** The rendered link text (text nodes: draw it inside a `Text`). */
-  children: ReactNode;
-  /**
-   * The link is the only content of its paragraph or list item, so the host
-   * can draw it as a block (a card or preview) instead of inline text.
-   */
-  standalone: boolean;
-};
-
-export interface MarkdownLinkOptions {
-  /**
-   * Draw a host-owned link (web `renderLink`). Return `undefined` to keep the
-   * default link. Inline links sit inside text, so draw them with `Text`; a
-   * standalone link may be any block. Opengeni object links (`artifact:`,
-   * `sandbox:`) never reach it; they go to `onOpenGeniLink`.
-   */
-  renderLink?: ((link: NativeHostLink) => ReactNode | undefined) | undefined;
-}
-
-/** Text groups whose only link the host drew as a block, so they render as views. */
-const BLOCK_LINK_GROUPS = new WeakSet<object>();
 
 /** Whether the message ends inside an unclosed fence, and that fence's body. */
 export function trailingOpenFence(text: string): string | null {
@@ -774,7 +658,6 @@ function MarkdownImage({ src, alt }: { src: string; alt: string }) {
 function TrimmedMarkdown({
   text,
   tone,
-  textStyle,
   streaming,
   onLinkPress,
   onCopy,
@@ -782,18 +665,13 @@ function TrimmedMarkdown({
 }: {
   text: string;
   tone: "body" | "muted";
-  textStyle?: TextStyle | undefined;
   streaming: boolean;
   onLinkPress?: ((url: string) => boolean) | undefined;
   onCopy?: ((text: string) => void) | undefined;
-  media: MarkdownMediaOptions & MarkdownLinkOptions;
+  media: MarkdownMediaOptions;
 }) {
   const theme = useNativeTimelineTheme();
-  const math = useMemo(() => prepareMathMarkdown(text), [text]);
-  const styles = useMemo(() => {
-    const base = webMarkdownStyles(theme, tone);
-    return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
-  }, [theme, tone, textStyle]);
+  const styles = useMemo(() => webMarkdownStyles(theme, tone), [theme, tone]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
   const openTail = useMemo(
     () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
@@ -804,12 +682,12 @@ function TrimmedMarkdown({
     <View style={{ marginBottom: -10 }}>
       <FenceStateContext.Provider value={fenceState}>
         <Markdown
-          markdownit={math.hasMath ? MATH_PARSER : PARSER}
+          markdownit={PARSER}
           style={styles}
           rules={rules}
           {...(onLinkPress ? { onLinkPress } : {})}
         >
-          {math.hasMath ? math.text : text}
+          {text}
         </Markdown>
       </FenceStateContext.Provider>
     </View>
@@ -822,8 +700,7 @@ export function createWebMarkdownRenderer(
     onCopy?: (text: string) => void;
     /** Opengeni links (sandbox files, artifacts, Sites); never handed to the OS. */
     onOpenGeniLink?: (target: OpenGeniLinkTarget) => void;
-  } & MarkdownMediaOptions &
-    MarkdownLinkOptions = {},
+  } & MarkdownMediaOptions = {},
 ): NativeMarkdownRenderer {
   const onLinkPress = (url: string): boolean => {
     const target = parseOpenGeniLink(url);
@@ -834,17 +711,15 @@ export function createWebMarkdownRenderer(
     return options.onLinkPress ? options.onLinkPress(url) : true;
   };
   // One stable object, so the memoized rules survive every streaming delta.
-  const media: MarkdownMediaOptions & MarkdownLinkOptions = {
+  const media: MarkdownMediaOptions = {
     renderImage: options.renderImage,
     renderInteractiveBlock: options.renderInteractiveBlock,
-    renderLink: options.renderLink,
   };
-  return (text, { tone, streaming, textStyle }): ReactNode =>
+  return (text, { tone, streaming }): ReactNode =>
     text.trim() ? (
       <TrimmedMarkdown
         text={text}
         tone={tone}
-        textStyle={textStyle}
         streaming={streaming === true}
         onLinkPress={onLinkPress}
         onCopy={options.onCopy}

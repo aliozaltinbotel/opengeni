@@ -1,10 +1,4 @@
-import {
-  forwardRef,
-  useRef,
-  type ComponentPropsWithoutRef,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+import { useRef, type ComponentProps, type KeyboardEvent, type ReactNode } from "react";
 import { ListFilterIcon, SearchIcon, XIcon } from "lucide-react";
 
 import { Button } from "./button";
@@ -20,7 +14,6 @@ import {
   DropdownMenuTrigger,
 } from "./dropdown-menu";
 import { cn } from "../lib/cn";
-import { useMergedRefs } from "../lib/refs";
 
 /**
  * The list toolbar: search on the left, filters and the page's action on the
@@ -29,31 +22,29 @@ import { useMergedRefs } from "../lib/refs";
  * and everything else moves to a second line, still in the same order.
  */
 
-export const Toolbar = /* @__PURE__ */ forwardRef<HTMLDivElement, ComponentPropsWithoutRef<"div">>(
-  function Toolbar({ className, ...props }, ref) {
-    return (
-      <div
-        data-slot="toolbar"
-        className={cn(
-          "@container/toolbar flex min-w-0 flex-wrap items-center gap-2 @xl/toolbar:flex-nowrap",
-          className,
-        )}
-        ref={ref}
-        {...props}
-      />
-    );
-  },
-);
+export function Toolbar({ className, ...props }: ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="toolbar"
+      className={cn(
+        "@container/toolbar flex min-w-0 flex-wrap items-center gap-2 @xl/toolbar:flex-nowrap",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
 
 /**
  * Groups controls that belong together (a segmented filter and a view toggle,
  * or the page action). `align="end"` pins the group to the right edge, on
  * either line when the toolbar wraps.
  */
-export const ToolbarGroup = /* @__PURE__ */ forwardRef<
-  HTMLDivElement,
-  ComponentPropsWithoutRef<"div"> & { align?: "start" | "end" }
->(function ToolbarGroup({ align = "start", className, ...props }, ref) {
+export function ToolbarGroup({
+  align = "start",
+  className,
+  ...props
+}: ComponentProps<"div"> & { align?: "start" | "end" }) {
   return (
     <div
       data-slot="toolbar-group"
@@ -65,11 +56,10 @@ export const ToolbarGroup = /* @__PURE__ */ forwardRef<
         align === "end" && "ml-auto justify-end",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 /* ----------------------------------------------------------------------------
    Search
@@ -78,7 +68,7 @@ export const ToolbarGroup = /* @__PURE__ */ forwardRef<
 export type ToolbarSearchSize = "md" | "lg";
 
 export interface ToolbarSearchProps extends Omit<
-  ComponentPropsWithoutRef<"input">,
+  ComponentProps<"input">,
   "size" | "value" | "onChange" | "type"
 > {
   value: string;
@@ -94,97 +84,91 @@ export interface ToolbarSearchProps extends Omit<
   wrapperClassName?: string | undefined;
 }
 
-export const ToolbarSearch = /* @__PURE__ */ forwardRef<HTMLInputElement, ToolbarSearchProps>(
-  function ToolbarSearch(
-    {
-      value,
-      onValueChange,
-      placeholder,
-      size = "md",
-      wrapperClassName,
-      className,
-      disabled,
-      onKeyDown,
-      "aria-label": ariaLabel,
-      ...props
-    },
-    forwardedRef,
-  ) {
-    const inputRef = useRef<HTMLInputElement>(null);
-    const ref = useMergedRefs(inputRef, forwardedRef);
-    const large = size === "lg";
+export function ToolbarSearch({
+  value,
+  onValueChange,
+  placeholder,
+  size = "md",
+  wrapperClassName,
+  className,
+  disabled,
+  onKeyDown,
+  "aria-label": ariaLabel,
+  ...props
+}: ToolbarSearchProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const large = size === "lg";
 
-    const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-      onKeyDown?.(event);
-      if (event.defaultPrevented) return;
-      if (event.key === "Escape" && value) {
-        event.preventDefault();
-        onValueChange("");
-      }
-    };
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    onKeyDown?.(event);
+    if (event.defaultPrevented) return;
+    if (event.key === "Escape" && value) {
+      event.preventDefault();
+      onValueChange("");
+    }
+  };
 
-    return (
-      <div
-        data-slot="toolbar-search"
-        data-size={size}
+  return (
+    <div
+      data-slot="toolbar-search"
+      data-size={size}
+      className={cn(
+        // Full line on narrow toolbars; on wide ones it takes the space the controls leave.
+        "relative flex min-w-0 grow basis-full items-center border border-border bg-surface transition-colors duration-[120ms] @xl/toolbar:basis-0",
+        "hover:border-border-strong",
+        "has-[input:focus-visible]:border-border-strong has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-offset-2 has-[input:focus-visible]:outline-brand/55",
+        large ? "h-11 rounded-[14px]" : "h-9 rounded-[10px] pointer-coarse:h-11",
+        disabled && "pointer-events-none bg-surface-2 text-fg-subtle",
+        wrapperClassName,
+      )}
+    >
+      <SearchIcon
+        aria-hidden="true"
         className={cn(
-          // Full line on narrow toolbars; on wide ones it takes the space the controls leave.
-          "relative flex min-w-0 grow basis-full items-center border border-border bg-surface transition-colors duration-[120ms] @xl/toolbar:basis-0",
-          "hover:border-border-strong",
-          "has-[input:focus-visible]:border-border-strong has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-offset-2 has-[input:focus-visible]:outline-brand/55",
-          large ? "h-11 rounded-[14px]" : "h-9 rounded-[10px] pointer-coarse:h-11",
-          disabled && "pointer-events-none bg-surface-2 text-fg-subtle",
-          wrapperClassName,
+          "pointer-events-none absolute top-1/2 size-4 -translate-y-1/2 text-fg-subtle",
+          large ? "left-4" : "left-3",
         )}
-      >
-        <SearchIcon
-          aria-hidden="true"
+      />
+      <input
+        ref={inputRef}
+        type="search"
+        value={value}
+        onChange={(event) => onValueChange(event.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        aria-label={ariaLabel ?? placeholder}
+        disabled={disabled}
+        autoComplete="off"
+        spellCheck={false}
+        className={cn(
+          "h-full w-full min-w-0 appearance-none border-0 bg-transparent text-sm text-ellipsis text-fg outline-hidden! placeholder:text-fg-subtle disabled:cursor-not-allowed [&::-webkit-search-cancel-button]:appearance-none",
+          // Room for the clear button only while there is something to clear,
+          // so long placeholders keep their words on narrow screens.
+          large ? "pl-11" : "pl-9",
+          value && !disabled ? (large ? "pr-11" : "pr-9") : large ? "pr-4" : "pr-3",
+          className,
+        )}
+        {...props}
+      />
+      {value && !disabled ? (
+        <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => {
+            onValueChange("");
+            inputRef.current?.focus();
+          }}
           className={cn(
-            "pointer-events-none absolute top-1/2 size-4 -translate-y-1/2 text-fg-subtle",
-            large ? "left-4" : "left-3",
+            "absolute top-1/2 grid -translate-y-1/2 place-items-center rounded-full text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg pointer-coarse:size-9",
+            large ? "right-2.5 size-7" : "right-1.5 size-6",
           )}
-        />
-        <input
-          ref={ref}
-          type="search"
-          value={value}
-          onChange={(event) => onValueChange(event.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          aria-label={ariaLabel ?? placeholder}
-          disabled={disabled}
-          autoComplete="off"
-          spellCheck={false}
-          className={cn(
-            "h-full w-full min-w-0 appearance-none border-0 bg-transparent text-sm text-ellipsis text-fg outline-hidden! placeholder:text-fg-subtle disabled:cursor-not-allowed [&::-webkit-search-cancel-button]:appearance-none",
-            // Room for the clear button only while there is something to clear,
-            // so long placeholders keep their words on narrow screens.
-            large ? "pl-11" : "pl-9",
-            value && !disabled ? (large ? "pr-11" : "pr-9") : large ? "pr-4" : "pr-3",
-            className,
-          )}
-          {...props}
-        />
-        {value && !disabled ? (
-          <button
-            type="button"
-            aria-label="Clear search"
-            onClick={() => {
-              onValueChange("");
-              inputRef.current?.focus();
-            }}
-            className={cn(
-              "absolute top-1/2 grid -translate-y-1/2 place-items-center rounded-full text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg pointer-coarse:size-9",
-              large ? "right-2.5 size-7" : "right-1.5 size-6",
-            )}
-          >
-            <XIcon aria-hidden="true" className="size-3.5" />
-          </button>
-        ) : null}
-      </div>
-    );
-  },
-);
+        >
+          <XIcon aria-hidden="true" className="size-3.5" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 /* ----------------------------------------------------------------------------
    Filter menu: one "Filter" button with checkable items, grouped.

@@ -98,8 +98,6 @@ export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
 export const observeRealtimeSessionUsage = defaultControlActivities.observeRealtimeSessionUsage;
-export const confirmHostWebhookChange = defaultControlActivities.confirmHostWebhookChange;
-export const deliverHostWebhook = defaultControlActivities.deliverHostWebhook;
 export const reconcileSessionTitleOperation = defaultTurnActivities.reconcileSessionTitleOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const indexKnowledge = defaultControlActivities.indexKnowledge;
@@ -141,22 +139,11 @@ export const checkpointIdleSandboxLease = defaultControlActivities.checkpointIdl
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
-export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
-export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
-export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
-export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
-export const expireDictation = defaultControlActivities.expireDictation;
-export const recoverRecordingWorkflows = defaultControlActivities.recoverRecordingWorkflows;
-export const applyRecordingRetention = defaultControlActivities.applyRecordingRetention;
-export const createBrowserRecordingFromBundle =
-  defaultControlActivities.createBrowserRecordingFromBundle;
-export const encodeBrowserRecordingVideo = defaultControlActivities.encodeBrowserRecordingVideo;
-export const failBrowserRecording = defaultControlActivities.failBrowserRecording;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;

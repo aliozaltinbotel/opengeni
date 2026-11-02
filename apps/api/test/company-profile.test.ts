@@ -2,8 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import { registerCompanyProfileRoutes } from "../src/routes/company-profile";
 

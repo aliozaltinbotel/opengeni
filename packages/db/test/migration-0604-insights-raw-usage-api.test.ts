@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   InsightsUsageQuery,
   InsightsUsageResponse,

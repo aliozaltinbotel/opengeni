@@ -3,6 +3,7 @@ import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
   getSettings,
+  resolveFirstPartyDelegationSecret,
   resolveNatsCalloutConfig,
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
@@ -15,28 +16,22 @@ import type {
   ScheduledTaskScheduleSpec,
   SessionAuthorizationPort,
 } from "@opengeni/contracts";
-import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
 import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
-  databasePoolOptions,
   defaultDatabasePreparedStatements,
-  eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   getKnowledgeEntry,
   withRlsContext,
   type Database,
-  type EventOccurrenceToStart,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
   installCpuSamplingSignal,
   logStartupDependencyRetry,
-  traceClientCalls,
-  traceFetch,
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
@@ -46,6 +41,7 @@ import {
   resolveCatalogSettings,
   knowledgeQueryOperationId,
   authorizeKnowledgeQueryOwner,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
@@ -64,13 +60,10 @@ import {
   type DocumentIndexClient,
   type SessionWorkflowClient,
 } from "./app";
-import { HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS } from "./http/host-webhooks";
 import { observabilityEventBusOptions } from "./observability";
-import { startGovernedSessionPolicyBackfill } from "./governed-session-policy-backfill";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
-import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
@@ -79,11 +72,6 @@ import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
-import {
-  startEventIntakePrunePump,
-  startEventTriggerDispatchPump,
-  startEventSubscriptionPump,
-} from "./event-trigger-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -96,10 +84,6 @@ import { createRealtimeUsageProxyLifecycle, realtimeProxyRootSecret } from "./re
 import { OfficeWorkbookWebSocketTransport } from "./office-workbooks";
 import { officeWorkbookRelayFor } from "./routes/office-workbooks";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
-import {
-  API_SERVER_IDLE_TIMEOUT_SECONDS,
-  apiRequestBindingsForIdleTimeout,
-} from "./http/request-idle-timeout";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
@@ -145,7 +129,6 @@ export async function createTemporalWorkflowClient(
 ): Promise<{
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
-  startScheduledTaskEventRun: (occurrence: EventOccurrenceToStart) => Promise<void>;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect(temporalConnectionOptions(settings));
@@ -245,26 +228,6 @@ export async function createTemporalWorkflowClient(
           args: [{ ...input, baseTaskQueue: settings.temporalTaskQueue }],
         });
       } catch (error) { if (!isWorkflowAlreadyStarted(error)) throw error; }
-    },
-    startHostWebhookDelivery: async (input) => {
-      // A run still waiting is joined; one that delivered is never repeated;
-      // one that failed (its change never committed) may run again.
-      // The call's own deadline, so a hung connection never holds the change.
-      try {
-        await temporal.withDeadline(
-          Date.now() + HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS,
-          async () =>
-            await temporal.workflow.start("hostWebhookDeliveryWorkflow", {
-              taskQueue: settings.temporalTaskQueue,
-              workflowId: `host-webhook:${input.deliveryId}`,
-              workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
-              workflowIdConflictPolicy: "USE_EXISTING",
-              args: [input],
-            }),
-        );
-      } catch (error) {
-        if (!isWorkflowAlreadyStarted(error)) throw error;
-      }
     },
     triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
       try {
@@ -431,66 +394,6 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
-    startRecordingWorkflow: async (work) => {
-      const transcript = work.kind === "transcript" && work.versionId !== null;
-      try {
-        await temporal.workflow.start(
-          transcript ? "recordingTranscriptWorkflow" : "recordingDeletionWorkflow",
-          {
-            taskQueue: settings.temporalTaskQueue,
-            workflowId: transcript
-              ? `recording-transcript:${work.versionId}`
-              : `recording-deletion:${work.recordingId}`,
-            workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
-            args: [
-              {
-                accountId: work.accountId,
-                workspaceId: work.workspaceId,
-                recordingId: work.recordingId,
-                ownerSubjectId: work.ownerSubjectId,
-                ...(transcript ? { versionId: work.versionId } : {}),
-              },
-            ],
-          },
-        );
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
-    startBrowserRecordingVideo: async (input) => {
-      try {
-        await temporal.workflow.start("browserRecordingVideoWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `recording-browser-video:${input.recordingId}`,
-          // A rerun after a finished one finds the recording made and stops,
-          // and one after its deletion makes it again from the bundle.
-          workflowIdReusePolicy: "ALLOW_DUPLICATE",
-          args: [input],
-        });
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
-    scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
-      const keys = [...new Set(objectKeys)].sort();
-      if (keys.length === 0) return;
-      const digest = createHash("sha256").update(JSON.stringify(keys)).digest("hex");
-      try {
-        await temporal.workflow.start("transientObjectDeletionWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          // Keys already waiting keep their first deadline; once that run has
-          // finished, the same keys can be scheduled again.
-          workflowId: `transient-object-deletion-${workspaceId}-${digest}`,
-          startDelay: Math.max(0, deleteAfter.getTime() - Date.now()),
-          args: [{ workspaceId, objectKeys: keys }],
-        });
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
     },
@@ -509,27 +412,6 @@ export async function createTemporalWorkflowClient(
   return {
     client,
     documentIndexer,
-    // An event occurrence's run. The workflow id is the occurrence's producer
-    // key, so a retried start collides instead of starting a second run.
-    startScheduledTaskEventRun: async (occurrence: EventOccurrenceToStart) => {
-      try {
-        await temporal.workflow.start("scheduledTaskFireWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: eventOccurrenceProducerKey(occurrence.id),
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [
-            {
-              accountId: occurrence.accountId,
-              workspaceId: occurrence.workspaceId,
-              taskId: occurrence.taskId,
-              triggerType: "event",
-            },
-          ],
-        });
-      } catch (error) {
-        if (!isWorkflowAlreadyStarted(error)) throw error;
-      }
-    },
     close: async () => {
       await connection.close();
     },
@@ -546,17 +428,6 @@ export type StartApiOptions = {
    * unavailable or invalid host decision, exactly as through `createApp`.
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
-  /**
-   * Embedding-host membership governance (`AppDependencies.organizationGovernance`).
-   * Once bound, governed organizations refuse native membership, role and
-   * credential mutations the host does not allow, and serve the host's commands.
-   */
-  organizationGovernance?: OrganizationGovernancePort | null;
-  /**
-   * Embedding-host tool servers for the workspace tool gateway
-   * (`AppDependencies.workspaceToolServers`), executed in-process.
-   */
-  workspaceToolServers?: AppDependencies["workspaceToolServers"];
 };
 
 /**
@@ -571,31 +442,6 @@ export function startApiSessionAuthorizationOverride(
   return options.sessionAuthorization === undefined
     ? {}
     : { sessionAuthorization: options.sessionAuthorization };
-}
-
-/**
- * The composition override an embedding host's `organizationGovernance` option
- * contributes, with the same three shapes as `sessionAuthorization`: unset
- * forwards nothing; `null` and a port are forwarded as given.
- */
-export function startApiOrganizationGovernanceOverride(
-  options: Pick<StartApiOptions, "organizationGovernance">,
-): Pick<AppDependencies, "organizationGovernance"> | Record<string, never> {
-  return options.organizationGovernance === undefined
-    ? {}
-    : { organizationGovernance: options.organizationGovernance };
-}
-
-/**
- * The composition override an embedding host's `workspaceToolServers` option
- * contributes: unset forwards nothing; a port is forwarded as given.
- */
-export function startApiWorkspaceToolServersOverride(
-  options: Pick<StartApiOptions, "workspaceToolServers">,
-): Pick<AppDependencies, "workspaceToolServers"> | Record<string, never> {
-  return options.workspaceToolServers === undefined
-    ? {}
-    : { workspaceToolServers: options.workspaceToolServers };
 }
 
 export async function startApi(options: StartApiOptions = {}) {
@@ -616,7 +462,9 @@ export async function startApi(options: StartApiOptions = {}) {
         : {}),
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
-    ...databasePoolOptions(settings),
+    ...(settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements }),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
@@ -693,11 +541,7 @@ export async function startApi(options: StartApiOptions = {}) {
   }
   // Compute sandboxes reach their agent over this process's bus and database.
   installComputeAgentPlane({ db: dbClient.db, bus, settings });
-  // Calls made while serving a request become child spans of its request span.
-  const createdObjectStorage = createObjectStorage(settings);
-  const objectStorage = createdObjectStorage
-    ? traceClientCalls(createdObjectStorage, "object_storage")
-    : null;
+  const objectStorage = createObjectStorage(settings);
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {
     try {
@@ -713,13 +557,11 @@ export async function startApi(options: StartApiOptions = {}) {
   }
   const { app, routeDeps } = createAppComposition({
     ...startApiSessionAuthorizationOverride(options),
-    ...startApiOrganizationGovernanceOverride(options),
-    ...startApiWorkspaceToolServersOverride(options),
     settings,
     db: dbClient.db,
     bus,
-    workflowClient: traceClientCalls(workflowClient.client, "temporal"),
-    documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
+    workflowClient: workflowClient.client,
+    documentIndexer: workflowClient.documentIndexer,
     objectStorage,
     ...(editableArtifactComposition
       ? {
@@ -734,12 +576,6 @@ export async function startApi(options: StartApiOptions = {}) {
       db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
     },
   });
-  if (routeDeps.organizationGovernance) {
-    // Organizations a host governed before migration 1018 get the governed
-    // session policy, before their stored schedules and triggers fire. In the
-    // background: serving does not wait for it, and it reports each outcome.
-    void startGovernedSessionPolicyBackfill(routeDeps, observability);
-  }
   if (!routeDeps.editableArtifacts) {
     observability.warn("editable artifact engine is not composed", {
       subsystem: "editable_artifacts",
@@ -789,7 +625,7 @@ export async function startApi(options: StartApiOptions = {}) {
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
-    idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
+    idleTimeout: 255,
     fetch: (request, bunServer) => {
       const upgrade = dispatchApiWebSocketUpgrade(
         request,
@@ -798,10 +634,10 @@ export async function startApi(options: StartApiOptions = {}) {
         localBrowserBoundary,
       );
       if (upgrade.handled) return upgrade.response;
-      return app.fetch(request, {
-        ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
-        ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
-      });
+      return app.fetch(
+        request,
+        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+      );
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -818,7 +654,6 @@ export async function startApi(options: StartApiOptions = {}) {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
-  const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
     db: dbClient.db,
@@ -842,20 +677,6 @@ export async function startApi(options: StartApiOptions = {}) {
   const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
     db: dbClient.db,
     sync: (task) => workflowClient.client.syncScheduledTask({ task }),
-    bus,
-    observability,
-  });
-  const stopEventTriggerDispatchPump = startEventTriggerDispatchPump({
-    db: dbClient.db,
-    settings,
-    bus,
-    startRun: (occurrence) => workflowClient.startScheduledTaskEventRun(occurrence),
-    observability,
-  });
-  const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
-  const stopEventSubscriptionPump = startEventSubscriptionPump({
-    db: dbClient.db,
-    settings,
     bus,
     observability,
   });
@@ -932,15 +753,11 @@ export async function startApi(options: StartApiOptions = {}) {
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
-      stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await stopScheduledTaskLifecyclePump();
-      await stopEventTriggerDispatchPump();
-      await stopEventIntakePrunePump();
-      await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.
@@ -961,9 +778,6 @@ export async function startApi(options: StartApiOptions = {}) {
 if (import.meta.main) {
   const fatalBoundary = installApiFatalProcessBoundary();
   try {
-    // Standalone process only: an embedding host owns its own global fetch.
-    // Outbound HTTP made while serving a request becomes a child span of it.
-    globalThis.fetch = traceFetch(globalThis.fetch);
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);
@@ -992,8 +806,6 @@ export function temporalOverlapPolicy(policy: ScheduledTaskOverlapPolicy): Sched
   if (policy === "buffer_one") {
     return ScheduleOverlapPolicy.BUFFER_ONE;
   }
-  // Steer is decided in the chat at the running turn's next model step, so
-  // every fire must reach the chat.
   return ScheduleOverlapPolicy.ALLOW_ALL;
 }
 

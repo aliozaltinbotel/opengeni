@@ -2,7 +2,7 @@ import { beforeAll, afterAll, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import postgres from "postgres";
 import {
   bootstrapWorkspace,

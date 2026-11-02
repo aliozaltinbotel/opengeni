@@ -17,7 +17,6 @@ import { z } from "zod";
 import { agentActingAsPerson } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { managedCookieHuman } from "./supergrok";
-import { parseRequestBody } from "../http/request-body";
 
 /** The database rechecks current organization membership/key authority at commit. */
 export async function authorizeOrganizationIntegrationAdministration(
@@ -102,14 +101,13 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
   app.put(path, async (context) => {
     context.header("cache-control", "private, no-store");
     const accountId = organizationId(context);
-    const parsed = parseRequestBody(
-      UpdateOrganizationIntegrationPolicyRequest,
+    const parsed = UpdateOrganizationIntegrationPolicyRequest.safeParse(
       await context.req.json().catch(() => null),
-      { status: 422, message: "Invalid integration policy" },
     );
+    if (!parsed.success) throw new HTTPException(422, { message: "Invalid integration policy" });
     return context.json(
       await policyResponse(() =>
-        updateOrganizationIntegrationPolicy(deps.db, { accountId }, parsed, () =>
+        updateOrganizationIntegrationPolicy(deps.db, { accountId }, parsed.data, () =>
           authorizeOrganizationIntegrationAdministration(context, deps, accountId, true),
         ),
       ),

@@ -1,4 +1,3 @@
-import { SignupChallenge } from "./signup-challenge";
 import { CheckIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -37,7 +36,6 @@ export function ManagedAuthPanel(props: {
    * Sign in stays available.
    */
   newSignupsEnabled?: boolean;
-  signupChallengeSiteKey?: string;
   /** An expired or invalid email-verification link returned the person here. */
   verificationLinkError?: VerificationLinkError | null;
   /**
@@ -50,13 +48,10 @@ export function ManagedAuthPanel(props: {
   invitation?: { organizationName: string; targetEmail: string } | null;
   onDismissInvitation?: () => void;
   socialProviders?: readonly ManagedSocialProvider[];
-  onSocialSubmit?: (
-    provider: ManagedSocialProvider,
-    signupChallengeToken?: string,
-  ) => Promise<void>;
+  onSocialSubmit?: (provider: ManagedSocialProvider) => Promise<void>;
   onSubmit: (
     mode: "signin" | "signup",
-    input: { name: string; email: string; password: string; signupChallengeToken?: string },
+    input: { name: string; email: string; password: string },
   ) => Promise<void>;
 }) {
   const allowedModes = props.allowedModes ?? (["signin", "signup"] as const);
@@ -105,10 +100,6 @@ export function ManagedAuthPanel(props: {
   useEffect(() => {
     if (ownsLocationLinkError) clearVerificationLinkErrorFromLocation(window);
   }, [ownsLocationLinkError]);
-  const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
-  const [challengeReset, setChallengeReset] = useState(0);
-  const challengeRequired =
-    mode === "signup" && !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
@@ -163,10 +154,6 @@ export function ManagedAuthPanel(props: {
     setSuccessMessage(null);
     setVerificationEmail(null);
     if (Object.keys(validationErrors).length > 0) return;
-    if (challengeRequired && !signupChallengeToken) {
-      setFormError("Complete the signup verification.");
-      return;
-    }
     setBusy(true);
     try {
       if (linkResendMode) {
@@ -183,11 +170,7 @@ export function ManagedAuthPanel(props: {
         );
         return;
       }
-      await props.onSubmit(mode, {
-        ...input,
-        name: input.name || input.email,
-        ...(challengeRequired ? { signupChallengeToken } : {}),
-      });
+      await props.onSubmit(mode, { ...input, name: input.name || input.email });
       if (mode === "signup") {
         if (emailVerificationRequired) setVerificationEmail(input.email);
         setSuccessMessage(
@@ -222,10 +205,6 @@ export function ManagedAuthPanel(props: {
       }
     } finally {
       setBusy(false);
-      if (challengeRequired) {
-        setSignupChallengeToken(undefined);
-        setChallengeReset((value) => value + 1);
-      }
     }
   }
 
@@ -258,27 +237,19 @@ export function ManagedAuthPanel(props: {
   }
 
   async function submitSocial(provider: ManagedSocialProvider) {
-    if (challengeRequired && !signupChallengeToken) {
-      setFormError("Complete the signup verification.");
-      return;
-    }
     if (!props.onSocialSubmit) return;
     setSocialBusy(provider);
     setFieldErrors({});
     setFormError(null);
     setSuccessMessage(null);
     try {
-      await props.onSocialSubmit(provider, challengeRequired ? signupChallengeToken : undefined);
+      await props.onSocialSubmit(provider);
     } catch {
       setFormError(
         `Couldn't continue with ${provider === "google" ? "Google" : "GitHub"}. Try again.`,
       );
       setFormActionMode(null);
       setSocialBusy(null);
-      if (challengeRequired) {
-        setSignupChallengeToken(undefined);
-        setChallengeReset((value) => value + 1);
-      }
     }
   }
 
@@ -399,13 +370,6 @@ export function ManagedAuthPanel(props: {
           <SignupsPausedNotice
             invitation={invitation}
             onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
-          />
-        ) : null}
-        {challengeRequired && !signupsPausedView ? (
-          <SignupChallenge
-            siteKey={props.signupChallengeSiteKey!}
-            onToken={setSignupChallengeToken}
-            resetKey={challengeReset}
           />
         ) : null}
         {!signupsPausedView &&

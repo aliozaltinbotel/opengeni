@@ -194,11 +194,11 @@ describe("scheduled task form projection", () => {
           sourceLifecycleGeneration: 1,
           sourceConfigGeneration: 1,
           controlWorkspaceId: task.workspaceId,
-          providerCoordinationKey: "onedrive:consumer:my-drive",
+          providerCoordinationKey: "google-drive:google-consumer:my-drive",
           connection: {
             connectionId,
             connectionVersion: 1,
-            providerDomain: "graph.microsoft.com",
+            providerDomain: "googleapis.com",
             kind: "oauth2",
             ownerSubjectId: "subject-a",
           },
@@ -882,7 +882,7 @@ test("session schedule navigation includes matches beyond the first page", async
   expect(result).toEqual(tasks);
 });
 
-test("historical Drive task inspection preserves its source binding and private learning scope", () => {
+test("editing an ordinary source task preserves its source binding and private learning scope", () => {
   const task = scheduledTask();
   const source = knowledgeSyncAction({
     destination: {
@@ -904,8 +904,7 @@ test("historical Drive task inspection preserves its source binding and private 
   ).toEqual(source);
   expect(scheduledTaskStateLabel(task)).toMatchObject({
     active: false,
-    label: "Sync retired",
-    reason: "provider_retired",
+    reason: "connection_paused",
   });
 });
 
@@ -920,7 +919,7 @@ describe("scheduled task access in plain words", () => {
       firstOccurredAt: "2026-09-17T08:00:05.000Z",
     };
     expect(scheduledTaskAccessFailureText(failure)).toBe(
-      "Couldn't use Slack: your personal account is not available to this automation.",
+      "Couldn't use Slack: your personal account is not available to this schedule.",
     );
     expect(
       scheduledTaskAccessFailuresText([
@@ -928,7 +927,7 @@ describe("scheduled task access in plain words", () => {
         { ...failure, serverId: "gmail", name: "Gmail", reason: "expired" },
       ]),
     ).toBe(
-      "Couldn't use Slack: your personal account is not available to this automation. Couldn't use Gmail: its connection expired.",
+      "Couldn't use Slack: your personal account is not available to this schedule. Couldn't use Gmail: its connection expired.",
     );
     expect(scheduledTaskAccessFailuresText([])).toBeNull();
     expect(scheduledTaskAccessFailuresText(undefined)).toBeNull();
@@ -953,7 +952,7 @@ describe("scheduled task access in plain words", () => {
       }),
     ).toEqual([
       "The account pinned for Slack can no longer be used, so runs go ahead without Slack.",
-      "New automations in this workspace also get Gmail; this one does not.",
+      "New schedules in this workspace also get Gmail; this one does not.",
       "2 newer Opengeni tools are not available to it: browser read and browser screenshot.",
       "old-crm is no longer set up in this workspace and will be removed.",
     ]);
@@ -1068,41 +1067,34 @@ describe("scheduledTaskAwaitingHumanText", () => {
   });
 });
 
-test.each([
-  ["Atlassian", "api.atlassian.com", "atlassian-mcp"],
-  ["Google Drive", "googleapis.com", "google-drive-mcp"],
-  ["Google Drive", "www.googleapis.com", "google-drive-mcp"],
-])(
-  "historical %s schedules are retired while hosted MCP tasks remain active",
-  (_name, providerDomain, serverId) => {
-    const task = scheduledTask();
-    const source = { connection: { providerDomain } };
-    const retired = {
-      ...task,
-      agentConfig: { ...task.agentConfig, knowledgeSource: source },
-    } as ScheduledTask;
-    for (const status of ["active", "paused"] as const) {
-      expect(scheduledTaskStateLabel({ ...retired, status })).toEqual({
-        label: "Sync retired",
-        active: false,
-        reason: "provider_retired",
-      });
-    }
-    expect(groupScheduledTasksForList([retired], {})).toMatchObject({
-      active: [],
-      paused: [retired],
+test("historical Atlassian schedules are retired while hosted MCP tasks remain active", () => {
+  const task = scheduledTask();
+  const source = { connection: { providerDomain: "api.atlassian.com" } };
+  const retired = {
+    ...task,
+    agentConfig: { ...task.agentConfig, knowledgeSource: source },
+  } as ScheduledTask;
+  for (const status of ["active", "paused"] as const) {
+    expect(scheduledTaskStateLabel({ ...retired, status })).toEqual({
+      label: "Sync retired",
+      active: false,
+      reason: "provider_retired",
     });
-    expect(
-      scheduledTaskStateLabel({
-        ...task,
-        agentConfig: {
-          ...task.agentConfig,
-          tools: [{ kind: "mcp", id: serverId }],
-        },
-      }),
-    ).toMatchObject({ active: true });
-  },
-);
+  }
+  expect(groupScheduledTasksForList([retired], {})).toMatchObject({
+    active: [],
+    paused: [retired],
+  });
+  expect(
+    scheduledTaskStateLabel({
+      ...task,
+      agentConfig: {
+        ...task.agentConfig,
+        tools: [{ kind: "mcp", id: "atlassian-mcp" }],
+      },
+    }),
+  ).toMatchObject({ active: true });
+});
 
 test("workspace execution defaults round-trip without a stale pinned target", () => {
   const task = scheduledTask();

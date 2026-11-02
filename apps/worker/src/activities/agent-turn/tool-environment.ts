@@ -1,11 +1,4 @@
-import {
-  sessionToolFamilyGate,
-  type SessionToolFamilyGate,
-} from "@opengeni/contracts/organization-session-policy";
-import { withoutDeniedFamilyTools } from "./session-tool-families";
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
-import { userSetupCardPoster } from "./user-setup-card";
-import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -22,7 +15,6 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
-  resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   subscriptionCoreCodexAppsRequestAuth,
@@ -33,16 +25,21 @@ import {
   type OpenGeniRuntime,
   type RunMcpCredentials,
   selectedSessionRemoteMcpTargets,
+  type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
+import {
+  createGoogleDrivePublicationAttemptTool,
+  googleDrivePublicationConnectorCall,
+  resolveGoogleDrivePublicationTarget,
+} from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import {
   accountRouteAuthNeededPayload,
-  apiIntegrationAccountLabels,
   expandApiIntegrationAccountRoutes,
   expandMcpAccountRoutes,
 } from "../mcp-account-routes";
@@ -92,6 +89,7 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
+import { sandboxRunAs } from "@opengeni/runtime";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -165,8 +163,6 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
-  /** The organization's session policy; absent means nothing is denied. */
-  sessionToolFamilies?: SessionToolFamilyGate;
   independentSessionTitles?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
@@ -193,7 +189,6 @@ export type PrepareTurnToolRuntimeDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
-  capabilityServerCategories?: ClaimTurnOk["capabilityServerCategories"];
   codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
@@ -309,6 +304,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     db,
     bus,
     runtime,
+    objectStorage,
     observability,
     cancellationSignal,
     eventing,
@@ -319,7 +315,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turn,
     session,
     installedApiIntegrations,
-    capabilityServerCategories,
     codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
@@ -332,6 +327,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     activeSandboxBackend,
     groupBoxBackend,
     routingOn,
+    runtimeCancellationSignal,
     credentialSubjectId,
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
@@ -345,7 +341,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: canonicalRunSettings,
     tools: canonicalTurnTools,
     bindings: turn.mcpAccountBindings,
-    ...(capabilityServerCategories ? { categories: capabilityServerCategories } : {}),
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
@@ -384,12 +379,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     delegatedMembershipChecks.set(subjectId, check);
     return await check;
   };
-  const resolveCredential: typeof rawResolveCredential = withFrozenPersonalConnectionDelegations({
+  const resolveFrozenCredential = withFrozenPersonalConnectionDelegations({
     resolveCredential: rawResolveCredential,
     settings: runSettings,
     personalConnectionDelegations,
     ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
   });
+  const resolveCredential: typeof rawResolveCredential = async (request) => {
+    const result = await resolveFrozenCredential(request);
+    if (result.status === "ok") {
+    }
+    return result;
+  };
   const connectorActionIdentity = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -402,6 +403,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       subjectId: turn.initiator.subjectId,
     },
   } as const;
+  const googleDrivePublicationTarget = objectStorage
+    ? await resolveGoogleDrivePublicationTarget(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        personalConnectionDelegations,
+      )
+    : null;
+  const googleDrivePublicationTool =
+    objectStorage && googleDrivePublicationTarget
+      ? createGoogleDrivePublicationAttemptTool({
+          db,
+          objectStorage,
+          identity: connectorActionIdentity,
+          subjectId: googleDrivePublicationTarget.ownerSubjectId,
+          target: googleDrivePublicationTarget,
+          resolveCredential,
+          ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+        })
+      : null;
   const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
@@ -479,24 +499,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
-  // The organization's session policy narrows every selection, whichever
-  // entry point created the session; it never widens one.
-  const sessionToolFamilies = deps.sessionToolFamilies ?? sessionToolFamilyGate(null);
-  const selectedFirstPartyMcpTools = withoutDeniedFamilyTools(
-    toolFamilies.firstPartyTools(
-      scheduledTurnMcpServerIds(turn) !== null
-        ? allowedFirstPartyMcpToolsForSession(
-            runSettings,
-            scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
-          )
-        : resolveSessionFirstPartyMcpTools(
-            runSettings,
-            session,
-            (await requireWorkspace(db, input.workspaceId)).settings,
-          ),
-    ),
-    (name) => name,
-    sessionToolFamilies,
+  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
+    scheduledTurnMcpServerIds(turn) !== null
+      ? allowedFirstPartyMcpToolsForSession(
+          runSettings,
+          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+        )
+      : resolveSessionFirstPartyMcpTools(
+          runSettings,
+          session,
+          (await requireWorkspace(db, input.workspaceId)).settings,
+        ),
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -527,69 +540,68 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
-  const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
-    {
-      preview: async (call) =>
-        await previewConnectorActionApproval(db, connectorActionIdentity, call),
-      prepare: async (call) =>
-        await prepareConnectorActionApproval(db, connectorActionIdentity, call),
-      begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
-      complete: async ({ requestId, outcome }) =>
-        await completeConnectorActionExecution(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          requestId,
-          attemptId: input.attemptId,
-          outcome,
-        }),
-    },
-    {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      // Live per change, the same check the API makes before running it.
-      authority: async () =>
-        (
-          await resolveSessionAppActionAuthority(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-          })
-        ).kind,
-    },
-  );
-  // These reads only feed the Skill index. Disabled Skills need neither the
-  // descriptors nor bundled files; agent build still rechecks live video policy.
-  // Enabled reads remain independent and finish before executable preparation.
+  const googleDrivePublicationAllowed =
+    selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
+    selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
+    hasPermission(
+      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
+      "artifacts:read",
+    ) &&
+    hasPermission(
+      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
+      "artifacts:publish",
+    );
+  const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
+    googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
+      ? [
+          {
+            modelName: googleDrivePublicationTool.modelName,
+            call: (approvalId, arguments_) =>
+              googleDrivePublicationConnectorCall(
+                googleDrivePublicationTarget,
+                arguments_,
+                approvalId,
+              ),
+          },
+        ]
+      : [];
+  const attemptConnectorActionBindings = [
+    ...googleDriveConnectorBindings,
+    ...githubRestMcp.connectorBindings,
+  ];
+  const connectorActionPolicy: ConnectorActionPolicyHooks = {
+    preview: async (call) =>
+      await previewConnectorActionApproval(db, connectorActionIdentity, call),
+    prepare: async (call) =>
+      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
+    complete: async ({ requestId, outcome }) =>
+      await completeConnectorActionExecution(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        requestId,
+        attemptId: input.attemptId,
+        outcome,
+      }),
+  };
+  // Independent scoped reads after the native-link authority check. Both
+  // finish before assembling the Skill index or preparing executable tools.
   const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    toolFamilies.skills === false
-      ? Promise.resolve(null)
-      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-    toolFamilies.skills === false
-      ? Promise.resolve([])
-      : listSkillDescriptors(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-        }),
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    listSkillDescriptors(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+    }),
   ]);
-  const bundledSkills =
-    toolFamilies.skills === false
-      ? []
-      : loadConfiguredBundledSkills({
-          // Rows that could not freeze the "none" default at create (scheduled
-          // generated sessions, pre-existing rows) get the same rule here.
-          bundledSkillIds: bundledSkillSelectionForAgentConfig(
-            session.bundledSkillIds,
-            session.agent,
-          ),
-          firstPartyTools: selectedFirstPartyMcpTools,
-          videoGenerationEnabled:
-            skillConfiguration !== null &&
-            skillConfiguration.defaultModelId !== null &&
-            skillConfiguration.enabledModelIds.length > 0,
-        });
+  const bundledSkills = loadConfiguredBundledSkills({
+    // Rows that could not freeze the "none" default at create (scheduled
+    // generated sessions, pre-existing rows) get the same rule here.
+    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
+    firstPartyTools: selectedFirstPartyMcpTools,
+    videoGenerationEnabled:
+      skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
+  });
   const selectedSkills = [
     ...bundledSkills,
     ...session.skills.map((skill) => ({
@@ -653,6 +665,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         "Skill checkout/publish requires a sandbox or Connected Machine.",
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+      const runAs = sandboxRunAs(runSettings);
       const channel = new SandboxChannelAService({
         session: access.session,
         commandRunner: async (commandSession, args) => {
@@ -669,6 +682,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         emit: async (events) => {
           await eventing.publish?.(events, true);
         },
+        ...(runAs ? { runAs } : {}),
       });
       return guardSkillFilesystem(channel, {
         assertActive: () => {
@@ -795,12 +809,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         "code_search requires a sandbox or Connected Machine.",
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+      const runAs = sandboxRunAs(runSettings);
       return codeSearchWorkspaceFromChannel(
         new SandboxChannelAService({
           session: access.session,
           workspaceRoot: machineRoot ?? "/workspace",
           ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
           leaseEpoch: access.leaseEpoch,
+          ...(runAs ? { runAs } : {}),
         }),
       );
     },
@@ -908,25 +924,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
-      postSetupCard: userSetupCardPoster({
-        db,
-        bus,
-        connectedMachinesEnabled: runSettings.sandboxSelfhostedEnabled,
-        webBaseUrl: runSettings.webBaseUrl ?? runSettings.publicBaseUrl,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        executionGeneration: attempt.executionGeneration,
-        attemptId: input.attemptId,
-      }),
     }),
+    ...(googleDrivePublicationTool && googleDrivePublicationAllowed
+      ? [googleDrivePublicationTool]
+      : []),
     ...codeSearchTools,
     ...webSearchTools,
-  ].filter(
-    (tool) =>
-      attemptToolFamilies.allowsFunctionTool(tool.modelName) &&
-      sessionToolFamilies.allowsTool(tool.modelName),
-  );
+  ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -966,6 +970,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     );
     const sandbox = sandboxAccess.sandbox;
     const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+    const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
       workspaceRoot: machineRoot ?? "/workspace",
@@ -974,6 +979,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       emit: async (events) => {
         await eventing.publish?.(events, true);
       },
+      ...(runAs ? { runAs } : {}),
     });
     return await materializeConnectorAttachmentsInChannel(channel, request, {
       runMutation: async (mutation) => {
@@ -1019,18 +1025,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
         ...(credentialRestriction ? { credentialRestriction } : {}),
-        inputWaitReplyGuard: async (request) =>
-          (await eventing.inputWaitReplyGuard?.(request)) ?? null,
-        // Integration routes are labelled like connector routes, so every
-        // connected account names its connector to the model and in reviews.
-        mcpAccountLabels: new Map([
-          ...accountRoutes.accountLabels,
-          ...apiIntegrationAccountLabels({
-            integrations: installedApiIntegrations,
-            bindings: turn.mcpAccountBindings,
-            tools: turnTools,
-          }),
-        ]),
+        inputWaitReplyGuard: async () => (await eventing.inputWaitReplyGuard?.()) ?? null,
+        mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1043,7 +1039,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         secretResolver: attemptSecretResolver({
           db,
-          bus,
           settings: githubRestMcp.settings,
           agentConfig: session.agent,
           vaultAccess: deps.vaultAccess,
@@ -1107,12 +1102,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             media.sdkOwnedSandboxSession,
             "Gmail attachment filesystem is unavailable",
           );
+          const runAs = sandboxRunAs(runSettings);
           const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
           const channel = new SandboxChannelAService({
             session: access.session,
             workspaceRoot: machineRoot ?? "/workspace",
             ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
             leaseEpoch: access.leaseEpoch,
+            ...(runAs ? { runAs } : {}),
           });
           return await readGmailFileFromChannel(channel, request);
         },
@@ -1130,8 +1127,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
-        modelToolOutputTruncationTokens: () =>
-          eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
         ...(deferNonEagerToolPreparation
           ? {

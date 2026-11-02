@@ -6,7 +6,7 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { and, eq, sql } from "drizzle-orm";
 import { bigint, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import {

@@ -23,7 +23,7 @@ import {
   runAgentStream,
   establishSandboxSessionFromEnvelope,
 } from "@opengeni/runtime";
-import { functionCall, ScriptedModel, assistantMessage } from "@opengeni/testing/scripted-model";
+import { functionCall, ScriptedModel, assistantMessage } from "@opengeni/testing";
 
 describe("P1.2 live Modal keystone re-confirm (gated)", () => {
   const live = process.env.OPENGENI_ENABLE_LIVE_TESTS === "true";

@@ -59,14 +59,11 @@ export async function placementAgentVersion(
     return enrollment?.agentVersion ?? null;
   }
   if (placement?.kind === "attached_device") {
-    const viewer = await attachedBrowserViewer({ db }, grant, workspaceId);
     const device = await getAttachedBrowserDevice(db, {
-      ...viewer,
+      ...(await attachedBrowserViewer({ db }, grant, workspaceId)),
       deviceId: placement.deviceId,
     });
-    // Through the viewer's machine listing: the machine can be enrolled in
-    // another workspace that its owner shares it with.
-    const enrollment = await getLiveEnrollmentConnection(db, viewer, device.enrollmentId);
+    const enrollment = await getLiveEnrollmentConnection(db, workspaceId, device.enrollmentId);
     return enrollment?.agentVersion ?? null;
   }
   return null;

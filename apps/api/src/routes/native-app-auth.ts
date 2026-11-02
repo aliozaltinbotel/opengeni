@@ -18,12 +18,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
-import {
-  readSessionAuthentication,
-  recordSessionAuthentication,
-} from "../auth/session-authentication";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
-import { parseRequestBody } from "../http/request-body";
 
 // Native app sign-in (RFC 8252 shape: authorization code + PKCE over a custom
 // scheme). The app opens `/native-sign-in` in the system auth browser; the
@@ -94,20 +89,6 @@ const StoredGrant = z.object({
   codeChallenge: z.string().regex(PKCE_CHALLENGE),
   platform: z.enum(NATIVE_APP_PLATFORMS),
   deviceName: z.string().nullable(),
-  // The approving browser session's latest authentication. The device session
-  // inherits it: it is not an authentication of its own, so it is never
-  // fresher than the browser that approved it. Absent when that browser
-  // session had none (or the code predates this field).
-  authentication: z
-    .object({
-      amr: z
-        .array(z.enum(["pwd", "oauth", "otp"]))
-        .min(1)
-        .max(3),
-      authenticatedAt: z.string().datetime(),
-    })
-    .nullable()
-    .optional(),
 });
 
 /** Where the Office add-in, served by this deployment's web app, receives its code. */
@@ -181,11 +162,10 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
       managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
       managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
     });
-    const parsed = parseRequestBody(AuthorizeBody, await context.req.json().catch(() => null), {
-      status: 400,
-      message: "Invalid native sign-in request",
-    });
-    const body = parsed;
+    const parsed = AuthorizeBody.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success)
+      throw new HTTPException(400, { message: "Invalid native sign-in request" });
+    const body = parsed.data;
     if (
       !nativeAppRedirectAllowed(
         body.redirectUri,
@@ -208,7 +188,6 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const providerId = MANAGED_PROVIDERS.find((provider) => provider === binding?.providerId);
     if (!providerId) throw new HTTPException(409, { message: "Sign-in method unavailable" });
-    const approvingAuthentication = (await readSessionAuthentication(deps.db, actor))?.latest;
     const code = randomBytes(32).toString("base64url");
     const context_ = await auth.$context;
     await context_.internalAdapter.createVerificationValue({
@@ -221,12 +200,6 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
           codeChallenge: body.codeChallenge,
           platform: body.platform,
           deviceName: body.deviceName ?? null,
-          authentication: approvingAuthentication
-            ? {
-                amr: approvingAuthentication.amr,
-                authenticatedAt: approvingAuthentication.authenticatedAt.toISOString(),
-              }
-            : null,
         }),
       ),
       expiresAt: new Date(Date.now() + NATIVE_APP_CODE_TTL_MS),
@@ -268,13 +241,6 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     if (!session?.token || new Date(session.expiresAt).getTime() <= Date.now()) {
       return context.json({ error: "access_denied" }, 403);
-    }
-    if (grant.authentication) {
-      await recordSessionAuthentication(deps.db, {
-        authSessionId: session.id,
-        amr: grant.authentication.amr,
-        authenticatedAt: new Date(grant.authentication.authenticatedAt),
-      });
     }
     return context.json({
       accessToken: `${NATIVE_APP_CREDENTIAL_PREFIX}${session.token}`,
@@ -351,15 +317,13 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.put(`${base}/push-device`, async (context) => {
     const id = await appSessionId(context.req.header("authorization"));
-    const parsed = parseRequestBody(PushDeviceBody, await context.req.json().catch(() => null), {
-      status: 400,
-      message: "Invalid push registration",
-    });
-    if (!deps.settings.nativeAppIds.includes(parsed.appId)) {
+    const parsed = PushDeviceBody.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid push registration" });
+    if (!deps.settings.nativeAppIds.includes(parsed.data.appId)) {
       throw new HTTPException(400, { message: "Unregistered native app" });
     }
     return context.json({
-      device: await registerNativePushDevice(deps.db, { authSessionId: id, ...parsed }),
+      device: await registerNativePushDevice(deps.db, { authSessionId: id, ...parsed.data }),
     });
   });
 

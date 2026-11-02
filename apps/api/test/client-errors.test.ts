@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 
 import { createApp, isApiContractProtectedMutation, routeLabel } from "../src/app";

@@ -6,9 +6,7 @@ import {
 } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
-import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { Hono } from "hono";
 import { acquireSearchTestDatabase } from "../../../packages/db/test/session-message-search-fixture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
@@ -104,8 +102,8 @@ test("HTTP searches old visible content and existing bounded event reader loads 
   expect(context.status).toBe(200);
   const events = (await context.json()) as Array<{ sequence: number; payload: { text?: string } }>;
   expect(events.map((event) => event.sequence)).toEqual([1, 2, 3]);
-  // Public audit reads keep visible text but omit host-only context.
-  expect(JSON.stringify(events)).not.toContain("hidden model context");
+  // The existing reader is also an audit API and retains modelContext even on
+  // small summary payloads. Preview only the explicitly visible text field.
   expect(events.map((event) => event.payload.text)).toEqual([
     "before",
     "literal %_\\🙂 twice TWICE",

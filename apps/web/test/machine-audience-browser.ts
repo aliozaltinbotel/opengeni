@@ -5,8 +5,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Page } from "playwright";
 import AxeBuilder from "@axe-core/playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess } from "@opengeni/testing/process";
+import { freePort, startProcess } from "@opengeni/testing";
 
 const port = await freePort();
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -70,7 +69,7 @@ try {
     await noSeriousAxe(page);
 
     // The itemized list is one click away.
-    await dialog.getByRole("button", { name: /Chats and automations affected/ }).click();
+    await dialog.getByRole("button", { name: /Chats and schedules affected/ }).click();
     await dialog.getByText("Release checklist for the March launch").waitFor();
     await dialog.getByText("Someone's private chat").waitFor();
     await page.screenshot({ path: `${output}/${name}-items.png`, fullPage: true });

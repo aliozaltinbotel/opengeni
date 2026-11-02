@@ -14,7 +14,6 @@ import { SettingNavRow, SettingRow } from "@opengeni/react/ui/setting-row";
 import {
   notifyModelConnectionsChanged,
   MODEL_SETTINGS_STALE_TIME_MS,
-  sharedQueryWriter,
   useSharedQuery,
 } from "@opengeni/react/app/lib/shared-query";
 import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
@@ -38,8 +37,6 @@ export type ConnectionAccessKind =
   | "vercel_gateway"
   | "openrouter"
   | "opper"
-  | "openai"
-  | "azure_openai"
   | "anthropic"
   | "claude_subscription";
 
@@ -65,50 +62,27 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
     [props.organizationId, props.workspaceId, props.kind, props.connectionId],
   );
   const enabled = props.enabled ?? true;
-  const key = useMemo(
-    () =>
-      [
-        "model-settings",
-        "access",
-        target.scope,
-        target.scopeId,
-        target.kind,
-        target.connectionId,
-      ] as const,
-    [target],
-  );
   const query = useSharedQuery<ModelConnectionAccessResponse>(
     client,
-    [...key],
+    ["model-settings", "access", target.scope, target.scopeId, target.kind, target.connectionId],
     () => client.getModelConnectionAccess(target),
     { enabled, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
-  const current = query.data;
-  /**
-   * Saves, shows the saved reach at once, and re-reads everything it can
-   * change in the background: the save is done when the server accepted it,
-   * not when every account list and usage check has been read again.
-   * Throws the failure; an API error keeps its facts for Technical details.
-   */
+  /** Saves and re-reads. Throws the failure; an API error keeps its facts for Technical details. */
   const save = useCallback(
     async (draft: ModelConnectionAccessPolicy) => {
-      // Created before the write: a sign-out meanwhile refuses the late write.
-      const write = sharedQueryWriter(client);
-      let saved: ModelConnectionAccessPolicy;
       try {
-        saved = await client.updateModelConnectionAccess(target, draft);
+        await client.updateModelConnectionAccess(target, draft);
       } catch (caught) {
         throw caught instanceof Error && caught.message
           ? caught
           : new Error("Couldn't save. Nothing was changed.", { cause: caught });
       }
-      if (current) write([...key], { ...current, policy: saved });
-      // Evicts unmounted reads at once and re-reads mounted ones meanwhile,
-      // keeping their rows on screen, even when the form was left during save.
-      void notifyModelConnectionsChanged(client).catch(() => undefined);
+      // Also evicts unmounted detail reads, even when the form was left during save.
+      await notifyModelConnectionsChanged(client);
       toast.success("Saved");
     },
-    [client, target, key, current],
+    [client, target],
   );
   return {
     data: query.data,
@@ -437,7 +411,7 @@ export function ConnectionAccessFormPage({
                 <ChoiceCard
                   value="people"
                   title="Only selected people"
-                  description="Only their own chats and automations."
+                  description="Only their own chats and schedules."
                 />
               ) : null}
             </ChoiceCards>

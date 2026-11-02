@@ -10,9 +10,12 @@ import {
   safeDatabaseErrorFacts,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import {
   organizationApiKeyPermissions,
@@ -123,17 +126,20 @@ describe("organization API key workspace deletion", () => {
       const { accountId } = await organizationFixture();
       const tenant = await createWorkspace(client!.db, { accountId, name: "Retained tenant" });
       const key = await organizationKey(accountId, organizationApiKeyPermissions);
-      const retainedId = crypto.randomUUID();
+      const receiptId = crypto.randomUUID();
       const scheduleId = `retained-workspace-${crypto.randomUUID()}`;
-      // A record kept outside the workspace's own data refuses the deletion
-      // through its restrictive reference, as retained audit records do.
-      await shared!.admin.unsafe(`
-        create table if not exists deletion_retention_fixture (
-          id uuid primary key,
-          workspace_id uuid not null references workspaces(id) on delete restrict
-        )`);
-      await shared!.admin`insert into deletion_retention_fixture (id, workspace_id)
-        values (${retainedId}, ${tenant.id})`;
+      // These pre-0461 operation receipts remain immutable audit evidence in
+      // the current migrated schema, including their restrictive workspace FK.
+      await shared!.admin`insert into knowledge_operation_receipts (
+        id, account_id, scope_kind, scope_workspace_id, scope_key,
+        operation_kind, operation_namespace, operation_id, input_hash, result_id,
+        actor_kind, actor_subject_id
+      ) values (
+        ${receiptId}, ${accountId}, 'workspace', ${tenant.id},
+        opengeni_private.scoped_knowledge_scope_key('workspace', ${tenant.id}::uuid, null),
+        'provider', 'deletion-regression', ${crypto.randomUUID()}, ${"a".repeat(64)},
+        ${crypto.randomUUID()}, 'human', 'user:fixture'
+      )`;
       await shared!.admin`insert into scheduled_tasks (
         account_id, workspace_id, name, schedule, temporal_schedule_id, agent_config
       ) values (
@@ -142,14 +148,14 @@ describe("organization API key workspace deletion", () => {
         ${shared!.admin.json({ prompt: "fixture", resources: [], tools: [], metadata: {} })}
       )`;
       const [before] = await shared!
-        .admin`select * from deletion_retention_fixture where id=${retainedId}`;
+        .admin`select * from knowledge_operation_receipts where id=${receiptId}`;
       const baselineError = await deleteWorkspaceIfQuiescent(client!.db, {
         accountId,
         workspaceId: tenant.id,
       }).catch((error: unknown) => error);
       expect(nestedPostgresSqlState(baselineError)).toBe("23503");
       expect(safeDatabaseErrorFacts(baselineError).constraint).toBe(
-        "deletion_retention_fixture_workspace_id_fkey",
+        "knowledge_operation_receipts_scope_workspace_id_fkey",
       );
       const deletesBefore = scheduleDeletes;
       const path =
@@ -161,7 +167,7 @@ describe("organization API key workspace deletion", () => {
       expect(await response.text()).toContain("retained or linked records");
       expect(await workspaceExists(tenant.id)).toBe(true);
       const [after] = await shared!
-        .admin`select * from deletion_retention_fixture where id=${retainedId}`;
+        .admin`select * from knowledge_operation_receipts where id=${receiptId}`;
       expect(after).toEqual(before);
       const [rows] = await shared!.admin<{ schedules: number; cleanups: number }[]>`
         select

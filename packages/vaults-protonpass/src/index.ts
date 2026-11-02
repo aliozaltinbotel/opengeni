@@ -25,5 +25,5 @@ export {
   type ProtonPassProviderPool,
   type ProtonPassProviderPoolOptions,
 } from "./pool";
-export { restrictToOperations } from "@opengeni/vaults";
+export { restrictToOperations } from "./operations";
 export type { ProcessRequest, ProcessResult, ProcessRunner } from "./runner";

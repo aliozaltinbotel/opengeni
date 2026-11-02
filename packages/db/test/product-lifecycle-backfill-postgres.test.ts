@@ -3,7 +3,7 @@ import { PRODUCT_LIFECYCLE_FACT_ATTRIBUTES } from "@opengeni/contracts";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import postgres from "postgres";
 
 import {

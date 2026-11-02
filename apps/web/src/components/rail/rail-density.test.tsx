@@ -14,8 +14,6 @@ let pathname = "/workspaces/workspace-1/sessions/session-1";
 mock.module("@tanstack/react-router", () => ({
   useRouterState: ({ select }: { select: (state: unknown) => unknown }) =>
     select({ location: { pathname } }),
-  // Host extension nav links; the stock stub renders none.
-  Link: ({ children }: { children?: ReactNode }) => <a href="#extension">{children}</a>,
 }));
 
 mock.module("@opengeni/react/app/components/rail/rail-context", () => ({
@@ -156,7 +154,7 @@ describe("session-first rail density", () => {
       expect(rendered.container.textContent).not.toContain("For you");
       expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        5,
+        4,
       );
       expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
     } finally {
@@ -171,7 +169,7 @@ describe("session-first rail density", () => {
       expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
       await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(5);
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(4);
       expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
       await act(async () => lessButton(first.container).click());
       expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
@@ -203,7 +201,7 @@ describe("session-first rail density", () => {
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        5,
+        4,
       );
       expect(railShell).toMatch(
         /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "production",
-  "sourceCommit": "b2cf70e9ee012d2b96dfba6768e6a196eb7057fa",
-  "release": "fork pin A b2cf70e9e (cendra/native-successor2-20261028), the release pin B follows; its image digest is recorded at the repin"
+  "status": "bootstrap",
+  "sourceCommit": "c4092a7156ddcb54d6863f021eea3d0fc2c2a0e6",
+  "release": null
 }

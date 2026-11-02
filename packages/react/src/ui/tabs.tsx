@@ -6,21 +6,21 @@ import { Tabs as TabsPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
 
-const Tabs = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof TabsPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Root>
->(function Tabs({ className, orientation = "horizontal", ...props }, ref) {
+function Tabs({
+  className,
+  orientation = "horizontal",
+  ...props
+}: React.ComponentProps<typeof TabsPrimitive.Root>) {
   return (
     <TabsPrimitive.Root
       data-slot="tabs"
       data-orientation={orientation}
       orientation={orientation}
       className={cn("group/tabs flex gap-2 data-[orientation=horizontal]:flex-col", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 const tabsListVariants = cva(
   "group/tabs-list inline-flex w-fit items-center justify-center rounded-lg p-[3px] text-muted-foreground group-data-[orientation=horizontal]/tabs:h-9 group-data-[orientation=vertical]/tabs:h-fit group-data-[orientation=vertical]/tabs:flex-col data-[variant=line]:rounded-none",
@@ -37,25 +37,22 @@ const tabsListVariants = cva(
   },
 );
 
-const TabsList = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof TabsPrimitive.List>,
-  React.ComponentPropsWithoutRef<typeof TabsPrimitive.List> & VariantProps<typeof tabsListVariants>
->(function TabsList({ className, variant = "default", ...props }, ref) {
+function TabsList({
+  className,
+  variant = "default",
+  ...props
+}: React.ComponentProps<typeof TabsPrimitive.List> & VariantProps<typeof tabsListVariants>) {
   return (
     <TabsPrimitive.List
       data-slot="tabs-list"
       data-variant={variant}
       className={cn(tabsListVariants({ variant }), className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const TabsTrigger = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof TabsPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>
->(function TabsTrigger({ className, ...props }, ref) {
+function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
   return (
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
@@ -66,24 +63,19 @@ const TabsTrigger = /* @__PURE__ */ React.forwardRef<
         "after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-[orientation=horizontal]/tabs:after:inset-x-0 group-data-[orientation=horizontal]/tabs:after:bottom-[-5px] group-data-[orientation=horizontal]/tabs:after:h-0.5 group-data-[orientation=vertical]/tabs:after:inset-y-0 group-data-[orientation=vertical]/tabs:after:-right-1 group-data-[orientation=vertical]/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-[state=active]:after:opacity-100",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const TabsContent = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof TabsPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>
->(function TabsContent({ className, ...props }, ref) {
+function TabsContent({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Content>) {
   return (
     <TabsPrimitive.Content
       data-slot="tabs-content"
       className={cn("flex-1 outline-hidden", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants };

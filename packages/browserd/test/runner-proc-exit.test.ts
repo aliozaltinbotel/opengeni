@@ -63,11 +63,15 @@ mock.module("node:fs/promises", () => ({
     return original.readFile(path, ...args);
   },
 }));
-const { ManagedBrowserRunner } = await import(process.argv[1]);
+const { AgentBrowserJsonRunner } = await import(process.argv[1]);
 const root = await original.mkdtemp("/tmp/og-proc-exit-");
 const profileDirectory = join(root, "profile");
-const runner = await ManagedBrowserRunner.create({ profileDirectory,
+const runner = await AgentBrowserJsonRunner.create({
+  namespace: "og", sessionName: "proc-exit",
+  socketDirectory: join(root, "socket"), profileDirectory,
+  downloadDirectory: join(root, "downloads"), screenshotDirectory: join(root, "screenshots"),
   headed: false, browserExecutablePath: process.execPath,
+  binary: { path: process.execPath, name: "agent-browser-linux-x64", version: "0.33.2", sha256: "fixture" },
 });
 const spawn = (profile) => Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60000)", "--user-data-dir=" + profile], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 const owned = spawn(profileDirectory);

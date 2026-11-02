@@ -140,17 +140,6 @@ export function buildSubscriptionCoreCredentialResolver<
   refresh: () => Promise<Snapshot>;
 } {
   const { errors, holderKey } = input;
-  /**
-   * The newest credential generation this resolver handed out. A forced
-   * refresh means "the credential I hold was refused"; one that loads a
-   * generation newer than any its caller could hold (another caller's
-   * rotation committed while it read) uses that credential instead of
-   * rotating it again.
-   */
-  let issuedGeneration: number | null = null;
-  const issued = (generation: number) => {
-    if (issuedGeneration === null || generation > issuedGeneration) issuedGeneration = generation;
-  };
   const load = async (): Promise<Loaded> => {
     const loaded = await input.load();
     switch (loaded.kind) {
@@ -204,13 +193,9 @@ export function buildSubscriptionCoreCredentialResolver<
             // A wake hint must never fail the request it rode on.
           }
         }
-        issued(outcome.refreshGeneration);
         return input.refreshedSnapshot(outcome as Refreshed, loaded);
-      case "superseded": {
-        const current = await load();
-        issued(current.refreshGeneration);
-        return input.snapshot(current);
-      }
+      case "superseded":
+        return input.snapshot(await load());
       case "relogin":
         throw errors.relogin(outcome.message);
       case "lease_lost":
@@ -234,21 +219,14 @@ export function buildSubscriptionCoreCredentialResolver<
           : true;
   };
   const resolve = async (force: boolean): Promise<Snapshot> => {
-    // Captured before the read: what the caller could hold when it asked.
-    const held = issuedGeneration;
     const loaded = await load();
-    const rotatedSinceHeld = held !== null && loaded.refreshGeneration > held;
-    if ((force && !rotatedSinceHeld) || stale(loaded)) return await doRefresh(loaded);
-    issued(loaded.refreshGeneration);
-    return input.snapshot(loaded);
+    return force || stale(loaded) ? await doRefresh(loaded) : input.snapshot(loaded);
   };
   return {
     getToken: () => resolve(false),
     getFreshToken: async () => {
       const loaded = await load();
-      if (stale(loaded)) return null;
-      issued(loaded.refreshGeneration);
-      return input.snapshot(loaded);
+      return stale(loaded) ? null : input.snapshot(loaded);
     },
     refresh: () => resolve(true),
   };

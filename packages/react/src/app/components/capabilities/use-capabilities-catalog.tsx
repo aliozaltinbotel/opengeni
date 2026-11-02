@@ -2,7 +2,6 @@ import { useRef, useState } from "react";
 import type { NativeConnectCatalog } from "./native-connect-readiness";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "../../lib/toast";
-import { isTransientServiceFailure, retryTransient } from "../../../lib/transient-retry";
 import { userErrorText } from "../../../ui/api-error";
 
 import { useAppContext } from "../../app-context";
@@ -252,8 +251,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     })();
     try {
       const [catalog, , socials, slackBindings, apiDefinitions, apiInstances] = await Promise.all([
-        // A deploy or failover answers briefly with 502/503: retry quietly.
-        retryTransient(() => client.listCapabilities(workspaceId), { shouldContinue: live }),
+        client.listCapabilities(workspaceId),
         // Settles access independently even when the catalog request rejects.
         fetchConnections(),
         client.listSocialConnections(workspaceId).catch(() => null),
@@ -279,12 +277,9 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         ...current,
         loadError: error instanceof Error ? error : new Error(String(error)),
       }));
-      // Opengeni is updating: the surface says so calmly and reloads by itself.
-      if (!isTransientServiceFailure(error)) {
-        toast.error("Couldn't load plugins", {
-          description: userErrorText(error),
-        });
-      }
+      toast.error("Couldn't load plugins", {
+        description: userErrorText(error),
+      });
     } finally {
       if (live()) update((current) => ({ ...current, loading: false }));
     }

@@ -5,7 +5,7 @@ import {
   acquireSharedTestDatabase,
   acquireOwnerMigratedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,

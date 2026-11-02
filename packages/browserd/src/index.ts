@@ -1,3 +1,4 @@
+export * from "./binary";
 export * from "./attached-bridge";
 export * from "./attached-cdp";
 export * from "./cdp";

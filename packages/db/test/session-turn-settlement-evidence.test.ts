@@ -14,7 +14,7 @@ import {
 import { fromPostgresLosslessJson } from "../src/lossless-json";
 import * as schema from "../src/schema";
 import { and, desc, eq } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;

@@ -10,7 +10,7 @@ import {
   renderOrganizationUserSetupEmail,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../src/auth/organization-user-setup";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 
 const message = {
   kind: "organization_user_setup" as const,
@@ -79,7 +79,6 @@ describe("managed email transport", () => {
 
   test("renders an escaped, frozen safe snapshot with a stable payload digest", async () => {
     const rendered = renderOrganizationUserSetupEmail({
-      productName: "Opengeni",
       senderEmail: "Opengeni <invites@example.test>",
       recipientEmail: "invited@example.test",
       recipientName: "Ada <Admin>",

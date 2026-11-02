@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { calculateModelUsageCostMicros } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
   OpenAIChatCompletionsModel,

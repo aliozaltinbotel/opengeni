@@ -3,8 +3,8 @@ import type { MCPServer } from "@openai/agents";
 import {
   ScriptedModel,
   functionCall as scriptedFunctionCall,
-} from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+  testSettings,
+} from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
   normalizeSdkEvent,

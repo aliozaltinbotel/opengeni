@@ -29,12 +29,10 @@ import {
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
 import { ApiHttpError } from "../http/api-error";
-import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
-import { parseRequestBody } from "../http/request-body";
 
 const ConnectState = z.object({
   opengeniSignInMethod: z.object({
@@ -73,11 +71,10 @@ async function identity(context: Context, deps: ApiRouteDeps) {
 }
 
 export async function admitManagedSignInMutation(context: Context, deps: ApiRouteDeps) {
-  const origins = deps.settings.publicBaseUrl ? trustedBrowserOrigins(deps.settings) : [];
-  const origin = context.req.header("origin");
+  const origin = deps.settings.publicBaseUrl ? new URL(deps.settings.publicBaseUrl).origin : null;
   if (
     !origin ||
-    !origins.includes(origin) ||
+    context.req.header("origin") !== origin ||
     context.req.header("sec-fetch-site") !== "same-origin" ||
     context.req.header("content-type")?.split(";", 1)[0] !== "application/json"
   ) {
@@ -99,7 +96,7 @@ export async function admitManagedSignInMutation(context: Context, deps: ApiRout
     try {
       requireManagedAuthMutationAdmission({
         request: context.req.raw,
-        allowedOrigins: origins,
+        allowedOrigins: [origin],
         authority,
         signingSecret: deps.settings.betterAuthSecret!,
         expectedGeneration: snapshot.projection.generation,
@@ -158,15 +155,7 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
     const [user] = await rows<{ email: string; emailVerified: boolean; fresh: boolean }>(
       deps,
       sql`
-      select u.email, u.email_verified as "emailVerified",
-        -- A fresh authentication of this session (sign-in or re-authentication),
-        -- never its creation time: the same rule managed_sign_in_method_authority applies.
-        exists (
-          select 1 from auth_session_authentications a
-          where a.auth_session_id = s.id
-            and a.authenticated_at > clock_timestamp() - interval '5 minutes'
-            and a.authenticated_at <= clock_timestamp()
-        ) as fresh
+      select u.email, u.email_verified as "emailVerified", s.created_at > clock_timestamp()-interval '5 minutes' as fresh
       from auth_users u join auth_sessions s on s.user_id=u.id where u.id=${actor.authUserId} and s.id=${actor.authSessionId}`,
     );
     if (!user) throw new HTTPException(401);
@@ -213,11 +202,10 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         throw new HTTPException(409, { message: "Managed actor fence required" });
       const schema =
         kind === "password" ? ManagedSignInPasswordMutation : ManagedSignInProviderMutation;
-      const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
-        status: 422,
-        message: "Invalid sign-in method request",
-      });
-      const body = parsed;
+      const parsed = schema.safeParse(await context.req.json().catch(() => null));
+      if (!parsed.success)
+        throw new HTTPException(422, { message: "Invalid sign-in method request" });
+      const body = parsed.data;
       const currentIdentity = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
       if (currentIdentity.activeIdentity.id !== body.expectedIdentityId)
         return context.json(
@@ -349,7 +337,6 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
           notification: await deliverManagedSignInNotification(
             deps.db,
             deps.managedEmailTransport,
-            deps.settings.productName,
             body.operationId,
           ),
         });
@@ -436,12 +423,7 @@ export async function handleManagedSignInConnectCallback(
     sql`select u.email from auth_identities a join auth_users u on u.id=a.user_id where a.managed_link_intent_id=${proof.intentId}`,
   );
   if (linked)
-    await deliverManagedSignInNotification(
-      deps.db,
-      deps.managedEmailTransport,
-      deps.settings.productName,
-      proof.intentId,
-    );
+    await deliverManagedSignInNotification(deps.db, deps.managedEmailTransport, proof.intentId);
   if (response.status >= 400 || !linked) {
     return context.redirect(
       new URL(

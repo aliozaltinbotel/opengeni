@@ -8,9 +8,12 @@ import {
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { Opengeni } from "../../../packages/sdk/src/chat";
 import { uuidV5 } from "../../../packages/sdk/src/chat/ids";
@@ -416,8 +419,7 @@ test("chats: private creates an external asUser-owned user_private session throu
       }),
     }),
   );
-  // Opengeni's own answer to a create, relayed unchanged.
-  expect(response.status).toBe(202);
+  expect(response.status).toBe(200);
   const created = (await response.json()) as { id: string };
   const [stored] = await shared.admin`
     select visibility, owner_subject_id, owner_organization_membership_id,
@@ -456,12 +458,15 @@ test("a disabled organization private-chat setting returns actionable OpenGeniSe
       }),
     }),
   );
-  // The relay passes Opengeni's error through unchanged; the browser SDK
-  // turns its code into the actionable OpenGeniSetupError below.
   expect(response.status).toBe(409);
   expect(response.headers.get("content-type")).toContain("application/json");
-  const payload = (await response.json()) as { code: string };
-  expect(["SESSION_TENANCY_NOT_ACTIVATED", "OPENGENI_SETUP_REQUIRED"]).toContain(payload.code);
+  const payload = (await response.json()) as { error: { code: string; message: string } };
+  expect(payload.error.code).toBe("OPENGENI_SETUP_REQUIRED");
+  expect(payload.error.message).toMatch(/setting[\s\S]*enabled|enable[\s\S]*setting/i);
+  expect(payload.error.message).toMatch(/owner or admin/i);
+  expect(payload.error.message).toContain("PATCH /v1/organizations");
+  expect(payload.error.message).toContain("@opengeni/sdk/");
+  expect(payload.error.message).toMatch(/web app/i);
 
   let failure: unknown;
   try {

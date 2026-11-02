@@ -4,7 +4,7 @@ import postgres from "postgres";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { appendSessionEvents, bootstrapWorkspace, createDb, createSession } from "../src/index";
 import { migrate } from "../src/migrate";
 

@@ -1,7 +1,6 @@
 import type { Context, Hono } from "hono";
 import { isDeepStrictEqual } from "node:util";
 import { HTTPException } from "hono/http-exception";
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import { createNativeExternalVaultFactories } from "../integrations/external-vault-providers";
 import {
   CreateManagedProviderVaultRequest,
@@ -91,7 +90,7 @@ import {
 } from "@opengeni/vaults";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { parseRequestJson } from "../http/request-body";
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import {
   loadOnePasswordModule,
   loadOnePasswordVaultProvider,
@@ -573,7 +572,6 @@ export function registerVaultProviderRoutes(
       });
       await syncLinkedProviderVault({
         db,
-        encryptionKey: environmentsEncryptionKeyBytes(settings) ?? null,
         context,
         vaultId: row.id,
         providers: vaultProviderRegistryFor(deps, {
@@ -600,7 +598,6 @@ export function registerVaultProviderRoutes(
     try {
       const result = await syncLinkedProviderVault({
         db,
-        encryptionKey: environmentsEncryptionKeyBytes(settings) ?? null,
         context: vaultContextFor(authorization, workspaceId),
         vaultId,
         providers: vaultProviderRegistryFor(deps, {
@@ -712,7 +709,6 @@ export function registerVaultProviderRoutes(
       });
       await syncLinkedProviderVault({
         db,
-        encryptionKey: environmentsEncryptionKeyBytes(settings) ?? null,
         context,
         vaultId: linked.id,
         providers: vaultProviderRegistryFor(deps, {
@@ -867,14 +863,9 @@ export function registerVaultProviderRoutes(
     const linked = await linkedVaultRows(context, workspaceId, connectionId);
     const providers = vaultProviderRegistryFor(deps, { workspaceId, subjectId: grant.subjectId });
     for (const row of linked) {
-      await syncLinkedProviderVault({
-        db,
-        context,
-        vaultId: row.id,
-        providers,
-        force: true,
-        encryptionKey: environmentsEncryptionKeyBytes(settings) ?? null,
-      }).catch(() => undefined);
+      await syncLinkedProviderVault({ db, context, vaultId: row.id, providers, force: true }).catch(
+        () => undefined,
+      );
     }
     const linkedByRef = new Map(linked.map((row) => [row.providerVaultRef, row.id]));
     return c.json(
@@ -1400,7 +1391,6 @@ export function registerVaultProviderRoutes(
       for (const row of linked) {
         await syncLinkedProviderVault({
           db,
-          encryptionKey: environmentsEncryptionKeyBytes(settings) ?? null,
           context,
           vaultId: row.id,
           providers,

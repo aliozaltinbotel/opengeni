@@ -55,9 +55,6 @@ export type PrepareComputerSessionCreateInput = {
   actorSubjectId: string;
   name: string;
   placement: InteractionPlacement;
-  /** Workspace storing an attached-device placement's Chrome profile, where
-   *  its machine is enrolled. Defaults to this workspace. */
-  attachedDeviceWorkspaceId?: string | null;
 };
 
 export type PrepareComputerSessionEndInput = {
@@ -74,9 +71,6 @@ export type ComputerSessionControlRecord = {
   session: ComputerSession;
   tokenGeneration: number;
   sourceSessionId: string;
-  /** Workspace storing an attached-device placement's Chrome profile, which
-   *  can be another workspace than the session's; null otherwise. */
-  deviceWorkspaceId: string | null;
   createOperationId: string;
   operation: null | {
     operationId: string;
@@ -387,7 +381,6 @@ async function controlRecordFromRows(
     session: computerSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: created[0]!.sessionId,
-    deviceWorkspaceId: row.deviceId ? (row.deviceWorkspaceId ?? row.workspaceId) : null,
     createOperationId: row.createOperationId,
     operation: operation
       ? {
@@ -469,16 +462,11 @@ export async function findComputerSessionControlRecordByOperation(
   );
 }
 
-function placementToColumns(
-  placement: InteractionPlacement,
-  workspaceId: string,
-  attachedDeviceWorkspaceId: string | null | undefined,
-): {
+function placementToColumns(placement: InteractionPlacement): {
   placementKind: ComputerSessionRow["placementKind"];
   sandboxGroupId: string | null;
   connectedSandboxId: string | null;
   deviceId: string | null;
-  deviceWorkspaceId: string | null;
   externalProviderId: string | null;
   externalPlacementId: string | null;
 } {
@@ -487,8 +475,6 @@ function placementToColumns(
     sandboxGroupId: placement.kind === "sandbox_group" ? placement.sandboxGroupId : null,
     connectedSandboxId: placement.kind === "connected_machine" ? placement.sandboxId : null,
     deviceId: placement.kind === "attached_device" ? placement.deviceId : null,
-    deviceWorkspaceId:
-      placement.kind === "attached_device" ? (attachedDeviceWorkspaceId ?? workspaceId) : null,
     externalProviderId: placement.kind === "external_provider" ? placement.providerId : null,
     externalPlacementId: placement.kind === "external_provider" ? placement.placementId : null,
   };
@@ -567,11 +553,7 @@ export async function prepareComputerSessionCreate(
           workspaceId: input.workspaceId,
           name: input.name,
           lifecycle: "starting",
-          ...placementToColumns(
-            input.placement,
-            input.workspaceId,
-            input.attachedDeviceWorkspaceId,
-          ),
+          ...placementToColumns(input.placement),
           createOperationId: input.operationId,
           createdBySubjectId: input.actorSubjectId,
         })
@@ -1091,9 +1073,7 @@ export async function touchComputerSessionController(
       if (observed.placementKind === "attached_device") {
         if (!observed.deviceId || !observed.placementInstanceId) return false;
         const current = await attachedDeviceGenerationMatches(tx, {
-          accountId: input.accountId,
           workspaceId: input.workspaceId,
-          deviceWorkspaceId: observed.deviceWorkspaceId ?? input.workspaceId,
           deviceId: observed.deviceId,
           placementInstanceId: observed.placementInstanceId,
         });

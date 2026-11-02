@@ -1,8 +1,10 @@
 import { test, expect } from "bun:test";
-import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
-import { freePort } from "@opengeni/testing/compose";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  freePort,
+} from "@opengeni/testing";
 import {
   createDb,
   claimSessionWorkForAttempt,

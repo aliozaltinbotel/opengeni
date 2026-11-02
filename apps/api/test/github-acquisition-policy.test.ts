@@ -13,8 +13,11 @@ import {
   listGitHubInstallationAccessForWorkspace,
 } from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createSignedState } from "@opengeni/github";
 import { completeGitHubAppConnect } from "../src/integrations/github-app-connect";
 import { registerGitHubRoutes } from "../src/routes/github";

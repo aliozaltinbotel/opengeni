@@ -1,7 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { SiteAuthMaintenanceClaim } from "@opengeni/db";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { createSiteAuthMaintenanceActivities } from "../src/activities/site-auth-maintenance";
 import type { ActivityServices } from "../src/activities/types";
 

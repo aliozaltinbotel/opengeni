@@ -259,7 +259,6 @@ export function useApiIntegrationAccounts({
   instances,
   canManage,
   ownership = "workspace",
-  personalOnly = false,
   refresh,
   onRuntimeChanged,
   refreshRevision = 0,
@@ -270,8 +269,6 @@ export function useApiIntegrationAccounts({
   instances: ApiIntegrationInstallationSummary[];
   canManage: boolean;
   ownership?: ConnectionOwnership;
-  /** This provider accepts only user-owned grants for new accounts. */
-  personalOnly?: boolean;
   /** Reload the workspace catalog after a mutation. */
   refresh?: () => Promise<void>;
   onRuntimeChanged?: () => void;
@@ -336,7 +333,7 @@ export function useApiIntegrationAccounts({
           ...(existing ? { expectedInstanceVersion: existing.instanceVersion } : {}),
         },
       };
-      if (existing || personalOnly) setConnectRequest(request);
+      if (existing) setConnectRequest(request);
       else setNewConnection(request);
       setBusy(false);
     } catch (error) {
@@ -518,7 +515,6 @@ export function useIntegrationDefinitionRow({
   mark,
   definitionId,
   ownership,
-  personalOnly,
   workspaceId,
   definitions,
   instances,
@@ -532,8 +528,6 @@ export function useIntegrationDefinitionRow({
   mark: IntegrationMark;
   definitionId: string;
   ownership?: ConnectionOwnership;
-  /** This provider accepts only user-owned grants for new accounts. */
-  personalOnly?: boolean;
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
@@ -554,7 +548,6 @@ export function useIntegrationDefinitionRow({
     instances,
     canManage,
     ...(ownership ? { ownership } : {}),
-    ...(personalOnly !== undefined ? { personalOnly } : {}),
     ...(refresh ? { refresh } : {}),
     ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
     ...(refreshRevision !== undefined ? { refreshRevision } : {}),

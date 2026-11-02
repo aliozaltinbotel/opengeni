@@ -19,11 +19,9 @@ import type {
   SessionEventReadMode,
   SessionMcpMonitoringSource,
   SessionQueueSnapshot,
-  SessionMcpQueueSummary,
 } from "@opengeni/contracts";
 import {
   boundSessionEventPayload,
-  projectSessionEventForPublic,
   measureSessionEventJson,
   sessionEventJsonBytes,
   compactSessionMcpDetail,
@@ -235,9 +233,8 @@ export function boundSessionEventMcpPage(input: SessionEventMcpPageInput): Sessi
   const maxBytes = Math.max(8 * 1024, input.maxBytes ?? SESSION_EVENT_MCP_MAX_BYTES);
   let payloadTrimmed = false;
   const events = input.events.map((event) => {
-    const publicEvent = projectSessionEventForPublic(event);
-    const capped = capEventPayload(publicEvent, SESSION_EVENT_MCP_FIELD_MAX_CHARS);
-    if (capped !== publicEvent) payloadTrimmed = true;
+    const capped = capEventPayload(event, SESSION_EVENT_MCP_FIELD_MAX_CHARS);
+    if (capped !== event) payloadTrimmed = true;
     return capped;
   });
   let modelRowsDropped = false;
@@ -538,7 +535,7 @@ function projectEffectiveToolPolicy(value: Session["effectiveToolPolicy"]): {
 export function boundSessionCompactDetailMcp(
   session: Session,
   monitoring: SessionMcpMonitoringSource,
-  queue: SessionQueueSnapshot | SessionMcpQueueSummary | null,
+  queue: SessionQueueSnapshot | null,
   maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
 ) {
   const result = compactSessionMcpDetail(session, monitoring, queue);

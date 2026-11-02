@@ -7,10 +7,13 @@ import {
   isDatabaseConnectionLoss,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
-import { waitFor } from "@opengeni/testing/process";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  waitFor,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import { createAppComposition } from "../src/app";

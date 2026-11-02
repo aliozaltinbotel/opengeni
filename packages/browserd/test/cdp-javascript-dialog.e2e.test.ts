@@ -8,7 +8,11 @@ import {
   type BrowserActionCommand,
   type BrowserObservation,
 } from "@opengeni/contracts";
-import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
+import {
+  AgentBrowserDriver,
+  AgentBrowserJsonRunner,
+  resolvePinnedAgentBrowserBinary,
+} from "../src";
 import {
   AttachedChromeRunner,
   AttachedChromeCdpConnection,
@@ -169,12 +173,22 @@ e2e(
   "a JavaScript dialog an action opens returns promptly in a managed browser",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-dialog-managed-");
-    const runner = await ManagedBrowserRunner.create({
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `dialog_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
       profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),

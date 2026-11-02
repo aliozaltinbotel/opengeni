@@ -128,3 +128,15 @@ export function captureClaudeRequestToken(input: Parameters<typeof fetch>[0], in
   );
   return headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1] ?? null;
 }
+
+export function observeClaudeUsageResponse(
+  providerId: string,
+  response: Response,
+  requestToken?: string | null,
+): void {
+  try {
+    observers.getStore()?.observe(providerId, response, modelRequests.getStore(), requestToken);
+  } catch {
+    // Usage telemetry must never change or consume a model response.
+  }
+}

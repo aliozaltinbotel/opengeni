@@ -5,14 +5,12 @@
  * on the account that matches this server.
  */
 
-import { appHandoffUrl } from "@opengeni/sdk/app-links";
-
 const APP_SCHEME = "opengeni";
 const DISMISSED_KEY = "opengeni.openInApp.bannerDismissed";
 
-/** The app link that opens `webUrl` in the app; a product's app passes its own scheme. */
-export function openInAppUrl(webUrl: string, scheme: string = APP_SCHEME): string {
-  return appHandoffUrl(webUrl, scheme);
+/** The app link that opens `webUrl` in the phone app. */
+export function openInAppUrl(webUrl: string): string {
+  return `${APP_SCHEME}://open?url=${encodeURIComponent(webUrl)}`;
 }
 
 /**

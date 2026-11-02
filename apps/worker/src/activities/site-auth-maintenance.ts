@@ -18,7 +18,7 @@ import {
   deferSiteAuthMaintenance,
   type SiteAuthMaintenanceClaim,
 } from "@opengeni/db";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 import type { ControlActivityServices } from "./types";
 
 export const SITE_AUTH_MAINTENANCE_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;

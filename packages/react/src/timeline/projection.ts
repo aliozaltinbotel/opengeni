@@ -15,7 +15,6 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
-import { isAgentWorkHumanInput } from "./agent-work-human-input";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
 import {
@@ -34,9 +33,7 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
-import { invokedTool } from "./invoked-tool";
 import { presentTurnFailureText } from "./compaction-copy";
-import { startupPhaseTitle } from "./platform-activity-presentation";
 import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
@@ -189,11 +186,6 @@ export function buildTimeline(
   options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
-  // Calls remain in insertion order while message bubbles can move. Keep the
-  // two existing lookup rules separate: creation merges only tool rows, while
-  // an output correlates to the latest tool or worker with that exact id.
-  const toolCallsById = new Map<string, ToolCallItem>();
-  const callsById = new Map<string, ToolCallItem | WorkerItem>();
   const allowanceNotices = new Set<string>();
   // One "not saved" notice per turn for the same refused change, however
   // often the agent retried it.
@@ -369,7 +361,6 @@ export function buildTimeline(
         durationMs,
         outcome,
         blockedReason,
-        detail: undefined,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -390,33 +381,6 @@ export function buildTimeline(
     };
     items.push(item);
     startupPhases.set(key, [item, startupAttemptId, startupRecoveryRevision]);
-  };
-
-  // A failed startup step keeps its recorded error behind Details.
-  const recordStartupFailureDetail = (
-    phase: StartupPhase,
-    payload: Record<string, unknown>,
-  ): void => {
-    const item = startupPhases.get(`${startupTurnId}:${phase}`)?.[0];
-    if (item?.status !== "failed") return;
-    const detail = failureMessage(t, payload)?.trim();
-    if (detail) item.detail = detail;
-  };
-
-  // The first startup step the current turn attempt failed at. Later failed
-  // steps (model preparation around a lazy sandbox start) only follow it.
-  const firstFailedStartupStep = (turnId: string | null): StartupPhaseItem | null => {
-    let first: StartupPhaseItem | null = null;
-    if (turnId === null) return first;
-    for (const [item, attemptId, revision] of startupPhases.values()) {
-      const sameAttempt =
-        attemptId && startupAttemptId
-          ? attemptId === startupAttemptId
-          : revision === startupRecoveryRevision;
-      if (item.turnId !== turnId || item.status !== "failed" || !sameAttempt) continue;
-      if (!first || failedAt(item) < failedAt(first)) first = item;
-    }
-    return first;
   };
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
@@ -587,7 +551,6 @@ export function buildTimeline(
         undefined,
         blockedReason,
       );
-      recordStartupFailureDetail(setupPhase, payload);
       continue;
     }
 
@@ -661,8 +624,7 @@ export function buildTimeline(
         // A structured answer resumes the frozen tool call rather than adding a
         // synthetic user.message to model history. Keep the original question
         // and the resolved human choice together as first-class chat history;
-        // neither belongs behind the generic activity fold. An agent's answer
-        // is the exception: readable turns fold it into work.
+        // neither belongs behind the generic activity fold.
         const item = humanInputItemFromResponse(event, payload, humanInputRequests);
         if (!item) break;
         closeStreamingTail();
@@ -927,31 +889,25 @@ export function buildTimeline(
           // decision behind a duplicate generic "Ask" step.
           break;
         }
-        // A worker started or messaged through tool_invoke is the same worker.
-        const invoked = invokedTool(name, args);
-        const workerName = invoked?.name ?? name;
-        const workerArgs = invoked ? invoked.arguments : args;
         if (
-          toolMatchesLeaf(workerName, WORKER_SPAWN_TOOL) ||
-          toolMatchesLeaf(workerName, WORKER_MESSAGE_TOOL)
+          toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ||
+          toolMatchesLeaf(name, WORKER_MESSAGE_TOOL)
         ) {
-          const spawn = toolMatchesLeaf(workerName, WORKER_SPAWN_TOOL);
-          const title = spawn ? workerTitle(workerArgs) : null;
-          const item: WorkerItem = {
+          const spawn = toolMatchesLeaf(name, WORKER_SPAWN_TOOL);
+          const title = spawn ? workerTitle(args) : null;
+          items.push({
             kind: "worker",
             id: event.id,
             turnId,
             callId,
             action: spawn ? "spawn" : "message",
-            prompt: workerPrompt(workerArgs),
+            prompt: workerPrompt(args),
             ...(title ? { title } : {}),
-            workerSessionId: extractSessionRef(workerArgs),
+            workerSessionId: extractSessionRef(args),
             failure: null,
             status: "running",
             occurredAt: event.occurredAt,
-          };
-          items.push(item);
-          if (callId) callsById.set(callId, item);
+          });
           break;
         }
         if (LANDMARK_ONLY_TOOL_LEAVES.has(mcpToolLeaf(name))) {
@@ -962,7 +918,11 @@ export function buildTimeline(
         // `RunToolCallItem` share the same item id. Merge so mid-stream cards
         // do not duplicate when the step finally materializes.
         if (callId) {
-          const existing = toolCallsById.get(callId);
+          const existing = [...items]
+            .reverse()
+            .find(
+              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
+            );
           if (existing) {
             if (display) existing.display = display;
             if (args != null) {
@@ -975,7 +935,7 @@ export function buildTimeline(
             break;
           }
         }
-        const item: ToolCallItem = {
+        items.push({
           kind: "tool-call",
           id: event.id,
           turnId,
@@ -990,18 +950,13 @@ export function buildTimeline(
           raw: payload.raw,
           status: providerNativeToolStatus(payload.raw),
           occurredAt: event.occurredAt,
-        };
-        items.push(item);
-        if (callId) {
-          toolCallsById.set(callId, item);
-          callsById.set(callId, item);
-        }
+        });
         break;
       }
 
       case "agent.toolCall.output": {
         const callId = typeof payload.id === "string" ? payload.id : null;
-        const target = findOpenCall(items, callId, callsById);
+        const target = findOpenCall(items, callId);
         if (!target) {
           break;
         }
@@ -1162,7 +1117,6 @@ export function buildTimeline(
                     : undefined))
               : undefined,
           );
-          recordStartupFailureDetail(startupPhase, payload);
           break;
         }
         // Routine per-turn platform plumbing that runs before EVERY turn to
@@ -1232,7 +1186,6 @@ export function buildTimeline(
             null,
             status === "running" ? 2 : 1,
           );
-          recordStartupFailureDetail("provider_first_byte", payload);
         }
         break;
       }
@@ -1536,8 +1489,6 @@ export function buildTimeline(
             typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
           capability,
           setupRequest,
-          requestedSandboxId: stringValue(payload.requestedSandboxId) || null,
-          ...(payload.purpose === "chrome" ? { purpose: "chrome" as const } : {}),
           occurredAt: event.occurredAt,
         });
         break;
@@ -1698,43 +1649,26 @@ export function buildTimeline(
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
         const allowance = parseAllowanceExhaustedRefusal(payload);
-        const creditExhausted = !allowance && isCreditExhaustionPayload(payload);
-        const presented = allowance || creditExhausted ? null : presentFailure(t, payload);
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
-          : creditExhausted
+          : isCreditExhaustionPayload(payload)
             ? CREDIT_EXHAUSTION_MESSAGE(t)
-            : (presented?.reason ?? null);
+            : failureMessage(t, payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
-        // Diagnostic text (an unclassified error or operator text) is not
-        // written for people: name the outcome instead, in the words of the
-        // startup step this attempt failed at when there is one ("Sandbox
-        // didn't start"), and keep the recorded text behind Details. A
-        // compaction failure does the same with its own title.
-        const failedStep = presented?.diagnostic ? firstFailedStartupStep(turnId) : null;
-        const failure = allowance
-          ? null
-          : presentTurnFailureText(
-              t,
-              failureText,
-              presented?.diagnostic
-                ? failedStep
-                  ? startupPhaseTitle(t, failedStep.phase, "failed", failedStep.outcome)
-                  : t("timeline.projection.theTurnStoppedUnexpectedly")
-                : null,
-            );
-        items.push(turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail));
-        // The turn's own failed compaction landmark is the one place that
-        // shows a compaction failure's recorded text: it receives it, and no
-        // separate notice repeats it.
+        items.push(turnEndItem(event, "failed", failureText));
+        // A compaction failure names its outcome and keeps the recorded
+        // provider text behind Details. The turn's own failed compaction
+        // landmark is the one place that shows it: it receives the recorded
+        // text, and no separate notice repeats it.
         // Retry reopens the same logical turn, so only a landmark from this
         // attempt (after the turn's previous settlement) can own this failure.
+        const failure = allowance ? null : presentTurnFailureText(t, failureText);
         let landmarkIndex = -1;
-        if (failure?.compaction && turnId !== null) {
+        if (failure?.detail !== undefined && turnId !== null) {
           // Skip the turn-end just pushed for this failure.
           for (let index = items.length - 2; index >= 0; index -= 1) {
             const item = items[index];
@@ -1995,7 +1929,6 @@ export function buildTimeline(
     }
   }
   if (pendingTurnSteps) items.push(pendingTurnSteps);
-  markRepeatedMachineRequests(items);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2089,7 +2022,6 @@ function humanInputItemFromResponse(
     questions,
     response: normalizedResponse,
     answers,
-    answeredByAgent: payload.respondedByKind === "agent_attempt",
     occurredAt: event.occurredAt,
   };
 }
@@ -2247,26 +2179,6 @@ function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
     ...next,
     ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
   };
-}
-
-const CONNECTED_MACHINE_CARD_ID = "api:connected-machine";
-
-/**
- * An agent that is refused a machine often asks again in later turns. Only the
- * newest Connected Machine card for the same request stays a full card; earlier
- * ones become a short note, so a chat never piles up copies of the same card.
- * Cards that name different machines, or ask for Chrome rather than a machine,
- * are separate requests.
- */
-function markRepeatedMachineRequests(items: TimelineItem[]): void {
-  const seen = new Set<string>();
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index]!;
-    if (item.kind !== "auth-needed" || item.capability?.id !== CONNECTED_MACHINE_CARD_ID) continue;
-    const key = `${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
-    if (seen.has(key)) item.askedAgainLater = true;
-    else seen.add(key);
-  }
 }
 
 /**
@@ -2445,16 +2357,15 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
   const seenTurns = new Set<string>();
   const settlements = new Map<
     string,
-    { endedAt: string; outcome?: Work["outcome"]; failureText?: string; failureDetail?: string }
+    { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   // Turns that handed over to a Steer instead of finishing.
   const handedOverTurns = new Set<string>();
   const messages = new Map<string, AgentMessageItem[]>();
-  // Spans per turn in which the agent was not working: capacity waits (a live
-  // one is carried by the turn's work row instead of a separate warning) and
-  // the time between a failed attempt and the Retry that reopened the turn.
-  const idleSpans = new Map<string, Array<{ startedAt: string; endedAt?: string }>>();
+  // Capacity waits per turn: their spans are not work, and a live one is
+  // carried by the turn's work row instead of a separate warning.
+  const capacityPauses = new Map<string, Array<{ startedAt: string; endedAt?: string }>>();
   const liveCapacityWaits = new Map<string, NoticeItem>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
   const itemOrder = new Map(items.map((item, index) => [item.id, index]));
@@ -2535,7 +2446,6 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
           group.work!.endedAt = settlement.endedAt;
           if (settlement.outcome) group.outcome = settlement.outcome;
           if (settlement.failureText) group.failureText = settlement.failureText;
-          if (settlement.failureDetail) group.failureDetail = settlement.failureDetail;
         }
         turns.set(key, group);
         const firstMessageIndex =
@@ -2572,12 +2482,12 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "notice" && item.capacityWait) {
-      const pauses = idleSpans.get(key) ?? [];
+      const pauses = capacityPauses.get(key) ?? [];
       pauses.push({
         startedAt: item.occurredAt,
         ...(item.resolvedAt ? { endedAt: item.resolvedAt } : {}),
       });
-      idleSpans.set(key, pauses);
+      capacityPauses.set(key, pauses);
       if (!item.resolvedAt) {
         if (settlements.has(key)) groups.push({ kind: "item", item });
         else {
@@ -2587,17 +2497,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
     } else if (item.kind === "turn-end") {
       if (item.handedOver) handedOverTurns.add(key);
-      if (item.resumedAt) {
-        idleSpans.set(key, [
-          ...(idleSpans.get(key) ?? []),
-          { startedAt: item.occurredAt, endedAt: item.resumedAt },
-        ]);
-      } else {
+      if (!item.resumedAt) {
         settlements.set(key, {
           endedAt: item.occurredAt,
           outcome: item.outcome,
           ...(item.failureText ? { failureText: item.failureText } : {}),
-          ...(item.failureDetail ? { failureDetail: item.failureDetail } : {}),
         });
       }
       const group = turns.get(key);
@@ -2610,11 +2514,6 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
               id: item.id,
               tone: "failed",
               text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
-              ...(item.failureDetail
-                ? {
-                    details: { label: t("timeline.projection.details"), value: item.failureDetail },
-                  }
-                : {}),
               occurredAt: item.occurredAt,
             },
           });
@@ -2622,7 +2521,6 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         }
         group.outcome = item.outcome;
         if (item.failureText) group.failureText = item.failureText;
-        if (item.failureDetail) group.failureDetail = item.failureDetail;
         group.work.endedAt = item.occurredAt;
       }
     } else if (item.kind === "context-compaction" && item.phase === "compacted") {
@@ -2652,10 +2550,6 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       const group = turns.get(currentTurn);
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
-    } else if (isAgentWorkHumanInput(item)) {
-      // A question an agent answered or skipped is agent work, like a tool
-      // call: it folds into its turn's work details, never the person's side.
-      workForTurn().work!.details.push({ kind: "item", item });
     } else {
       const current = turns.get(currentTurn)?.work;
       // A live approval wait is carried by the turn header ("Waiting for you")
@@ -2741,7 +2635,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         untimed: true,
       };
     }
-    const pausedMs = (idleSpans.get(key) ?? []).reduce((total, pause) => {
+    const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
       if (!pause.endedAt) return total;
       const start = Math.max(Date.parse(work.startedAt), Date.parse(pause.startedAt));
       const end = Math.min(
@@ -2867,16 +2761,13 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      // The work row leads the first visible reply of the turn. A live turn
-      // whose answer is already declared puts the row there too, so the answer
-      // being read stays put when the turn settles instead of hopping past it.
+      // The work row leads the first visible reply of the turn.
       const anchor = Math.min(
         ...[...responses].map((message) => positions.get(message) ?? groups.length),
       );
-      if (anchor < (nextBoundary.get(group) ?? groups.length)) {
+      if (settledAt && anchor < (nextBoundary.get(group) ?? groups.length)) {
         beforeRows.set(groups[anchor]!, group);
         movedRows.add(group);
-        continue;
       }
     }
     if (!settledAt) {
@@ -3118,11 +3009,9 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
   "agent_steer_instruction",
   "child_terminal_result",
   "child_requires_action_resolved",
-  "secret_use_approval_decided",
   "child_paused",
   "child_waiting_capacity",
   "child_progress",
-  "capability_setup_completed",
 ]);
 
 /* --- helpers ---------------------------------------------------------------- */
@@ -3385,7 +3274,6 @@ function turnEndItem(
   event: SessionEvent,
   outcome: TurnEndItem["outcome"],
   failureText: string | null,
-  failureDetail?: string,
 ): TurnEndItem {
   return {
     kind: "turn-end",
@@ -3393,7 +3281,6 @@ function turnEndItem(
     turnId: event.turnId ?? null,
     outcome,
     failureText,
-    ...(failureDetail ? { failureDetail } : {}),
     occurredAt: event.occurredAt,
   };
 }
@@ -3482,7 +3369,6 @@ function applyTurnOutcome(
   group.outcome = hasFailed ? "failed" : hasInterrupted ? "cancelled" : "complete";
   if (turnEnd.failureText && hasFailed) {
     group.failureText = turnEnd.failureText;
-    if (turnEnd.failureDetail) group.failureDetail = turnEnd.failureDetail;
   }
 }
 
@@ -3593,7 +3479,6 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   };
   if (turnEnd.failureText) {
     turnGroup.failureText = turnEnd.failureText;
-    if (turnEnd.failureDetail) turnGroup.failureDetail = turnEnd.failureDetail;
   }
 
   groups.splice(startIndex, collectedLength, turnGroup, ...keptNotices, ...visibleMessages);
@@ -3820,13 +3705,11 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "agent_steer_instruction",
     "child_terminal_result",
     "media_generation_result",
-    "secret_use_approval_decided",
     "child_requires_action",
     "child_requires_action_resolved",
     "child_paused",
     "child_waiting_capacity",
     "child_progress",
-    "capability_setup_completed",
   ]);
   const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
     "success",
@@ -4020,21 +3903,23 @@ function toolCallTruncation(payload: Record<string, unknown>): ToolCallTruncatio
 function findOpenCall(
   items: TimelineItem[],
   callId: string | null,
-  callsById: ReadonlyMap<string, ToolCallItem | WorkerItem>,
 ): ToolCallItem | WorkerItem | undefined {
+  const reversed = [...items].reverse();
+  const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem =>
+    item.kind === "tool-call" || item.kind === "worker";
   if (callId) {
+    const byId = reversed.find((item) => isCall(item) && item.callId === callId);
+    if (byId) {
+      return byId as ToolCallItem | WorkerItem;
+    }
     // An explicit provider correlation id is authoritative. Falling back to
     // an unrelated running call corrupts its status/output when compact pages
     // or interleaved providers deliver an unmatched historical result.
-    return callsById.get(callId);
+    return undefined;
   }
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index]!;
-    if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
-      return item;
-    }
-  }
-  return undefined;
+  return reversed.find(
+    (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",
+  );
 }
 
 function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | undefined {
@@ -4092,19 +3977,10 @@ const SANDBOX_STARTUP_PHASES: Record<string, StartupPhase> = {
 const STARTUP_PHASES = new Set<StartupPhase>([
   "queue",
   "sandbox",
-  "credential_resolution",
-  "credential_mint",
-  "credential_materialization",
-  "client_publication",
-  "client_readiness",
-  "credential_seed",
-  "credential_hooks",
-  "artifact_runtime",
   "rig",
   "repository",
   "files",
   "tools",
-  "history",
   "model_preparation",
   "provider_first_byte",
 ]);
@@ -4113,12 +3989,6 @@ function elapsedDurationMs(startedAt: string, completedAt: string): number | nul
   const start = Date.parse(startedAt);
   const end = Date.parse(completedAt);
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
-}
-
-/** When a settled startup step ended, for ordering; unknown sorts last. */
-function failedAt(item: StartupPhaseItem): number {
-  const at = item.completedAt === null ? Number.NaN : Date.parse(item.completedAt);
-  return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
 }
 
 function failureMessage(t: OpenGeniText, payload: Record<string, unknown>): string | null {

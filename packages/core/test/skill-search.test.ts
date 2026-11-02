@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   createPublicSkillSearchClient,
   PublicSkillSearchError,

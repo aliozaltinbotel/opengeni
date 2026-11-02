@@ -27,9 +27,12 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const delegationSecret = "response-mcp-test-delegation-secret";
@@ -284,12 +287,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     const response = await send(app, f);
     expect(response.status).toBe(202);
     const event = (await response.json()) as SessionEvent;
-    // A person's human-input answer records who answered it.
-    expect(event.payload).toEqual(
-      type === "user.humanInputResponse"
-        ? { ...f.event.payload, respondedByKind: "human" }
-        : f.event.payload,
-    );
+    expect(event.payload).toEqual(f.event.payload);
     expect(signals).toEqual([2]);
     const server = await stored(f);
     expect(server).toMatchObject({

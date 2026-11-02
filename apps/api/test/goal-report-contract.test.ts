@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { DEFAULT_FIRST_PARTY_MCP_TOOLS, type AccessGrant } from "@opengeni/contracts";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { z } from "zod";
 

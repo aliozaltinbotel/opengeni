@@ -1,5 +1,4 @@
 import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
-import { deniedSessionToolFamiliesForOrganization } from "./http/organization-session-policy";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -10,18 +9,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolApproval } from "@opengeni/observability";
 import {
   CallToolRequestSchema,
-  ClientNotificationSchema,
-  ClientRequestSchema,
-  ErrorCode,
-  ListResourcesRequestSchema,
   ListToolsRequestSchema,
-  McpError,
-  ReadResourceRequestSchema,
-  ServerNotificationSchema,
-  ServerRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import { CODEX_APPS_MCP_SERVER_ID } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
@@ -35,17 +25,8 @@ import {
   ToolGatewayDeclarationsResponse,
   toolPolicyActionName,
   isSecretReferenceError,
-  MCP_APP_RESOURCE_MIME_TYPE,
-  mcpAppResourceUiMeta,
-  mcpAppToolUiMeta,
-  McpAppToolVisibilityUiMeta,
-  WORKSPACE_MCP_TOOL_REFUSAL_CODES,
-  isReadOnlyPermissionSet,
-  type McpAppToolUi,
-  type OrganizationAccessPreset,
-  type Permission,
-  type ToolGatewayCatalogEntry,
   type AccessGrant,
+  type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
   type ToolGatewayTarget,
@@ -71,7 +52,6 @@ import {
   type KnowledgeQueryWorkflowRequest,
   type ApiRouteDeps,
   siteViewerForGrant,
-  connectorToolGroup,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
@@ -95,8 +75,6 @@ import {
 } from "@opengeni/db";
 import {
   type LocalMcpServerRegistration,
-  type McpExtensionMethodHandler,
-  type McpResource,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -151,73 +129,6 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
-  /** Host servers serving MCP Apps views; absent unless a host registration lists resources. */
-  hostViewServers?: readonly HostViewServer[];
-  /** Host MCP extension methods; absent unless a host registration declares one. */
-  hostExtensionMethods?: readonly HostExtensionMethod[];
-  /**
-   * True for an MCP OAuth connection: the catalog holds only the tools frozen
-   * at consent, so a tool name outside it was not consented.
-   */
-  consentFrozen?: boolean;
-  /** Each used host tool server's published tool-set version, by server id. */
-  hostToolSetVersions?: Readonly<Record<string, string>>;
-  /**
-   * An MCP OAuth connection's tool-set versions at consent, by server id (null
-   * when it recorded none); `tools/list` shows them beside the current ones.
-   */
-  consentedToolSetVersions?: Readonly<Record<string, string>> | null;
-  /**
-   * True for an MCP OAuth connection whose consent chose a read-only level: a
-   * tool is callable and listed only while its current annotations still
-   * classify it as a read (see `mcpOAuthConsentReadsOnly`).
-   */
-  readToolsOnly?: boolean;
-};
-
-/** What an MCP OAuth connection's consent recorded, as its tool gateway applies it. */
-export type McpOAuthToolGatewayConsent = {
-  /** The access level the consent chose; null for an organization or a pre-level consent. */
-  preset?: OrganizationAccessPreset | null;
-  /** Each host tool server's tool-set version at consent, by server id. */
-  toolSetVersions?: Readonly<Record<string, string>> | null;
-};
-
-/**
- * Whether a consent limits its connection to read tools: Read only, or Custom
- * without any permission that changes something. It keys on the recorded
- * level, so a Full consent (or one recorded before levels existed) never
- * narrows, whatever the person's permissions.
- */
-export function mcpOAuthConsentReadsOnly(consent: {
-  preset: OrganizationAccessPreset | null;
-  permissions: readonly Permission[];
-}): boolean {
-  return (
-    consent.preset === "read_only" ||
-    (consent.preset === "custom" && isReadOnlyPermissionSet(consent.permissions))
-  );
-}
-
-/** Whether a catalog entry declares, by its annotations now, that it only reads. */
-export function workspaceToolDeclaresReadOnly(
-  entry: Pick<ToolGatewayCatalogEntry, "modelName" | "annotations">,
-): boolean {
-  return connectorToolGroup({ name: entry.modelName, annotations: entry.annotations }) === "read";
-}
-
-/** One MCP protocol-extension method a host tool server declares. */
-export type HostExtensionMethod = {
-  serverId: string;
-  method: string;
-  handler: McpExtensionMethodHandler;
-};
-
-/** One host tool server's MCP Apps view resources. */
-type HostViewServer = {
-  serverId: string;
-  listResources: NonNullable<LocalMcpServerRegistration["listResources"]>;
-  readResource?: LocalMcpServerRegistration["readResource"];
 };
 
 type WorkspaceSiteToolContext = {
@@ -608,21 +519,11 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities: readonly { serverId: string; toolName: string }[],
-  consent: McpOAuthToolGatewayConsent = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
-  const readToolsOnly = mcpOAuthConsentReadsOnly({
-    preset: consent.preset ?? null,
-    permissions: grant.permissions,
-  });
-  return {
-    ...(await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities)),
-    consentFrozen: true,
-    consentedToolSetVersions: consent.toolSetVersions ?? null,
-    ...(readToolsOnly ? { readToolsOnly } : {}),
-  };
+  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
 }
 
 export async function prepareWorkspaceToolGatewayForGrant(
@@ -990,36 +891,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ...input,
       ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
     });
-  // Host servers bind only to deployment-static entries, never to an entry a
-  // workspace installed. A workspace-installed id the host also returns is
-  // refused unless a static entry already shadows it (the static entry wins).
-  const staticServerIds = new Set(resolvedCatalog.settings.mcpServers.map(({ id }) => id));
-  const hostServers = await workspaceHostToolServers(routeDeps, {
-    grant,
-    signal: options.signal,
-    reservedIds: [
-      ...FIRST_PARTY_GATEWAY_SERVER_IDS,
-      CODEX_APPS_MCP_SERVER_ID,
-      ...[
-        ...capabilityServers.map(({ id }) => id),
-        ...integrations.map(({ serverId }) => serverId),
-      ].filter((id) => !staticServerIds.has(id)),
-    ],
-    staticIds: staticServerIds,
-    configuredIds: gatewayServerIds,
-  });
-  // The organization's session policy: refused families are never registered.
-  const deniedToolFamilies = gatewayServerIds.has("opengeni")
-    ? await deniedSessionToolFamiliesForOrganization(routeDeps, grant.accountId)
-    : [];
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
-      ? [
-          inMemoryMcpRegistration(
-            "opengeni",
-            buildOpenGeniMcpServer(deps, grant, { deniedToolFamilies }),
-          ),
-        ]
+      ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
       : []),
     ...(gatewayServerIds.has("files")
       ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]
@@ -1048,8 +922,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const apiIntegrationServers = buildApiIntegrationMcpServers({
     settings: gatewaySettings,
     integrations: expandApiIntegrationAccountRoutes({
-      // A static host entry wins over a workspace integration of the same id.
-      integrations: integrations.filter(({ serverId }) => !hostServers.staticIds.has(serverId)),
+      integrations,
       bindings: accountBindings,
       tools: allGatewayToolRefs(gatewaySettings),
     }),
@@ -1078,11 +951,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         codexAppsDesignation,
       )
     : undefined;
-  const localMcpServers = [
-    ...firstPartyServers,
-    ...apiIntegrationServers,
-    ...hostServers.registrations,
-  ];
+  const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
   const policyTargets = new Map(
     gatewaySettings.mcpServers.map((config) => {
       const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
@@ -1141,9 +1010,6 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             }),
         }),
         mapDefinition: (definition) => {
-          // Only a host tool server's own listing can attach an MCP Apps view.
-          const ui = hostServers.views.get(workspaceToolGatewayIdentityKey(definition.identity));
-          if (ui) definition = { ...definition, meta: { ui } };
           // Raw/local providers have no native credential revision. The legacy
           // gateway fallback binds the whole public catalog, including Ask/Allow
           // presentation. Targeted approvals instead use the runtime's existing
@@ -1246,32 +1112,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     await prepared.close().catch(() => undefined);
     options.signal.throwIfAborted();
   }
-  const hostViewServers = hostServers.registrations.flatMap(
-    ({ id, listResources, readResource }): HostViewServer[] =>
-      listResources
-        ? [{ serverId: id, listResources, ...(readResource ? { readResource } : {}) }]
-        : [],
-  );
-  const hostExtensionMethods = hostServers.registrations.flatMap(
-    ({ id, extensionMethods }): HostExtensionMethod[] =>
-      Object.entries(extensionMethods ?? {}).map(([method, handler]) => ({
-        serverId: id,
-        method,
-        handler,
-      })),
-  );
-  const hostToolSetVersions = Object.fromEntries(
-    hostServers.registrations.flatMap(({ id, toolSetVersion }) =>
-      isHostToolSetVersion(toolSetVersion) ? [[id, toolSetVersion] as const] : [],
-    ),
-  );
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
-    ...(hostViewServers.length > 0 ? { hostViewServers } : {}),
-    ...(hostExtensionMethods.length > 0 ? { hostExtensionMethods } : {}),
-    ...(Object.keys(hostToolSetVersions).length > 0 ? { hostToolSetVersions } : {}),
   };
 }
 
@@ -1362,31 +1206,16 @@ export function buildWorkspaceToolGatewayMcpServer(
   observability?: Observability,
 ): Server {
   const callableEntries = prepared.toolGatewayCatalog.entries.filter(
-    (entry) => entry.approval !== "human" && consentStillAllows(prepared, entry),
+    (entry) => entry.approval !== "human",
   );
-  const modelEntries = callableEntries.filter(
-    (entry) => !entry.meta?.ui?.visibility || entry.meta.ui.visibility.includes("model"),
-  );
-  const hostViewServers = prepared.hostViewServers ?? [];
-  const hostExtensionMethods = prepared.hostExtensionMethods ?? [];
   const server = new Server(
     { name: "opengeni-tool-gateway", version: "1.0.0" },
-    {
-      capabilities: {
-        tools: {},
-        ...(hostViewServers.length > 0 ? { resources: { listChanged: false } } : {}),
-        ...(hostExtensionMethods.length > 0
-          ? { experimental: hostExtensionCapabilities(hostExtensionMethods) }
-          : {}),
-      },
-    },
+    { capabilities: { tools: {} } },
   );
-  const toolSets = toolSetVersionsMeta(prepared);
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     await prepared.reauthorize?.();
     return {
-      ...(toolSets ? { _meta: { "opengeni/toolSets": toolSets } } : {}),
-      tools: modelEntries.map((entry) => ({
+      tools: callableEntries.map((entry) => ({
         name: entry.modelName,
         ...(entry.title ? { title: entry.title } : {}),
         ...(entry.description ? { description: entry.description } : {}),
@@ -1400,18 +1229,13 @@ export function buildWorkspaceToolGatewayMcpServer(
           "opengeni/source": entry.source,
           "opengeni/approval": entry.approval,
           "opengeni/catalogDigest": prepared.toolGatewayCatalog.digest,
-          ...(entry.meta?.ui ? { ui: entry.meta.ui } : {}),
         },
       })),
     };
   });
-  if (hostViewServers.length > 0)
-    registerHostViewResources(server, prepared, callableEntries, hostViewServers);
-  for (const extension of hostExtensionMethods)
-    registerHostExtensionMethod(server, prepared, grant, extension);
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const entry = modelEntries.find((candidate) => candidate.modelName === request.params.name);
-    if (!entry) throw toolNotCallableError(prepared, request.params.name);
+    const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
+    if (!entry) throw new ToolGatewayToolNotFoundError();
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
       operation: "call",
@@ -1439,160 +1263,6 @@ export function buildWorkspaceToolGatewayMcpServer(
     }
   });
   return server;
-}
-
-/**
- * The named refusal for a `tools/call` name this connection cannot call:
- * JSON-RPC `-32602` (MCP's answer to an unknown tool) with `data.code`. A
- * app-only tool answers `TOOL_NOT_MODEL_VISIBLE`; a model-visible tool listed
- * for a person to approve answers `TOOL_APPROVAL_REQUIRED`; any
- * other name answers `TOOL_NOT_CONSENTED` on an MCP OAuth connection, whose
- * catalog holds only the consented tools (so the answer reveals nothing about
- * tools outside the consent), and `TOOL_NOT_FOUND` otherwise.
- */
-function toolNotCallableError(prepared: PreparedWorkspaceToolGateway, name: string): McpError {
-  const namedEntry = prepared.toolGatewayCatalog.entries.find(
-    (entry) => entry.modelName === name && consentStillAllows(prepared, entry),
-  );
-  if (namedEntry?.meta?.ui?.visibility && !namedEntry.meta.ui.visibility.includes("model")) {
-    return new McpError(ErrorCode.InvalidParams, "This tool is not available to the model", {
-      code: WORKSPACE_MCP_TOOL_REFUSAL_CODES.notModelVisible,
-      name,
-    });
-  }
-  const approvalOnly = prepared.toolGatewayCatalog.entries.some(
-    (candidate) =>
-      candidate.modelName === name &&
-      candidate.approval === "human" &&
-      consentStillAllows(prepared, candidate),
-  );
-  const code = approvalOnly
-    ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.approvalRequired
-    : prepared.consentFrozen
-      ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.notConsented
-      : WORKSPACE_MCP_TOOL_REFUSAL_CODES.notFound;
-  const message = approvalOnly
-    ? "This tool needs a person's approval and cannot be called here"
-    : prepared.consentFrozen
-      ? "This connection was not authorized to use this tool"
-      : "No tool by this name is available";
-  return new McpError(ErrorCode.InvalidParams, message, { code, name });
-}
-
-/**
- * Whether the connection's consent still allows a catalog entry now: a
- * read-only consent froze tools that declared they only read, and a tool that
- * stops declaring it (same name, new annotations) leaves the connection.
- */
-function consentStillAllows(
-  prepared: PreparedWorkspaceToolGateway,
-  entry: Pick<ToolGatewayCatalogEntry, "modelName" | "annotations">,
-): boolean {
-  return !prepared.readToolsOnly || workspaceToolDeclaresReadOnly(entry);
-}
-
-/** MCP error for a resource that does not exist for this caller. */
-const MCP_RESOURCE_NOT_FOUND = -32002;
-
-/** `capabilities.experimental`: each host server's extension methods, under its id. */
-function hostExtensionCapabilities(
-  methods: readonly HostExtensionMethod[],
-): Record<string, { methods: string[] }> {
-  const capabilities: Record<string, { methods: string[] }> = {};
-  for (const { serverId, method } of methods)
-    (capabilities[serverId] ??= { methods: [] }).methods.push(method);
-  for (const capability of Object.values(capabilities)) capability.methods.sort();
-  return capabilities;
-}
-
-/**
- * Serves one host extension method. Every call first runs the same live
- * reauthorize step `tools/list` does, so revoked authority is refused before
- * the host handler runs. The handler gets the request's grant and abort
- * signal. An MCP error it raises (from any copy of the SDK) reaches the client
- * with its code, message and data; any other failure, or a result that is not
- * a JSON object, is a generic internal error.
- */
-function registerHostExtensionMethod(
-  server: Server,
-  prepared: PreparedWorkspaceToolGateway,
-  grant: AccessGrant,
-  { method, handler }: HostExtensionMethod,
-): void {
-  const request = z.object({ method: z.literal(method), params: z.unknown().optional() });
-  server.setRequestHandler(request, async ({ params }, extra) => {
-    await prepared.reauthorize?.();
-    let result: unknown;
-    try {
-      result = await handler(params, { grant, signal: extra.signal });
-    } catch (error) {
-      throw hostMcpError(error) ?? new McpError(ErrorCode.InternalError, "Extension method failed");
-    }
-    if (typeof result !== "object" || result === null || Array.isArray(result))
-      throw new McpError(ErrorCode.InternalError, "Extension method failed");
-    return result as Record<string, unknown>;
-  });
-}
-
-/**
- * Serves host MCP Apps views. A view is reachable only through a tool this
- * caller's MCP catalog lists, and only from that tool's own host server; every
- * other URI answers "resource not found", without revealing whether it exists.
- */
-function registerHostViewResources(
-  server: Server,
-  prepared: PreparedWorkspaceToolGateway,
-  callableEntries: readonly PreparedWorkspaceToolGateway["toolGatewayCatalog"]["entries"][number][],
-  hostViewServers: readonly HostViewServer[],
-): void {
-  const hosts = new Map(hostViewServers.map((host) => [host.serverId, host]));
-  const viewServers = new Map<string, HostViewServer>();
-  for (const entry of callableEntries) {
-    const ui = entry.meta?.ui;
-    const uri = ui && "resourceUri" in ui ? ui.resourceUri : undefined;
-    const host = hosts.get(entry.identity.serverId);
-    if (uri && host && !viewServers.has(uri)) viewServers.set(uri, host);
-  }
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
-    await prepared.reauthorize?.();
-    const listed = await Promise.all(
-      [...new Set(viewServers.values())].map(async (host) =>
-        (await host.listResources()).filter(({ uri }) => viewServers.get(uri) === host),
-      ),
-    );
-    const seen = new Set<string>();
-    const resources: McpResource[] = [];
-    for (const resource of listed.flat()) {
-      if (seen.has(resource.uri)) continue;
-      seen.add(resource.uri);
-      resources.push(resource);
-    }
-    return { resources };
-  });
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    // Authority first, so a revoked caller gets one answer for every URI and
-    // learns nothing about which views exist.
-    await prepared.reauthorize?.();
-    const { uri } = request.params;
-    const notFound = () => new McpError(MCP_RESOURCE_NOT_FOUND, "Resource not found", { uri });
-    const host = viewServers.get(uri);
-    if (!host?.readResource) throw notFound();
-    const view = await host.readResource(uri);
-    if (view?.mimeType !== MCP_APP_RESOURCE_MIME_TYPE || typeof view.text !== "string")
-      throw notFound();
-    // The view's own MCP Apps `_meta.ui` (CSP, permissions, domain, border).
-    const ui = mcpAppResourceUiMeta(view._meta);
-    return {
-      contents: [
-        {
-          uri,
-          mimeType: MCP_APP_RESOURCE_MIME_TYPE,
-          text: view.text,
-          ...(ui ? { _meta: { ui } } : {}),
-        },
-      ],
-    };
-  });
 }
 
 export async function callWorkspaceToolGateway(
@@ -1909,244 +1579,6 @@ function workspaceToolGatewayOutcome(error: unknown) {
   return "failed" as const;
 }
 
-export const HOST_TOOL_SERVER_ID_CONFLICT = "HOST_TOOL_SERVER_ID_CONFLICT";
-export const HOST_MCP_METHOD_CONFLICT = "HOST_MCP_METHOD_CONFLICT";
-
-/** Why a host extension method was refused. */
-export type HostMcpMethodConflictReason =
-  | "invalid_name"
-  | "core_method"
-  | "core_namespace"
-  | "duplicate";
-
-/** A host extension method that is malformed or would shadow another handler. */
-export class HostMcpMethodConflictError extends Error {
-  readonly code = HOST_MCP_METHOD_CONFLICT;
-  constructor(
-    readonly serverId: string,
-    readonly method: string,
-    readonly reason: HostMcpMethodConflictReason,
-  ) {
-    super(`host MCP extension method ${method} from ${serverId} is refused: ${reason}`);
-    this.name = "HostMcpMethodConflictError";
-  }
-}
-
-/**
- * A fork-owned copy of an MCP error the host raised, recognised structurally as
- * the SDK's own protocol layer does: the host may use another copy or major
- * version of the SDK, so `instanceof McpError` would miss it. SDK v1 raises
- * `McpError`; SDK v2 raises `ProtocolError` (and subclasses, which keep that
- * name). Null for any other value.
- */
-function hostMcpError(error: unknown): McpError | null {
-  if (!(error instanceof Error) || !HOST_MCP_ERROR_NAMES.has(error.name)) return null;
-  const { code, data } = error as { code?: unknown; data?: unknown };
-  if (typeof code !== "number" || !Number.isSafeInteger(code)) return null;
-  // v1 McpError prefixes its message; drop that so the copy does not repeat
-  // it. A v2 ProtocolError message has no prefix and is kept as raised.
-  const message =
-    error.name === "McpError" ? error.message.replace(/^MCP error -?\d+: /u, "") : error.message;
-  return new McpError(code, message, data);
-}
-
-const HOST_MCP_ERROR_NAMES: ReadonlySet<string> = new Set(["McpError", "ProtocolError"]);
-
-const HOST_MCP_METHOD_NAME = /^[a-z]+\/[a-z_]+$/u;
-
-/** A protocol message union of the MCP SDK, read for its method literals. */
-type McpProtocolUnion = { options: readonly { shape: { method: { value: string } } }[] };
-const MCP_PROTOCOL_UNIONS: readonly McpProtocolUnion[] = [
-  ClientRequestSchema,
-  ServerRequestSchema,
-  ClientNotificationSchema,
-  ServerNotificationSchema,
-];
-
-/** Every request and notification method of the MCP SDK's protocol schemas. */
-const CORE_MCP_METHODS: ReadonlySet<string> = new Set(
-  MCP_PROTOCOL_UNIONS.flatMap(({ options }) => options.map(({ shape }) => shape.method.value)),
-);
-
-/**
- * Every namespace of a core method (`tools`, `resources`, `notifications`, …),
- * reserved whole so a later SDK method there can never collide with a host's.
- */
-const CORE_MCP_NAMESPACES: ReadonlySet<string> = new Set(
-  [...CORE_MCP_METHODS].map((method) => method.split("/")[0]!),
-);
-
-/**
- * The first refused extension method across all registrations: a name outside
- * `^[a-z]+/[a-z_]+$`, a core MCP method, any name in a core method's namespace
- * (including `notifications/`, never a request), or a method two registrations
- * declare.
- */
-function hostExtensionMethodConflict(
-  registrations: readonly LocalMcpServerRegistration[],
-): HostMcpMethodConflictError | null {
-  const declared = new Set<string>();
-  for (const { id, extensionMethods } of registrations) {
-    for (const method of Object.keys(extensionMethods ?? {})) {
-      if (!HOST_MCP_METHOD_NAME.test(method))
-        return new HostMcpMethodConflictError(id, method, "invalid_name");
-      if (CORE_MCP_METHODS.has(method))
-        return new HostMcpMethodConflictError(id, method, "core_method");
-      if (CORE_MCP_NAMESPACES.has(method.split("/")[0]!))
-        return new HostMcpMethodConflictError(id, method, "core_namespace");
-      if (declared.has(method)) return new HostMcpMethodConflictError(id, method, "duplicate");
-      declared.add(method);
-    }
-  }
-  return null;
-}
-
-/** A host's declared tool-set version: 1–256 characters; anything else is ignored. */
-function isHostToolSetVersion(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256;
-}
-
-/**
- * `tools/list` result `_meta["opengeni/toolSets"]`: for each host tool server
- * that publishes a tool-set version, its current `version` and, on an MCP
- * OAuth connection, the `consentedVersion` recorded at consent (null when the
- * consent recorded none). A client asks the person to consent again when
- * they differ. Absent when no used host server publishes a version.
- */
-function toolSetVersionsMeta(
-  prepared: PreparedWorkspaceToolGateway,
-): Record<string, { version: string; consentedVersion?: string | null }> | null {
-  const current = prepared.hostToolSetVersions;
-  if (!current || Object.keys(current).length === 0) return null;
-  return Object.fromEntries(
-    Object.entries(current).map(([serverId, version]) => [
-      serverId,
-      prepared.consentFrozen
-        ? { version, consentedVersion: prepared.consentedToolSetVersions?.[serverId] ?? null }
-        : { version },
-    ]),
-  );
-}
-
-/** A host tool-server registration that would shadow another gateway server. */
-export class HostToolServerIdConflictError extends Error {
-  readonly code = HOST_TOOL_SERVER_ID_CONFLICT;
-  constructor(readonly serverId: string) {
-    super(`host tool server id conflicts with another gateway server: ${serverId}`);
-    this.name = "HostToolServerIdConflictError";
-  }
-}
-
-const FIRST_PARTY_GATEWAY_SERVER_IDS = ["opengeni", "files", "docs"] as const;
-
-/**
- * The embedding host's in-process servers for this grant. Every registration is
- * checked for an id conflict first, so a reserved id is refused even when the
- * grant's settings omit that server. Only ids with a deployment-static entry
- * configured for this gateway are then kept; `staticIds` names every returned
- * id with a static entry, for any target. Registrations the gateway will not
- * own are closed here.
- */
-async function workspaceHostToolServers(
-  routeDeps: Pick<ApiRouteDeps, "workspaceToolServers">,
-  input: {
-    grant: AccessGrant;
-    signal: AbortSignal | undefined;
-    reservedIds: readonly string[];
-    staticIds: ReadonlySet<string>;
-    configuredIds: ReadonlySet<string>;
-  },
-): Promise<{
-  registrations: LocalMcpServerRegistration[];
-  staticIds: ReadonlySet<string>;
-  views: ReadonlyMap<string, McpAppToolUi>;
-}> {
-  const port = routeDeps.workspaceToolServers;
-  const views = new Map<string, McpAppToolUi>();
-  if (!port) return { registrations: [], staticIds: new Set(), views };
-  const registrations = await port({
-    grant: input.grant,
-    ...(input.signal ? { signal: input.signal } : {}),
-  });
-  const close = async (items: readonly LocalMcpServerRegistration[]) => {
-    await Promise.allSettled(items.map(async ({ server }) => await server.close()));
-  };
-  const seen = new Set<string>(input.reservedIds);
-  for (const registration of registrations) {
-    if (seen.has(registration.id)) {
-      await close(registrations);
-      throw new HostToolServerIdConflictError(registration.id);
-    }
-    seen.add(registration.id);
-  }
-  const methodConflict = hostExtensionMethodConflict(registrations);
-  if (methodConflict) {
-    await close(registrations);
-    throw methodConflict;
-  }
-  const owned = (id: string) => input.staticIds.has(id) && input.configuredIds.has(id);
-  await close(registrations.filter(({ id }) => !owned(id)));
-  return {
-    // Best-effort for listing: a host server that cannot list is left out of
-    // the catalog like a failed connector; calls to its tools still fail loud.
-    registrations: registrations
-      .filter(({ id }) => owned(id))
-      .map((registration) => ({
-        ...recordingHostViews(registration, views),
-        listingBestEffort: true,
-      })),
-    staticIds: new Set(registrations.map(({ id }) => id).filter((id) => input.staticIds.has(id))),
-    views,
-  };
-}
-
-/**
- * The registration with its server's `tools/list` observed: each listed tool's
- * MCP Apps `_meta.ui` (its view and `visibility`, see `mcpAppToolUiMeta`) is
- * recorded under its gateway identity key, and a tool without a well-formed
- * one has none. A malformed `visibility` falls open to the default, so it is
- * logged as a host registration warning. The listing itself passes unchanged.
- */
-function recordingHostViews(
-  registration: LocalMcpServerRegistration,
-  views: Map<string, McpAppToolUi>,
-): LocalMcpServerRegistration {
-  const listTools: LocalMcpServerRegistration["server"]["listTools"] = async () => {
-    const tools = await registration.server.listTools();
-    for (const tool of tools) {
-      const key = workspaceToolGatewayIdentityKey({
-        serverId: registration.id,
-        toolName: tool.name,
-      });
-      const meta = "_meta" in tool ? tool._meta : undefined;
-      const ui = mcpAppToolUiMeta(meta);
-      if (ui) views.set(key, ui);
-      else views.delete(key);
-      if (hasMalformedMcpAppVisibility(meta))
-        console.warn("[workspace-mcp] host tool _meta.ui.visibility is malformed; ignored", {
-          serverId: registration.id,
-          toolName: tool.name,
-        });
-    }
-    return tools;
-  };
-  const server = new Proxy(registration.server, {
-    get(target, property) {
-      if (property === "listTools") return listTools;
-      const value: unknown = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-  return { ...registration, server };
-}
-
-/** Whether a tool's `_meta.ui` names a `visibility` that is not well formed. */
-function hasMalformedMcpAppVisibility(meta: unknown): boolean {
-  const ui = typeof meta === "object" && meta !== null ? (meta as { ui?: unknown }).ui : undefined;
-  if (typeof ui !== "object" || ui === null || !("visibility" in ui)) return false;
-  return !McpAppToolVisibilityUiMeta.shape.visibility.safeParse(ui.visibility).success;
-}
-
 function allGatewayToolRefs(settings: Settings): ToolRef[] {
   return settings.mcpServers.map((server) => ({
     kind: "mcp" as const,
@@ -2201,6 +1633,10 @@ async function inMemoryMcpRegistration(
       invalidateToolsCache: async () => undefined,
     },
   };
+}
+
+export function toolGatewayCatalogResponse(catalog: ToolGatewayCatalog): ToolGatewayCatalog {
+  return catalog;
 }
 
 export function workspaceToolGatewayDeclarations(

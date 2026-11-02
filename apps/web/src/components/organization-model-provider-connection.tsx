@@ -8,15 +8,10 @@ import {
 import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
-  OrganizationModelCatalogProviderKind as ProviderKind,
+  OrganizationModelProviderKind as ProviderKind,
   OrganizationProviderCustomModel as CustomModel,
 } from "@opengeni/sdk";
-import {
-  DirectModelName,
-  WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH,
-  type OrganizationModelProviderAuthMethod,
-  type OrganizationModelProviderEntraAuthentication,
-} from "@opengeni/contracts";
+import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -31,24 +26,9 @@ import {
   useSharedQuery,
 } from "@opengeni/react/app/lib/shared-query";
 
-// Organization API-key providers (Vercel AI Gateway, OpenRouter, Opper, Azure
-// OpenAI) shared with the organization's workspaces. Returns the same view as the
-// workspace hook, so Organization settings > Models reuses the row and the
-// provider's page. Azure OpenAI saves its resource endpoint with the key, and its
-// custom models are deployment names the API checks against that endpoint. It
-// can also sign in with Microsoft Entra ID instead of a key: the organization's
-// own app, or this deployment's identity when the operator offers it.
-
-/** Whether `slug` is an upstream id this provider accepts. */
-function upstreamIdValid(providerKind: ProviderKind, slug: string): boolean {
-  if (providerKind === "openai" || providerKind === "azure_openai") {
-    // An exact OpenAI model or Azure deployment name: no surrounding whitespace to trim away.
-    return slug.trim() === slug && DirectModelName.safeParse(slug).success;
-  }
-  return (
-    slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH && /^[!-{}-~]+$/.test(slug)
-  );
-}
+// Organization API-key providers (Vercel AI Gateway, OpenRouter, Opper) shared with
+// the organization's workspaces. Returns the same view as the workspace hook,
+// so Organization settings > Models reuses the row and the provider's page.
 
 export function useOrganizationProviderConnection({
   organizationId,
@@ -56,15 +36,12 @@ export function useOrganizationProviderConnection({
   client,
   enabled = true,
   catalogConnection,
-  azureDeploymentIdentity = false,
 }: {
   organizationId: string;
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
   enabled?: boolean;
   catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
-  /** Azure OpenAI: the deployment offers its own identity to organizations. */
-  azureDeploymentIdentity?: boolean;
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const hasCatalogConnection = Boolean(catalogConnection);
@@ -115,7 +92,6 @@ export function useOrganizationProviderConnection({
   const epoch = epochRef.current;
   const pendingSaveRef = useRef<{
     key: string;
-    endpoint: string | undefined;
     version: number;
     operationId: string;
   } | null>(null);
@@ -143,39 +119,19 @@ export function useOrganizationProviderConnection({
   }, [epoch]);
 
   const connected = catalogConnection?.connected ?? connection?.status === "active";
-  const noun = meta.customModelNoun ?? "model";
 
-  const azure = providerKind === "azure_openai";
-  // The organization's own OpenAI or Azure key: each model is checked with it
-  // before it is saved, so models can only be added once it is connected.
-  const direct = azure || providerKind === "openai";
-  const slugValid = upstreamIdValid(providerKind, slug);
+  const slugValid =
+    slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
+    /^[!-{}-~]+$/.test(slug);
   const slugExists = models.some((model) => model.upstreamModelId === slug);
   const slugInvalid = slug.length > 0 && (!slugValid || slugExists);
-  const slugHelp =
-    providerKind === "openai"
-      ? slugExists
-        ? "That model is already added."
-        : slug && !slugValid
-          ? "Use the exact model ID: letters, numbers, dots, underscores or hyphens."
-          : connected
-            ? "Enter the exact model ID, as OpenAI lists it."
-            : "Models can be added after OpenAI is connected."
-      : azure
-        ? slugExists
-          ? "That deployment is already added."
-          : slug && !slugValid
-            ? "Use the exact deployment name: letters, numbers, dots, underscores or hyphens."
-            : connected
-              ? "Enter the exact deployment name from your Azure OpenAI resource."
-              : "Deployments can be added after Azure OpenAI is connected."
-        : slugExists
-          ? "That exact model slug is already configured."
-          : slug && !slugValid
-            ? "Use the exact printable model slug with no spaces or |."
-            : connected
-              ? "It becomes selectable in shared workspaces when workspace policy allows it."
-              : `Add models now; they become selectable after ${meta.shortName} is connected.`;
+  const slugHelp = slugExists
+    ? "That exact model slug is already configured."
+    : slug && !slugValid
+      ? "Use the exact printable model slug with no spaces or |."
+      : connected
+        ? "It becomes selectable in shared workspaces when workspace policy allows it."
+        : `Add models now; they become selectable after ${meta.shortName} is connected.`;
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
     if (!enabled || hasCatalogConnection) return undefined;
@@ -214,42 +170,28 @@ export function useOrganizationProviderConnection({
     return snapshot?.error ? undefined : (snapshot?.data ?? undefined);
   }, [client, organizationId, providerKind, enabled, readModels]);
 
-  async function saveKey(
-    apiKey: string,
-    options?: {
-      endpoint?: string | undefined;
-      authentication?: OrganizationModelProviderEntraAuthentication | undefined;
-    },
-  ): Promise<boolean> {
+  async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
-    const endpoint = azure ? options?.endpoint?.trim() : undefined;
-    const authentication = azure ? options?.authentication : undefined;
-    if (!epoch.active || !enabled || catalogConnection || connectionBusy) return false;
-    if (!key && !authentication) return false;
-    if (azure && !endpoint) return false;
+    if (!epoch.active || !enabled || !key || catalogConnection || connectionBusy) return false;
     const write = sharedQueryWriter(client);
-    const credentialIdentity = authentication ? JSON.stringify(authentication) : key;
+    const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
-    // A changed endpoint is a different request, so it gets its own operation.
     const operationId =
-      pending?.key === credentialIdentity &&
-      pending.endpoint === endpoint &&
-      pending.version === version
+      pending?.key === credentialIdentity && pending.version === version
         ? pending.operationId
         : crypto.randomUUID();
-    pendingSaveRef.current = { key: credentialIdentity, endpoint, version, operationId };
+    pendingSaveRef.current = { key: credentialIdentity, version, operationId };
     setConnectionBusy(true);
     const journey = beginIntegrationConnect(
       modelConnectionClass(providerKind) ?? "other",
-      authentication ? "custom" : "api_key",
+      "api_key",
     );
     const mutate = () =>
       client.upsertOrganizationModelProviderConnection(organizationId, providerKind, {
         operationId,
         expectedVersion: version,
-        ...(authentication ? { authentication } : { apiKey: key }),
-        ...(endpoint ? { endpoint } : {}),
+        apiKey: key,
       });
     const commit = (saved: Connection) => {
       journey.finish("connected");
@@ -336,10 +278,9 @@ export function useOrganizationProviderConnection({
       !enabled ||
       modelBusy ||
       !submittedSlug ||
-      !upstreamIdValid(providerKind, submittedSlug) ||
-      models.some((model) => model.upstreamModelId === submittedSlug) ||
-      // OpenAI and Azure check each model with the connected key.
-      (direct && !connected)
+      submittedSlug.length > WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH ||
+      !/^[!-{}-~]+$/.test(submittedSlug) ||
+      models.some((model) => model.upstreamModelId === submittedSlug)
     )
       return;
     const pending = pendingCreateRef.current;
@@ -369,7 +310,7 @@ export function useOrganizationProviderConnection({
       if (!epoch.active) return;
       pendingCreateRef.current = null;
       setSlug((current) => (current === submittedSlug ? "" : current));
-      toast.success(`${meta.title} ${noun} added`, {
+      toast.success(`${meta.title} model added`, {
         description: connected
           ? "It can now appear in shared-workspace model pickers."
           : `It will become selectable after ${meta.shortName} is connected.`,
@@ -379,10 +320,7 @@ export function useOrganizationProviderConnection({
       let saved: CustomModel;
       try {
         saved = await mutate();
-      } catch (error) {
-        // A model the API refused was checked with OpenAI or Azure; asking
-        // again would only repeat that check. Retry only a lost response.
-        if (direct && error instanceof OpenGeniApiError && !error.outcomeUnknown) throw error;
+      } catch {
         saved = await mutate();
       }
       commit(saved);
@@ -393,7 +331,7 @@ export function useOrganizationProviderConnection({
       const committed = reconciled?.find((model) => model.upstreamModelId === submittedSlug);
       if (committed) commit(committed);
       else
-        toast.error(`Couldn't add ${meta.title} ${noun}`, {
+        toast.error(`Couldn't add ${meta.title} model`, {
           description: userErrorText(error),
         });
     } finally {
@@ -424,7 +362,7 @@ export function useOrganizationProviderConnection({
       void invalidateSharedQueries(client, ["model-settings"]);
       if (!epoch.active) return;
       pendingDeletesRef.current.delete(model.id);
-      toast.success(`${meta.title} ${noun} removed`);
+      toast.success(`${meta.title} model removed`);
     };
     try {
       try {
@@ -442,7 +380,7 @@ export function useOrganizationProviderConnection({
         commit();
         return true;
       }
-      toast.error(`Couldn't remove ${meta.title} ${noun}`, {
+      toast.error(`Couldn't remove ${meta.title} model`, {
         description: userErrorText(error),
       });
       return false;
@@ -459,15 +397,6 @@ export function useOrganizationProviderConnection({
     canManageConnection: enabled && !catalogConnection,
     canManageCustomModels: enabled,
     connected,
-    endpoint: connection?.status === "active" ? connection.endpoint : undefined,
-    authMethod: connection?.status === "active" ? connection.authMethod : undefined,
-    signInMethods: azure
-      ? ([
-          "api_key",
-          "entra_client_secret",
-          ...(azureDeploymentIdentity ? (["entra_deployment_identity"] as const) : []),
-        ] satisfies OrganizationModelProviderAuthMethod[])
-      : undefined,
     settled: !enabled || ((catalogConnection?.loaded ?? loaded) && modelsLoaded),
     hidden: !enabled || Boolean(catalogConnection),
     error: catalogConnection?.error ?? connectionQuery.error,

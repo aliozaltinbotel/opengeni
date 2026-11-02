@@ -7,17 +7,15 @@ import type {
 import {
   buildSandboxImage,
   freePort,
-  startTestServices,
-  type TestServices,
-} from "@opengeni/testing/compose";
-import {
   runCommand,
   startE2eWorkerTopology,
   startProcess,
+  startTestServices,
   type StartedE2eWorkerTopology,
   type StartedProcess,
+  type TestServices,
   waitFor,
-} from "@opengeni/testing/process";
+} from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 let apiPort = 0;

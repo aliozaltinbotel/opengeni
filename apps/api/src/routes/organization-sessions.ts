@@ -28,7 +28,6 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { parseRequestQuery } from "../http/request-body";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 
 /**
@@ -147,10 +146,16 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
     const context = await requireAccessContext(c, deps);
     const readAuthority = requireOrganizationSessionReadAuthority(context, organizationId);
 
-    const query = parseRequestQuery(ListOrganizationSessionsQuery, c.req.query(), {
-      status: 400,
-      message: "invalid organization session list query",
-    });
+    const queryResult = ListOrganizationSessionsQuery.safeParse(c.req.query());
+    if (!queryResult.success) {
+      const issue = queryResult.error.issues[0];
+      throw new HTTPException(400, {
+        message: issue
+          ? `${issue.path.length > 0 ? `${issue.path.join(".")}: ` : ""}${issue.message}`
+          : "invalid organization session list query",
+      });
+    }
+    const query = queryResult.data;
     const cursor = query.cursor ? decodeOrganizationSessionListCursor(query.cursor) : null;
     if (query.cursor && !cursor) {
       throw new HTTPException(400, { message: "cursor is invalid" });

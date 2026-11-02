@@ -38,9 +38,12 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { registerApiKeyRoutes } from "../src/routes/api-keys";
@@ -49,7 +52,7 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerExternalIdentityLinkRoutes } from "../src/routes/external-identity-links";
 import { registerConnectRoutes } from "../src/routes/connect";
 
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { requireConnectOwnerAuthority } from "../src/integrations/connect-authority";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const delegationSecret = `personal-ws-session-surface-${crypto.randomUUID()}`;

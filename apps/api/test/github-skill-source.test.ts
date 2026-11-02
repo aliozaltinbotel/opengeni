@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 
-import { createGitHubSkillSourceClient } from "@opengeni/core";
+import { createGitHubSkillSourceClient } from "../src/integrations/github-skill-source";
 
 describe("GitHub Skill source transport", () => {
   test("allows base64 transport for a maximum-size Skill file", async () => {

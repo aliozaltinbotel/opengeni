@@ -4,13 +4,12 @@
 import { ChevronsLeftIcon, ChevronsRightIcon, SquarePenIcon, XIcon } from "lucide-react";
 import { createContext, useContext, type ReactNode } from "react";
 
-import { BrandMark, Wordmark, useProductName } from "../brand-mark";
+import { BrandMark, Wordmark } from "../brand-mark";
 import { useRail } from "./rail-context";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
-import { useActionShortcut } from "../../lib/actions/actions-provider";
-import { TooltipWithKeys } from "../command-menu/keycaps";
+import { NEW_SESSION_SHORTCUT, shortcutLabel } from "../../lib/keyboard-shortcuts";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { windowControlsInPage } from "../../lib/desktop";
@@ -64,8 +63,6 @@ export function SessionShellSlotsProvider({
 export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
   const { switcher } = useContext(SessionShellSlotsContext);
-  const sidebarKeys = useActionShortcut("view.sidebar");
-  const productName = useProductName();
   // Without the brand (an embed, or the macOS app whose window controls sit
   // in the row), the row holds just the collapse toggle, at its end.
   const brand = useSessionUiFeature("brand");
@@ -78,7 +75,6 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
           variant="ghost"
           size="icon-sm"
           aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-keyshortcuts={sidebarKeys?.ariaKeys}
           onClick={rail.toggleCollapsed}
           className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
         >
@@ -90,10 +86,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
         </Button>
       </TooltipTrigger>
       <TooltipContent side="right">
-        <TooltipWithKeys
-          label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          shortcut={sidebarKeys}
-        />
+        {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
       </TooltipContent>
     </Tooltip>
   ) : null;
@@ -112,7 +105,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: rail.workspaceId }}
             className="flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label={`${productName} home`}
+            aria-label="Opengeni home"
           >
             <BrandMark className="w-5" />
             {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}
@@ -146,11 +139,13 @@ export function PrimaryNav() {
   const { primaryNav } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
-  const newChatShortcut = useActionShortcut("chat.new");
+  const newChatShortcut = useSessionUiFeature("newChatShortcut");
   return (
     <div className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}>
       <NewSessionLink
-        aria-label={newChatShortcut ? `New session · ${newChatShortcut.label}` : "New session"}
+        aria-label={
+          newChatShortcut ? `New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}` : "New session"
+        }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-hidden transition-colors pointer-coarse:h-10",
           "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",

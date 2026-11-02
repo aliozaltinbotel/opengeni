@@ -33,7 +33,6 @@ import {
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
-import { webFeedbackContext } from "@opengeni/react/app/lib/feedback-capture";
 
 const FeedbackDialog = lazy(() =>
   import("@opengeni/react/app/components/feedback").then((module) => ({
@@ -92,13 +91,6 @@ export function RailFooter() {
             open={feedbackOpen}
             onOpenChange={setFeedbackOpen}
             onSubmitted={() => toast.success("Thanks for your feedback")}
-            screenshots
-            reportContext={() =>
-              webFeedbackContext({
-                serverVersion: context.clientConfig.serverVersion,
-                deploymentRevision: context.clientConfig.deploymentRevision,
-              })
-            }
           />
         </Suspense>
       ) : null}

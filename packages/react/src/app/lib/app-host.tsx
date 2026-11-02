@@ -9,35 +9,14 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
-  useMemo,
-  useRef,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
-import type { ToolRegistryEntry } from "../../timeline";
-import type { HostExtension, HostExtensionContext, HostExtensionStarter, NativeDestination, NativeSectionId } from "../host-extension";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
-import { createHostMessageContextStore, type MessageContextPill, type MessageContextStore } from "./message-context";
+import type { MessageContextPill, MessageContextStore } from "./message-context";
 import type { NavigationHost } from "./navigation";
-
-/** The open chat as its page holds it, for a host that reacts to its progress. */
-export type SessionViewState = Readonly<{
-  sessionId: string;
-  /** The latest status in the chat's event log; null before one is loaded. */
-  status: SessionStatus | null;
-  /**
-   * The events the page holds, ordered by sequence: its own window of the
-   * chat's history, with a turn's steps while the turn is live. Not the full
-   * history of a long chat.
-   */
-  events: readonly SessionEvent[];
-  /** True until the first page of history has loaded. */
-  initialLoading: boolean;
-}>;
 
 export type AppHost = Readonly<{
   navigation: NavigationHost;
@@ -51,34 +30,6 @@ export type AppHost = Readonly<{
    * instructions.
    */
   messageContext?: MessageContextStore | undefined;
-  extensionMessageContext?: HostExtension["messageContext"] | undefined;
-  /**
-   * Receives the open chat's state each time it changes, read from the
-   * page's own event stream (no second connection).
-   */
-  onSessionState?: ((state: SessionViewState) => void) | undefined;
-  /** The host extension's tool cards, ahead of the built-in renderers. */
-  toolRegistryEntries?: readonly ToolRegistryEntry[] | undefined;
-  /**
-   * More tool cards, loaded at most once, the first time a tool call has no
-   * known card (see `HostExtension.toolRegistryLoader`).
-   */
-  toolRegistryLoader?: (() => Promise<readonly ToolRegistryEntry[]>) | undefined;
-  /** Native destinations the host extension hides from every link source. */
-  hiddenNativeDestinations?: readonly NativeDestination[] | undefined;
-  hiddenNativeSections?: readonly NativeSectionId[] | undefined;
-  /** The host extension's mark and wordmark, in place of the stock brand. */
-  brand?: HostExtension["brand"] | undefined;
-  /** The product name the console shows in place of the stock one. */
-  productName?: string | undefined;
-  starters?: ((context: HostExtensionContext) => readonly HostExtensionStarter[] | undefined) | undefined;
-  sessionIndicator?: HostExtension["sessionIndicator"] | undefined;
-  commandMenuProviders?: HostExtension["commandMenuProviders"] | undefined;
-  utilities?: HostExtension["utilities"] | undefined;
-  /** Narrows the workspaces the console's pickers and landing offer (see `hostFilteredWorkspaces`). */
-  workspaceFilter?: HostExtension["workspaceFilter"] | undefined;
-  /** The host extension's hooks, awaited (bounded) before sign-out and workspace switches. */
-  lifecycle?: HostExtension["lifecycle"] | undefined;
 }>;
 
 const AppHostContext = createContext<AppHost | null>(null);
@@ -106,82 +57,14 @@ export function useAppHost(): Partial<AppHost> {
   return useContext(AppHostContext) ?? pageHost;
 }
 
-const NOTHING_HIDDEN: readonly NativeDestination[] = [];
-
-/** The native destinations the host extension hides; none in the stock console. */
-export function useHiddenNativeDestinations(): readonly NativeDestination[] {
-  return useAppHost().hiddenNativeDestinations ?? NOTHING_HIDDEN;
-}
-
-const NO_HIDDEN_SECTIONS: readonly NativeSectionId[] = [];
-export function useHiddenNativeSections(): readonly NativeSectionId[] {
-  return useAppHost().hiddenNativeSections ?? NO_HIDDEN_SECTIONS;
-}
-
-/** Whether a link to this native destination may be offered. */
-export function useNativeDestinationVisible(destination: NativeDestination): boolean {
-  return !useHiddenNativeDestinations().includes(destination);
-}
-
 /** Whether this app is embedded in a page it does not own. */
 export function useEmbedded(): boolean {
   return useContext(AppHostContext) !== null;
 }
 
-/** Tells the host the open chat's state each time it changes. */
-export function useReportSessionState(state: SessionViewState): void {
-  const report = useAppHost().onSessionState;
-  const { sessionId, status, events, initialLoading } = state;
-  useEffect(() => {
-    report?.({ sessionId, status, events, initialLoading });
-  }, [events, initialLoading, report, sessionId, status]);
-}
-
-const HostMessageContext = createContext<MessageContextStore | null>(null);
-
-/** A workspace-scoped context store shared by sends, realtime and composer pills. */
-export function HostMessageContextProvider({
-  context,
-  resolve,
-  children,
-}: {
-  context: HostExtensionContext;
-  resolve: HostExtension["messageContext"] | undefined;
-  children: ReactNode;
-}) {
-  const current = useRef({ context, resolve });
-  current.current = { context, resolve };
-  // The page store also serves new-chat creation above this workspace boundary.
-  const pageStore = useAppHost().messageContext;
-  const { workspaceId, pathname } = context;
-  const store = useMemo(() => {
-    if (!resolve) return null;
-    if (pageStore) return pageStore;
-    return createHostMessageContextStore(
-      (sourceContext) => current.current.resolve?.(sourceContext),
-      () => ({ ...current.current.context, workspaceId }),
-    );
-    // A workspace change retires all exclusions; ordinary renders retain them.
-  }, [workspaceId, resolve, pageStore]);
-  useEffect(() => {
-    store?.set(resolve?.({ workspaceId, pathname }));
-  }, [store, resolve, workspaceId, pathname]);
-  return (
-    <HostMessageContext.Provider value={store}>
-      {children}
-    </HostMessageContext.Provider>
-  );
-}
-
-function useContextStore(): MessageContextStore | undefined {
-  const supplied = useContext(HostMessageContext);
-  const host = useAppHost();
-  return supplied ?? host.messageContext;
-}
-
 /** Reads the host's per-message model context at send time, if it supplies one. */
 export function useHostMessageContext(): (() => string | undefined) | undefined {
-  const store = useContextStore();
+  const store = useAppHost().messageContext;
   const read = useCallback(() => store?.forSend(), [store]);
   return store ? read : undefined;
 }
@@ -195,7 +78,7 @@ export function useMessageContextPills(): {
   exclude: (id: string) => void;
   include: (id: string) => void;
 } {
-  const store = useContextStore();
+  const store = useAppHost().messageContext;
   const pills = useSyncExternalStore(
     store?.subscribe ?? noSubscription,
     store?.pills ?? (() => NO_PILLS),

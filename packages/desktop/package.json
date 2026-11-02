@@ -1,6 +1,7 @@
 {
   "name": "@opengeni/desktop",
-  "version": "5.3.1",
+  "version": "0.2.3",
+  "private": true,
   "description": "Electron kit for Opengeni desktop apps: several accounts on several servers, the server's own web app in a native window, native notifications, deep links, the menu bar item, updates, and one-click connection of the computer it runs on.",
   "license": "Apache-2.0",
   "repository": {
@@ -8,18 +9,13 @@
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "packages/desktop"
   },
-  "files": [
-    "src",
-    "dist"
-  ],
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./src/main/index.ts",
+  "types": "./src/main/index.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./src/main/index.ts",
+      "default": "./src/main/index.ts"
     },
     "./contract": {
       "types": "./src/contract.ts",
@@ -29,10 +25,6 @@
       "types": "./src/main/mac-login-agent.ts",
       "default": "./src/main/mac-login-agent.ts"
     },
-    "./system-audio": {
-      "types": "./src/main/system-audio.ts",
-      "default": "./src/main/system-audio.ts"
-    },
     "./preload": {
       "types": "./src/preload/content.ts",
       "default": "./src/preload/content.ts"
@@ -40,21 +32,11 @@
     "./preload/welcome": {
       "types": "./src/preload/welcome.ts",
       "default": "./src/preload/welcome.ts"
-    },
-    "./preload/system-audio": {
-      "types": "./src/preload/system-audio.ts",
-      "default": "./src/preload/system-audio.ts"
     }
-  },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsrs --noEmit -p tsconfig.json",
-    "build": "bun ../../scripts/build-typescript-package.ts",
-    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+    "typecheck": "tsrs --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@opengeni/agent-host": "workspace:*",
@@ -62,15 +44,10 @@
   },
   "devDependencies": {
     "electron": "44.7.2",
-    "electron-updater": "6.8.9",
-    "tsup": "^8.5.0",
-    "typescript": "7.0.2"
+    "electron-updater": "6.8.9"
   },
   "peerDependencies": {
     "electron": ">=44",
     "electron-updater": ">=6"
-  },
-  "engines": {
-    "node": ">=20"
   }
 }

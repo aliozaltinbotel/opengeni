@@ -13,7 +13,6 @@ import {
   isModelUnavailableSubmissionError,
   formatRelativeTime,
   humanizeFailureReason,
-  isDiagnosticFailureCode,
   presentFailure,
   isCreditExhaustion,
   stringifyPayload,
@@ -43,7 +42,6 @@ describe("failure presentation", () => {
       expect(presentFailure(englishText, payload)).toEqual({
         reason: "The service encountered a database error.",
         safetyRefusal: false,
-        diagnostic: false,
       });
       expect(JSON.stringify(payload)).toBe(before);
     }
@@ -76,7 +74,6 @@ describe("failure presentation", () => {
       expect(presentFailure(norwegian, payload)).toEqual({
         reason: "Abonnementet er tomt for kapasitet.",
         safetyRefusal: false,
-        diagnostic: false,
       });
       expect(JSON.stringify(payload)).toBe(before);
     }
@@ -90,7 +87,6 @@ describe("failure presentation", () => {
     ).toEqual({
       reason: `The model provider blocked this request. ${refusal}`,
       safetyRefusal: true,
-      diagnostic: false,
     });
   });
   test("retains the exact diagnostic on new safety failures", () => {
@@ -103,7 +99,6 @@ describe("failure presentation", () => {
     ).toEqual({
       reason: `The model provider blocked this request. ${refusal}`,
       safetyRefusal: true,
-      diagnostic: false,
     });
   });
   test("keeps other underlying failures and ignores nontext details", () => {
@@ -116,48 +111,7 @@ describe("failure presentation", () => {
     expect(presentFailure(englishText, { error: "Failed.", detail: { nested: true } }).reason).toBe(
       "Failed.",
     );
-    expect(presentFailure(englishText, {})).toEqual({
-      reason: null,
-      safetyRefusal: false,
-      diagnostic: false,
-    });
-  });
-  test("marks unclassified and operator-text failures as diagnostic, never authored copy", () => {
-    const operatorText =
-      "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release).";
-    const payload = Object.freeze({ error: operatorText });
-    expect(presentFailure(englishText, payload)).toEqual({
-      reason: operatorText,
-      safetyRefusal: false,
-      diagnostic: true,
-    });
-    for (const code of [
-      "pre_claim_failure",
-      "interrupted_turn_retired",
-      "worker_death_redispatch_exhausted",
-      "sandbox_command_observation_unavailable",
-      "sandbox_command_start_outcome_unknown",
-      "sandbox_materialization_verification_failed",
-      "invalid_sse_terminal",
-    ]) {
-      expect(isDiagnosticFailureCode(code)).toBe(true);
-      expect(presentFailure(englishText, { code, error: operatorText }).diagnostic).toBe(true);
-    }
-    expect(isDiagnosticFailureCode(undefined)).toBe(true);
-    expect(isDiagnosticFailureCode(" ")).toBe(true);
-    // Copy the worker wrote for people stays the headline.
-    for (const code of [
-      "mcp_server_unavailable",
-      "provider_rate_limited",
-      "codex_plan_entitlement",
-    ]) {
-      expect(isDiagnosticFailureCode(code)).toBe(false);
-      expect(presentFailure(englishText, { code, error: "Authored copy." }).diagnostic).toBe(false);
-    }
-    // Text the client already rewrites for people is no diagnostic either.
-    expect(
-      presentFailure(englishText, { error: "Error: 401 Incorrect API key provided" }),
-    ).toMatchObject({ diagnostic: false });
+    expect(presentFailure(englishText, {})).toEqual({ reason: null, safetyRefusal: false });
   });
 });
 

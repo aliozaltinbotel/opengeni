@@ -1,4 +1,3 @@
-import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -22,16 +21,13 @@ import {
   type RefObject,
 } from "react";
 import { toast } from "../../lib/toast";
-import { useNativeDestinationVisible } from "../../lib/app-host";
 
 import { findPickerRow } from "../../../model-policy";
-import { withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
-import { HostRailUtilities } from "./host-utilities";
-import { SessionStartupProvider } from "../../../lib/session-startup";
+import { SessionStartupProvider } from "../../lib/session-startup";
 import {
   requestSessionUsageLimitEditor,
   sessionUsageLimitCapability,
@@ -51,17 +47,22 @@ export {
   SessionShellSlotsProvider,
   type SessionShellSlots,
 } from "./rail-sections";
-import { SessionComputeIndicator } from "../session/sandbox-switcher";
-import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
-import { subscriptionAccountProvider } from "../session/subscription-account";
+import {
+  SessionComputeIndicator,
+  sessionSupportsFleetSwitching,
+} from "../session/sandbox-switcher";
+import { CodexAccountIndicator } from "../session/codex-account-indicator";
+import { ModelAccountIndicator } from "../session/model-account-indicator";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
 import { Button } from "../../../ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/sheet";
 import { TooltipProvider } from "../../../ui/tooltip";
+import { matchesShortcut, NEW_SESSION_SHORTCUT } from "../../lib/keyboard-shortcuts";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
+import { isCodexProductModel } from "../../lib/session-model";
 import { isIntelligenceEffort } from "../../lib/session-tools";
 import { useSessionRepliesMute } from "../../lib/inbox";
 import { useSessionAdminAccess } from "../session/session-admin-access";
@@ -210,7 +211,6 @@ export function RailBody() {
           session-row actions with their own stacking levels. The footer is a
           sibling of the clipped viewport, so it can stay transparent and let
           the rail glow run to the bottom edge. */}
-      <HostRailUtilities workspaceId={rail.workspaceId} collapsed={rail.collapsed} />
       {railFooter ? (
         <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
           {railFooter}
@@ -276,6 +276,7 @@ export function SessionShell({
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
+  const newSessionShortcut = useSessionUiFeature("newChatShortcut");
   const context = useAppContext();
   const { canvasBanners } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({
@@ -342,14 +343,21 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
+  // Global chords (⌘/Ctrl+⇧O → new session). Modifier chords work in inputs too.
+  useEffect(() => {
+    if (!newSessionShortcut) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (!matchesShortcut(event, NEW_SESSION_SHORTCUT.chord)) return;
+      event.preventDefault();
+      rail.startNewSession();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [newSessionShortcut, rail]);
+
   return (
     <TooltipProvider delayDuration={300}>
-      <div
-        className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
-        // Lets page chrome (the desktop title bar) follow the rail without a
-        // document-wide `:has()` selector.
-        data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
-      >
+      <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
           <nav
@@ -416,7 +424,6 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
-  const brand = useSessionUiFeature("brand");
   const context = useAppContext();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -470,7 +477,10 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   if (showSessionActions && context.session) {
     return (
       <SessionRouteHeader
-        session={withLineageAutomationFacts(context.session, lineage.lineage)}
+        session={{
+          ...context.session,
+          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+        }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}
         lineageError={lineage.error}
@@ -480,22 +490,18 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     );
   }
 
-  // Mobile, off a session route: the slim brand strip. A host without
-  // Opengeni's brand keeps only the menu button, or no strip at all.
-  if (!brand && !hamburger) return null;
+  // Mobile, off a session route: the slim brand strip.
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-canvas/75 px-3 backdrop-blur sm:px-4">
       {hamburger}
-      {brand ? (
-        <Link
-          to="/workspaces/$workspaceId/sessions"
-          params={{ workspaceId: rail.workspaceId }}
-          className="flex items-center gap-2 text-fg"
-        >
-          <BrandMark className="w-5" />
-          <Wordmark className="text-[17px]" />
-        </Link>
-      ) : null}
+      <Link
+        to="/workspaces/$workspaceId/sessions"
+        params={{ workspaceId: rail.workspaceId }}
+        className="flex items-center gap-2 text-fg"
+      >
+        <BrandMark className="w-5" />
+        <Wordmark className="text-[17px]" />
+      </Link>
     </header>
   );
 }
@@ -534,19 +540,16 @@ function SessionRouteHeader({
   const policyReady = !lastStarted.loading;
   const displayModelId = policyReady ? lastStartedModel || session.model : session.model;
   const navigate = useNavigate();
-  const automationsVisible = useNativeDestinationVisible("automations");
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const accountProvider = subscriptionAccountProvider(
-    displayModelId,
-    selectedRow?.catalog.credentialSource,
-  );
+  const credentialSource = selectedRow?.catalog.credentialSource;
+  const subscriptionProvider =
+    credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
-  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -555,8 +558,10 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
-        if (!updated) return;
+        const updated = await context.client.updateSessionArchive(target.workspaceId, target.id, {
+          archived,
+          expectedVersion: target.archiveVersion ?? 0,
+        });
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>
           current?.id === updated.id && current.workspaceId === updated.workspaceId
@@ -578,18 +583,18 @@ function SessionRouteHeader({
         archiveInFlight.current = false;
       }
     },
-    [context, confirmArchive],
+    [context],
   );
 
   return (
     <SessionHeader
       session={session}
       ancestors={ancestors}
-      onOpenAutomations={
-        session.hasSchedules && automationsVisible
+      onOpenSchedule={
+        session.hasSchedules
           ? () =>
               void navigate({
-                to: "/workspaces/$workspaceId/automations",
+                to: "/workspaces/$workspaceId/schedules",
                 params: { workspaceId: session.workspaceId },
                 search: { targetSessionId: session.id },
               })
@@ -646,18 +651,28 @@ function SessionRouteHeader({
         ) : null
       }
       sandboxSlot={
-        <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
+        sessionSupportsFleetSwitching(session.sandboxBackend) ? (
+          <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
+        ) : null
       }
-      accountSlot={
-        policyReady && accountProvider ? (
-          <SubscriptionAccountIndicator
+      codexSlot={
+        policyReady && isCodexProductModel(displayModelId) ? (
+          <CodexAccountIndicator
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            model={displayModelId}
+            modelReady={policyReady}
+            events={events}
+          />
+        ) : policyReady && subscriptionProvider ? (
+          <ModelAccountIndicator
             workspaceId={session.workspaceId}
             sessionId={session.id}
             organizationId={
               context.workspaces.find((candidate) => candidate.id === session.workspaceId)
                 ?.accountId ?? null
             }
-            provider={accountProvider}
+            provider={subscriptionProvider}
             servingTurnId={lastStarted.policy?.turnId}
             events={events}
           />

@@ -11,11 +11,7 @@ import {
   nestedPostgresSqlState,
   WorkspaceControlBusyError,
 } from "@opengeni/db";
-import {
-  ConnectionAccountSelectionError,
-  SessionUsageLimitHttpError,
-  sessionUsageLimitRefusalFromError,
-} from "@opengeni/core";
+import { SessionUsageLimitHttpError, sessionUsageLimitRefusalFromError } from "@opengeni/core";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
@@ -261,18 +257,5 @@ export function modelUnavailableHttpError(error: unknown): ApiHttpError | null {
     retryable: false,
     outcomeUnknown: false,
     details: { code: cause.code, modelId: cause.modelId },
-  });
-}
-
-/** Keep a rejected credential selection actionable without changing its authority. */
-export function connectionAccountSelectionHttpError(error: unknown): ApiHttpError | null {
-  if (!(error instanceof ConnectionAccountSelectionError)) return null;
-  return new ApiHttpError(422, {
-    code: "validation_failed",
-    message:
-      "A selected connector account is unavailable. Review your connected accounts before sending again.",
-    retryable: false,
-    outcomeUnknown: false,
-    details: { code: "connection_account_selection_unavailable", ...error.diagnostic },
   });
 }

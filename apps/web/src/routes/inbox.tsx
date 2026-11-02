@@ -2,15 +2,14 @@
 // approvals, goals paused on them) and what agents chose to tell them. It is a
 // to-do surface, not an archive: an item leaves once it is answered, resolved,
 // withdrawn or dismissed, and it always stays in its session's timeline.
-import {
-  openGeniConsolePath,
-  type InboxItem,
-  type InboxSettings,
-  type InboxTidyPolicy,
-  type SessionHumanInputRequest,
-  type SubmitHumanInputResponseRequest,
+import type {
+  InboxItem,
+  InboxSettings,
+  InboxTidyPolicy,
+  SessionHumanInputRequest,
+  SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm, OpenGeniLinkProvider, SecretRefText } from "@opengeni/react/session-ui";
+import { HumanInputForm, SecretRefText } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -1011,8 +1010,6 @@ function AnswerDialog({
       });
     } catch (error) {
       setSubmitError(userErrorText(error, "Couldn't send your answer. Try again."));
-      // Reject so the form keeps the unsent answer (and its draft) for a retry.
-      throw error;
     } finally {
       setSubmitting(false);
     }
@@ -1028,22 +1025,14 @@ function AnswerDialog({
         {loadError ? (
           <Notice tone="failed">{loadError}</Notice>
         ) : request ? (
-          // Artifact links in the question open the workspace's pages, as in the session.
-          <OpenGeniLinkProvider
-            resolveLink={(target) => {
-              const href = openGeniConsolePath(target, request.workspaceId);
-              return href ? { href } : null;
-            }}
-          >
-            <HumanInputForm
-              request={request}
-              onSubmit={submit}
-              submitting={submitting}
-              error={submitError}
-              allowedSaveTo={secretSaveTargets(context.accessContext, request.workspaceId)}
-              decisionButtons
-            />
-          </OpenGeniLinkProvider>
+          <HumanInputForm
+            request={request}
+            onSubmit={submit}
+            submitting={submitting}
+            error={submitError}
+            allowedSaveTo={secretSaveTargets(context.accessContext, request.workspaceId)}
+            decisionButtons
+          />
         ) : (
           <div className="grid gap-3 py-2" aria-busy="true">
             <Skeleton className="h-5 w-3/4" />

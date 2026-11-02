@@ -4,7 +4,6 @@ import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import type { AgentTitleParts } from "./platform-activity-presentation";
 import { ActivityDisclosure, CompactActivityContext } from "./shared";
-import { ShimmerText } from "./shimmer-text";
 import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
@@ -93,10 +92,10 @@ export function AgentRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-2">
-          <ShimmerText
-            active={Boolean(running)}
+          <span
             className={cn(
               "min-w-0 truncate text-og-base leading-5",
+              running && "og-shimmer-text",
               failed && "text-og-status-failed",
             )}
           >
@@ -113,7 +112,7 @@ export function AgentRow({
                 {title.text}
               </span>
             )}
-          </ShimmerText>
+          </span>
           {meta ? (
             <span className="shrink-0 text-og-xs text-og-fg-subtle tabular-nums">{meta}</span>
           ) : null}

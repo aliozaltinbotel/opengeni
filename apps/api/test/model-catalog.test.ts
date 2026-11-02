@@ -11,7 +11,7 @@ import {
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { z } from "zod";
 import {
   buildWorkspaceModelCatalog,

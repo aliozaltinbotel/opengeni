@@ -1,11 +1,5 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
-export {
-  organizationAzureEntraSetupToken,
-  verifyDirectModelAccess,
-  verifyOrganizationAzureOpenAIDeployment,
-  verifyOrganizationDirectModel,
-  type DirectModelAccessCredential,
-} from "./domain/direct-model-provider";
+export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
 export * from "./domain/mcp-streamable-http-client";
@@ -81,9 +75,6 @@ export {
   type ManagedAuthActorMutationLeaseStamp,
 } from "./managed-session";
 export * from "./transcription";
-export * from "./recording-transcription";
-export * from "./xai-operation-availability";
-export * from "./recording-transcription-azure";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
 export * from "./goal-admission";
@@ -133,7 +124,6 @@ export * from "./domain/vaults";
 export * from "./rigs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
-export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
@@ -145,7 +135,6 @@ export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
-export * from "./domain/automation-templates";
 export * from "./domain/site-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";
@@ -171,8 +160,6 @@ export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";
-export * from "./application/organization-governance";
-export * from "./application/organization-session-policy";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";
@@ -197,7 +184,6 @@ export {
   type HostSessionUsageLimit,
 } from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
-export { turnAppActionGrant } from "./app-action-turn-grant";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
 

@@ -8,7 +8,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { requestBodyValidationHttpError } from "../src/http/request-body";
 import {
   registerUsageAllowanceRoutes,

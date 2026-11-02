@@ -28,13 +28,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import {
-  parseRequestBody,
-  parseRequestJson,
-  parseRequestQuery,
-  readRequestJson,
-} from "../http/request-body";
-import { parsePathParam } from "../http/path-identifier";
+import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 
 function nativeConfirmation(authorization: AccessGrantAuthorization) {
   if (
@@ -60,11 +54,9 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
     );
     if (!externalActorContinuationForAuthorization(authorization))
       nativeConfirmation(authorization);
-    const parsedCursor = parseRequestQuery(z.string().uuid().optional(), c.req.query("cursor"), {
-      status: 400,
-      message: "Invalid link cursor",
-    });
-    const cursor = parsedCursor;
+    const parsedCursor = z.string().uuid().optional().safeParse(c.req.query("cursor"));
+    if (!parsedCursor.success) throw new HTTPException(400, { message: "Invalid link cursor" });
+    const cursor = parsedCursor.data;
     const grant = authorization.grant;
     return c.json(
       await withWorkspaceSubjectRls(deps.db, grant.workspaceId, grant.subjectId, async (tx) => {
@@ -114,7 +106,7 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
   });
   app.on(["GET", "POST"], [base + "/:linkId", base + "/:linkId/:operation"], async (c) => {
     const workspaceId = c.req.param("workspaceId")!;
-    const linkId = parsePathParam(c, "linkId", z.string().uuid());
+    const linkId = z.string().uuid().parse(c.req.param("linkId"));
     const operation = c.req.param("operation");
     if (
       !(

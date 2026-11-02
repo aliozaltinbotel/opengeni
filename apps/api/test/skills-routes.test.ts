@@ -4,8 +4,11 @@ import type { ApiRouteDeps, GitHubSkillSourceClient } from "@opengeni/core";
 import { bootstrapWorkspace, createDb, deleteWorkspace, type DbClient } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { listSkillLibraryEntries } from "@opengeni/runtime";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import postgres from "postgres";
 
@@ -322,26 +325,6 @@ describe("portable Skill routes", () => {
       expect(await response.json()).toMatchObject({ code: "SKILL_FILE_LIFECYCLE_REQUIRED" });
     }
     expect(await request("/skills/content").then((response) => response.json())).toEqual(before);
-  });
-  test("an invalid save names the fields it is missing", async () => {
-    if (!available) return;
-    const response = await request("/skills/content/save", {
-      method: "POST",
-      body: JSON.stringify({
-        skillId: crypto.randomUUID(),
-        operationId: crypto.randomUUID(),
-        expectedRevisionId: null,
-        expectedScopeVersion: 1,
-        scope: "team",
-        files: [{ path: "SKILL.md", content: skillMarkdown }],
-        reason: "Create test Skill",
-      }),
-    });
-    expect(response.status).toBe(422);
-    const message = await response.text();
-    expect(message).toStartWith("Invalid Skill request: ");
-    expect(message).toContain("scope: ");
-    expect(message).toContain("stableKey: ");
   });
   test("shared content routes preserve folders, replay saves, reject stale heads and restore history", async () => {
     if (!available) return;

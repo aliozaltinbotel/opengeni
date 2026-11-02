@@ -4,19 +4,10 @@ import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 const LABELS = (t: OpenGeniText): Record<StartupPhaseItem["phase"], string> => ({
   queue: t("timeline.startupTimings.workerQueue"),
   sandbox: t("timeline.startupTimings.sandbox"),
-  credential_resolution: t("timeline.startupTimings.credentialResolution"),
-  credential_mint: t("timeline.startupTimings.credentialMint"),
-  credential_materialization: t("timeline.startupTimings.credentialMaterialization"),
-  client_publication: t("timeline.startupTimings.clientPublication"),
-  client_readiness: t("timeline.startupTimings.clientReadiness"),
-  credential_seed: t("timeline.startupTimings.credentialSeed"),
-  credential_hooks: t("timeline.startupTimings.credentialHooks"),
-  artifact_runtime: t("timeline.startupTimings.artifactRuntime"),
   rig: t("timeline.startupTimings.sandboxEnvironment"),
   repository: t("timeline.startupTimings.repository"),
   files: t("timeline.startupTimings.files"),
   tools: t("timeline.startupTimings.tools"),
-  history: t("timeline.startupTimings.conversationHistory"),
   model_preparation: t("timeline.startupTimings.runtimeModelRequest"),
   provider_first_byte: t("timeline.startupTimings.firstModelResponse"),
 });
@@ -38,8 +29,7 @@ export function StartupTimings({ phases }: { phases: StartupPhaseItem[] }) {
   const turns = [...byTurn.entries()]
     .map(([turnId, turnPhases]) => ({
       turnId,
-      // Completion-only receipts may arrive in a batch after later setup work.
-      phases: [...turnPhases].sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
+      phases: turnPhases,
       startedAt: turnPhases.reduce(
         (earliest, phase) => (phase.startedAt < earliest ? phase.startedAt : earliest),
         turnPhases[0]!.startedAt,

@@ -20,14 +20,11 @@ import { nestedPostgresSqlState, SessionTenancyNotActivatedError } from "@openge
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
-    status: 422,
-    message: "invalid user-resource request",
-  });
-  return parsed;
+  const parsed = schema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) throw new HTTPException(422, { message: "invalid user-resource request" });
+  return parsed.data;
 }
 
 function lifecycleError(error: unknown): never {
@@ -53,16 +50,13 @@ function lifecycleError(error: unknown): never {
 export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/user-resource-authorities";
   app.get(base, async (context) => {
-    const query = parseRequestQuery(
-      ListUserResourceAuthoritiesQuery,
-      {
-        scope: context.req.query("scope"),
-        resourceKind: context.req.query("resourceKind"),
-        cursor: context.req.query("cursor"),
-        limit: context.req.query("limit"),
-      },
-      { status: 422, message: "explicit scope=user required" },
-    );
+    const query = ListUserResourceAuthoritiesQuery.safeParse({
+      scope: context.req.query("scope"),
+      resourceKind: context.req.query("resourceKind"),
+      cursor: context.req.query("cursor"),
+      limit: context.req.query("limit"),
+    });
+    if (!query.success) throw new HTTPException(422, { message: "explicit scope=user required" });
     const workspaceId = context.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(
       context,
@@ -71,7 +65,12 @@ export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDep
       "workspace:read",
     );
     try {
-      const page = await listManagedHumanUserResourceAuthorities(deps, access, workspaceId, query);
+      const page = await listManagedHumanUserResourceAuthorities(
+        deps,
+        access,
+        workspaceId,
+        query.data,
+      );
       return context.json(
         ListUserResourceAuthoritiesResponse.parse({
           scope: "user",
@@ -114,11 +113,8 @@ export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDep
   });
 
   app.delete(`${base}/grants/:grantId`, async (context) => {
-    parseRequestQuery(
-      RevokeUserResourceGrantQuery,
-      { scope: context.req.query("scope") },
-      { status: 422, message: "explicit scope=user required" },
-    );
+    const query = RevokeUserResourceGrantQuery.safeParse({ scope: context.req.query("scope") });
+    if (!query.success) throw new HTTPException(422, { message: "explicit scope=user required" });
     const grantId = z.string().uuid().safeParse(context.req.param("grantId"));
     if (!grantId.success) throw new HTTPException(422, { message: "invalid grant id" });
     const workspaceId = context.req.param("workspaceId");

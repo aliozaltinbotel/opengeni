@@ -7,15 +7,6 @@ import "@/navigation-host";
 import type { AppApiHost } from "@opengeni/react/app/lib/app-api";
 import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { lazySurface } from "@opengeni/react/app/lib/app-surfaces";
-import type { HostExtensionContext } from "@opengeni/react/app/host-extension";
-import { createHostMessageContextStore } from "@opengeni/react/app/lib/message-context";
-import {
-  createHostMessageContextResolver,
-  createHostStartersResolver,
-  createHostToolRegistryLoader,
-} from "@/host-extension/registry";
-import { guardHostSessionIndicator } from "@opengeni/react/app/components/session-indicator";
-import { hostExtension } from "@/host-extension/startup";
 
 export const webAppApiHost: AppApiHost = {
   apiBaseUrl,
@@ -24,37 +15,8 @@ export const webAppApiHost: AppApiHost = {
   voiceRealtimeClient,
 };
 
-const extensionMessageContext = hostExtension.messageContext
-  ? createHostMessageContextResolver(hostExtension.messageContext)
-  : undefined;
-
 configurePageAppHost({
   api: webAppApiHost,
-  toolRegistryEntries: hostExtension.toolRegistryEntries,
-  // A stock build has no loader; the flag lets it drop the loader's check.
-  toolRegistryLoader:
-    import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" && hostExtension.toolRegistryLoader
-      ? createHostToolRegistryLoader(hostExtension.toolRegistryLoader, hostExtension.toolRegistryEntries)
-      : undefined,
-  hiddenNativeDestinations: hostExtension.hiddenNativeDestinations,
-  hiddenNativeSections: hostExtension.hiddenNativeSections,
-  brand: hostExtension.brand,
-  productName: hostExtension.productName,
-  workspaceFilter: hostExtension.workspaceFilter,
-  lifecycle: hostExtension.lifecycle,
-  extensionMessageContext,
-  // New-chat creation runs above the workspace provider and reads this shared store.
-  messageContext: extensionMessageContext
-    ? createHostMessageContextStore(extensionMessageContext, (): HostExtensionContext => {
-        const pathname = window.location.pathname;
-        const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? "";
-        return { pathname, workspaceId: decodeURIComponent(workspaceId) };
-      })
-    : undefined,
-  starters: hostExtension.starters ? createHostStartersResolver(hostExtension.starters) : undefined,
-  sessionIndicator: hostExtension.sessionIndicator ? guardHostSessionIndicator(hostExtension.sessionIndicator) : undefined,
-  commandMenuProviders: hostExtension.commandMenuProviders,
-  utilities: hostExtension.utilities,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({
@@ -67,14 +29,3 @@ configurePageAppHost({
     ),
   },
 });
-
-// index.html names the stock product; a host extension's product names the
-// tab and the page's link-preview title and site name.
-if (hostExtension.productName && typeof document !== "undefined") {
-  const productName = hostExtension.productName;
-  document.title = productName;
-  for (const property of ["og:title", "og:site_name"])
-    document.head
-      .querySelector(`meta[property="${property}"]`)
-      ?.setAttribute("content", productName);
-}

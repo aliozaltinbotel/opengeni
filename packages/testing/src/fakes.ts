@@ -1,7 +1,15 @@
-import { boundWorkspaceControlEvent } from "@opengeni/contracts/workspace-control-event";
-import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
-import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION } from "@opengeni/events/durable-fanout";
-import type { EventBus, RequestConnection, RequestHandler, RequestReply } from "@opengeni/events";
+import {
+  boundWorkspaceControlEvent,
+  type SessionEvent,
+  type WorkspaceControlEvent,
+} from "@opengeni/contracts";
+import {
+  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+  type EventBus,
+  type RequestConnection,
+  type RequestHandler,
+  type RequestReply,
+} from "@opengeni/events";
 
 export class MemoryEventBus implements EventBus {
   published: SessionEvent[][] = [];

@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   recordContextCompactionPendingGauges,
   recordSessionRecoveryBacklogGauges,

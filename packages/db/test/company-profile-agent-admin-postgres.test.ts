@@ -4,7 +4,7 @@ import {
   RequestHumanInputToolInput,
   type CompanyProfileAgentReviewRequiredReceipt,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   acceptSessionHumanInputResponse,

@@ -28,8 +28,11 @@ import {
   type PlacementBrowserStateCaptureReceipt,
 } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+} from "@opengeni/testing";
 import { createBrowserDeadlineCheckpointActivities } from "../src/activities/browser-deadline-checkpoint";
 import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
 import type { ActivityServices, ControlActivityServices } from "../src/activities/types";

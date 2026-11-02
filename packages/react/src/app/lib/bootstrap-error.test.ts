@@ -2,12 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 import { ApiError } from "./app-api";
-import {
-  BOOTSTRAP_CALM_WINDOW_MS,
-  bootstrapErrorPresentation,
-  bootstrapWaitingPresentation,
-  isTransientBootstrapError,
-} from "./bootstrap-error";
+import { bootstrapErrorPresentation } from "./bootstrap-error";
 
 describe("bootstrap error presentation", () => {
   test("turns the maintenance API payload into calm maintenance copy", () => {
@@ -17,7 +12,7 @@ describe("bootstrap error presentation", () => {
     );
 
     expect(presentation).toEqual({
-      title: "Under maintenance",
+      title: "Opengeni is under maintenance",
       description: "We'll be back shortly. Try again in a moment.",
     });
   });
@@ -28,7 +23,7 @@ describe("bootstrap error presentation", () => {
       "workspace_access",
     );
 
-    expect(presentation.title).toBe("Under maintenance");
+    expect(presentation.title).toBe("Opengeni is under maintenance");
   });
 
   test("does not expose proxy HTML or API framing", () => {
@@ -38,7 +33,7 @@ describe("bootstrap error presentation", () => {
     );
 
     expect(presentation).toEqual({
-      title: "Temporarily unavailable",
+      title: "Opengeni is temporarily unavailable",
       description: "The service could not finish loading. Try again shortly.",
     });
     expect(JSON.stringify(presentation)).not.toContain("<div>");
@@ -52,7 +47,7 @@ describe("bootstrap error presentation", () => {
     );
 
     expect(presentation).toEqual({
-      title: "Couldn't start",
+      title: "Opengeni couldn't start",
       description:
         "The API returned an invalid configuration response. Check the deployment or proxy configuration, then try again.",
     });
@@ -63,8 +58,8 @@ describe("bootstrap error presentation", () => {
     expect(
       bootstrapErrorPresentation(new TypeError("Failed to fetch"), "client_configuration"),
     ).toEqual({
-      title: "Can't connect",
-      description: "The app could not reach its server. Check your connection and try again.",
+      title: "Opengeni is unreachable",
+      description: "The app could not reach the Opengeni API. Check your connection and try again.",
     });
 
     expect(
@@ -73,7 +68,7 @@ describe("bootstrap error presentation", () => {
         "client_configuration",
       ),
     ).toEqual({
-      title: "Couldn't start",
+      title: "Opengeni couldn't start",
       description:
         "The client configuration could not be loaded. Check the deployment settings and server logs, then try again.",
     });
@@ -87,7 +82,7 @@ describe("bootstrap error presentation", () => {
 
     expect(presentation).toEqual({
       title: "Workspace access unavailable",
-      description: "Your workspace access couldn't be loaded. Try again.",
+      description: "Opengeni couldn't load your workspace access. Try again.",
     });
     expect(JSON.stringify(presentation)).not.toContain("forbidden by proxy");
   });
@@ -105,55 +100,4 @@ test("only client-configuration authorization failures carry typed account recov
   expect(
     bootstrapErrorPresentation(new ApiError(503, "private outage"), "client_configuration"),
   ).not.toHaveProperty("recovery");
-});
-
-describe("bootstrap waiting", () => {
-  const parked = () => new OpenGeniApiError(503, JSON.stringify({ error: "maintenance" }));
-
-  test("the maintenance marker is transient in every bootstrap context", () => {
-    expect(isTransientBootstrapError(parked(), "client_configuration")).toBe(true);
-    expect(isTransientBootstrapError(parked(), "workspace_access")).toBe(true);
-    expect(
-      isTransientBootstrapError(
-        new ApiError(503, JSON.stringify({ error: "maintenance" })),
-        "client_configuration",
-      ),
-    ).toBe(true);
-    // A marker on a client error is not an update.
-    expect(
-      isTransientBootstrapError(
-        { status: 403, body: JSON.stringify({ error: "maintenance" }) },
-        "client_configuration",
-      ),
-    ).toBe(false);
-  });
-
-  test("an update reads as Updating for as long as it lasts", () => {
-    for (const elapsedMs of [0, BOOTSTRAP_CALM_WINDOW_MS * 10]) {
-      expect(bootstrapWaitingPresentation(parked(), "client_configuration", elapsedMs)).toEqual({
-        title: "Updating",
-        description: "This page continues by itself when the update finishes.",
-        recovering: true,
-      });
-    }
-  });
-
-  test("another transient failure reconnects calmly, then names the problem", () => {
-    const failure = new OpenGeniApiError(502, "", { mutation: false });
-    expect(bootstrapWaitingPresentation(failure, "client_configuration", 5_000)).toEqual({
-      title: "Reconnecting",
-      description: "This page continues by itself when the connection is back.",
-      recovering: true,
-    });
-    expect(
-      bootstrapWaitingPresentation(failure, "client_configuration", BOOTSTRAP_CALM_WINDOW_MS),
-    ).toEqual({
-      ...bootstrapErrorPresentation(failure, "client_configuration"),
-      recovering: true,
-    });
-    const offline = new TypeError("Failed to fetch");
-    expect(
-      bootstrapWaitingPresentation(offline, "workspace_access", BOOTSTRAP_CALM_WINDOW_MS + 1).title,
-    ).toBe("Can't connect");
-  });
 });

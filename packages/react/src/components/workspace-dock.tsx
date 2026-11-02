@@ -26,7 +26,6 @@ import {
   type LayoutStorage,
 } from "react-resizable-panels";
 import { cn } from "../lib/cn";
-import { inertProps } from "../lib/inert";
 import { useOpenGeniText } from "../messages/runtime";
 
 export type WorkspaceTab = {
@@ -388,7 +387,7 @@ export function WorkspaceDock({
           data-workspace-primary
           aria-hidden={!collapsed ? true : undefined}
           className="min-h-0 min-w-0 flex-1"
-          {...inertProps(!collapsed)}
+          inert={!collapsed ? true : undefined}
         >
           {primary}
         </div>
@@ -492,7 +491,7 @@ export function WorkspaceDock({
             data-workspace-primary
             aria-hidden={maximized ? true : undefined}
             className="h-full min-h-0 min-w-0"
-            {...inertProps(maximized)}
+            inert={maximized ? true : undefined}
           >
             {primary}
           </div>

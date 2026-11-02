@@ -18,10 +18,14 @@ import {
   sandboxCommandOutput,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
-import { buildSandboxImage, startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  buildSandboxImage,
+  startTestServices,
+  testSettings,
+  type TestServices,
+} from "@opengeni/testing";
 import { createRigVerificationActivities } from "../../apps/worker/src/activities/rig-verification";
-import { settingsWithRigImage } from "@opengeni/core";
+import { settingsWithRigImage } from "../../apps/worker/src/activities/sandbox-images";
 import type { ActivityServices } from "../../apps/worker/src/activities/types";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;

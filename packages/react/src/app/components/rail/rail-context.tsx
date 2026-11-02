@@ -18,17 +18,10 @@ import {
 
 import { useAppContext } from "../../app-context";
 import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
-import { requestCommandMenu } from "../../lib/actions/events";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
-import { OPEN_SESSION_SEARCH_EVENT } from "../../lib/session-search-route";
-import {
-  workspaceManagementLocation,
-  workspaceSwitchTarget,
-} from "../../lib/workspace-management-location";
+import { OPEN_SESSION_SEARCH_EVENT, requestSessionSearch } from "../../lib/session-search-route";
+import { workspaceManagementLocation } from "../../lib/workspace-management-location";
 import { useUiEventTarget } from "../../lib/ui-events";
-import { useAppHost } from "../../lib/app-host";
-import { switchWorkspaceAfterHostHook } from "../../lib/host-lifecycle";
-import { hostFilteredWorkspaces } from "../../host-extension";
 
 const SessionSearchDialog = lazy(() => import("../session/session-search-dialog"));
 
@@ -80,18 +73,12 @@ export type RailContextValue = {
   drawerTriggerRef: RefObject<HTMLButtonElement | null>;
   /** Retiring drawers must not take focus from an open search dialog. */
   restoreDrawerFocus: () => void;
-  /**
-   * Close the phone drawer for a dialog that takes over from it (search, the
-   * command menu). That dialog returns focus itself, so the retiring drawer
-   * must not reclaim it when its exit animation ends.
-   */
-  handOffDrawer: () => void;
   /** Navigate to a workspace's sessions index (used by the switchers). */
   openWorkspace: (workspaceId: string) => void;
   /** Switch organization: navigate to the first workspace in the target org. */
   openOrg: (accountId: string) => void;
-  /** Open a session: in the current workspace, or in the one given. */
-  openSession: (sessionId: string, inWorkspaceId?: string) => void;
+  /** Open a specific session in the current workspace. */
+  openSession: (sessionId: string) => void;
   /** Start a new session (the sessions index composer). */
   startNewSession: () => void;
 };
@@ -129,28 +116,19 @@ function readStoredWidth(): number {
   }
 }
 
-/** A stable empty default, so `openWorkspace` keeps its identity across renders. */
-const NO_EXTENSION_SETTINGS_PATHS: readonly string[] = [];
-
 export function RailProvider({
   workspaceId,
-  extensionSettingsPaths = NO_EXTENSION_SETTINGS_PATHS,
   children,
 }: {
   workspaceId: string;
-  /** The host extension's settings-mode route paths (see `workspaceManagementLocation`). */
-  extensionSettingsPaths?: readonly string[];
   children: ReactNode;
 }) {
   const windowEvents = useUiEventTarget("window");
   const navigate = useNavigate();
   const router = useRouter();
   const appContext = useAppContext();
-  const { lifecycle, workspaceFilter } = useAppHost();
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchMounted, setSearchMounted] = useState(false);
-  // What to search for when the dialog opens from the ⌘K menu ("Search messages for …").
-  const [searchSeed, setSearchSeed] = useState<{ query: string; nonce: number } | null>(null);
   const searchReturnFocus = useRef<HTMLElement | null>(null);
   const searchOpenRef = useRef(searchOpen);
   searchOpenRef.current = searchOpen;
@@ -173,13 +151,6 @@ export function RailProvider({
     }
     if (!searchOpenRef.current) drawerTriggerRef.current?.focus({ preventScroll: true });
   }, []);
-  const drawerOpenRef = useRef(drawerOpen);
-  drawerOpenRef.current = drawerOpen;
-  const handOffDrawer = useCallback(() => {
-    if (!drawerOpenRef.current) return;
-    suppressDrawerRestore.current = true;
-    setDrawerOpenState(false);
-  }, []);
   const changeSearchOpen = useCallback((next: boolean) => {
     searchOpenRef.current = next;
     setSearchOpen(next);
@@ -190,7 +161,6 @@ export function RailProvider({
         event as CustomEvent<{
           workspaceId?: string | undefined;
           returnFocus?: HTMLElement | undefined;
-          query?: string | undefined;
         }>
       ).detail;
       if (detail?.workspaceId !== workspaceId) return;
@@ -203,17 +173,14 @@ export function RailProvider({
               ? document.activeElement
               : null;
       }
-      if (typeof detail.query === "string" && detail.query) {
-        const query = detail.query;
-        setSearchSeed((current) => ({ query, nonce: (current?.nonce ?? 0) + 1 }));
-      }
+      if (drawerOpen) suppressDrawerRestore.current = true;
       setSearchMounted(true);
       changeSearchOpen(true);
-      handOffDrawer();
+      setDrawerOpen(false);
     };
     windowEvents.addEventListener(OPEN_SESSION_SEARCH_EVENT, open);
     return () => windowEvents.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open);
-  }, [workspaceId, isMobile, changeSearchOpen, handOffDrawer, windowEvents]);
+  }, [workspaceId, isMobile, drawerOpen, changeSearchOpen, setDrawerOpen, windowEvents]);
   useEffect(() => {
     searchReturnFocus.current = null;
     changeSearchOpen(false);
@@ -253,10 +220,9 @@ export function RailProvider({
     }
   }, []);
 
-  // Every switch out of this workspace waits for the host extension's
-  // onWorkspaceSwitch hook (bounded) before it leaves; see host-lifecycle.ts.
   const openWorkspace = useCallback(
     (nextWorkspaceId: string) => {
+      appContext.resetSessionView();
       setDrawerOpen(false);
       // In settings, switching workspace keeps the same settings page.
       const current = router.state.location;
@@ -264,50 +230,60 @@ export function RailProvider({
         current.pathname,
         workspaceId,
         (current.search as { section?: unknown }).section,
-        extensionSettingsPaths,
       );
-      switchWorkspaceAfterHostHook(lifecycle, workspaceId, nextWorkspaceId, () => {
-        appContext.resetSessionView();
-        void navigate(workspaceSwitchTarget(settings, nextWorkspaceId));
+      if (settings?.kind === "settings") {
+        void navigate({
+          to: "/workspaces/$workspaceId/settings",
+          params: { workspaceId: nextWorkspaceId },
+          search: settings.section ? { section: settings.section } : {},
+        });
+        return;
+      }
+      if (settings?.kind === "page") {
+        void navigate({ to: settings.target, params: { workspaceId: nextWorkspaceId } });
+        return;
+      }
+      if (settings?.kind === "organization") {
+        void navigate({
+          to: "/workspaces/$workspaceId/organization",
+          params: { workspaceId: nextWorkspaceId },
+          search: settings.section ? { section: settings.section } : {},
+        });
+        return;
+      }
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: nextWorkspaceId },
       });
     },
-    [appContext, navigate, router, workspaceId, extensionSettingsPaths, setDrawerOpen, lifecycle],
+    [appContext, navigate, router, workspaceId, setDrawerOpen],
   );
 
   const openOrg = useCallback(
     (accountId: string) => {
-      const target = hostFilteredWorkspaces(appContext.workspaces, workspaceFilter).find(
-        (workspace) => workspace.accountId === accountId,
-      );
+      const target = appContext.workspaces.find((workspace) => workspace.accountId === accountId);
       if (!target) {
         return;
       }
+      appContext.resetSessionView();
       setDrawerOpen(false);
-      switchWorkspaceAfterHostHook(lifecycle, workspaceId, target.id, () => {
-        appContext.resetSessionView();
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions",
-          params: { workspaceId: target.id },
-        });
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: target.id },
       });
     },
-    [appContext, navigate, setDrawerOpen, workspaceId, workspaceFilter, lifecycle],
+    [appContext, navigate, setDrawerOpen],
   );
 
   const openSession = useCallback(
-    (sessionId: string, inWorkspaceId?: string) => {
-      const target = inWorkspaceId ?? workspaceId;
+    (sessionId: string) => {
       setDrawerOpen(false);
-      switchWorkspaceAfterHostHook(lifecycle, workspaceId, target, () => {
-        // Another workspace's chat leaves this workspace, as switching does.
-        if (target !== workspaceId) appContext.resetSessionView();
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId: target, sessionId },
-        });
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
       });
     },
-    [appContext, navigate, workspaceId, setDrawerOpen, lifecycle],
+    [navigate, workspaceId, setDrawerOpen],
   );
 
   const startNewSession = useCallback(() => {
@@ -326,7 +302,7 @@ export function RailProvider({
     if (!bridge) return;
     return bridge.commands.onCommand((command) => {
       if (command === "newSession") startNewSession();
-      else if (command === "searchSessions") requestCommandMenu(windowEvents);
+      else if (command === "searchSessions") requestSessionSearch(windowEvents, workspaceId);
       else if (command === "toggleSidebar") toggleCollapsed();
       else if (command === "openInbox") {
         setDrawerOpen(false);
@@ -350,7 +326,6 @@ export function RailProvider({
       setDrawerOpen,
       drawerTriggerRef,
       restoreDrawerFocus,
-      handOffDrawer,
       openWorkspace,
       openOrg,
       openSession,
@@ -365,7 +340,6 @@ export function RailProvider({
       drawerOpen,
       setDrawerOpen,
       restoreDrawerFocus,
-      handOffDrawer,
       setCollapsed,
       toggleCollapsed,
       openWorkspace,
@@ -386,7 +360,6 @@ export function RailProvider({
             open={searchOpen}
             onOpenChange={changeSearchOpen}
             returnFocus={searchReturnFocus}
-            seed={searchSeed}
           />
         </Suspense>
       ) : null}

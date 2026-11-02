@@ -8,10 +8,7 @@
 //! - a second before the deadline it asks the kernel to freeze the cgroup
 //!   that holds every VM;
 //! - from the deadline, until the kernel reports the VMs frozen or gone,
-//!   it kills each VM that is neither (each VM has a group of its own in
-//!   that cgroup), and leaves the frozen ones frozen: one VM ending while
-//!   frozen reads as not frozen until its memory is released, which would
-//!   otherwise end every other VM on the host;
+//!   it kills every process in that cgroup;
 //! - while the deadline is further off, it thaws the cgroup if anything
 //!   froze it.
 //!
@@ -57,8 +54,8 @@ pub enum Vms {
 pub enum GuardAction {
     /// Freeze the VMs' cgroup.
     Freeze,
-    /// Kill every VM in the VMs' cgroup that is neither frozen nor gone;
-    /// asked again on every step until the cgroup is frozen or empty.
+    /// Kill every process in the VMs' cgroup; asked again on every step
+    /// until the cgroup is empty.
     Kill,
     /// Thaw the VMs' cgroup.
     Thaw,

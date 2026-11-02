@@ -72,8 +72,7 @@ describe("Cendra Single MCP read OAuth profile", () => {
     const profile = cendraProfile();
     expect(defaultOwnershipFor(profile)).toBe("personal");
     expect(profile.requiredOwnership?.ownership).toBe("personal");
-    // Upstream removed the per-profile `exactMcpBinding` flag: reconnect now matches the exact
-    // stored MCP URL for every profile, and this profile still requires the exact resource.
+    expect(profile.exactMcpBinding).toBe(true);
     expect(profile.requireExactMcpUrl?.url).toBe(resource);
     expect(profile.sendResourceParameter).toBe(true);
     expect(profile.providerOAuthDiscovery).toBeUndefined();

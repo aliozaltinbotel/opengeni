@@ -28,9 +28,6 @@ const context = {
   },
 };
 export const useAppContext = () => context;
-// The session header reads the context optionally (#5711); the rail preview
-// always provides it.
-export const useOptionalAppContext = () => context;
 let collapsed = false;
 const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => {

@@ -24,5 +24,4 @@ export {
   type SecretResolverOptions,
 } from "./secret-resolver";
 export type { VaultRequestActor, VaultServiceDeps } from "./types";
-export { getVaultItemApproval, revokeVaultItemGrant, setVaultItemApproval } from "./use-approvals";
 export { createVaultService, vaultActorIsApiKey, type VaultService } from "./vault-service";

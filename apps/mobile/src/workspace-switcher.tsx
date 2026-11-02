@@ -1,11 +1,6 @@
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { workspacesInOrg } from "@opengeni/react/organization-model";
-import {
-  BAR_MAX_FONT_SCALE,
-  fontStyle,
-  Icon,
-  useNativeTimelineTheme,
-} from "@opengeni/react-native/timeline";
+import { fontStyle, Icon, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import { useState } from "react";
@@ -23,15 +18,8 @@ import { openOnWeb, webPaths } from "@/web-links";
  */
 /** The workspace menu's actions and handler, shared by the rail block and the header title. */
 function useWorkspaceMenu() {
-  const {
-    account,
-    workspace,
-    workspaces,
-    organizations,
-    setWorkspaceId,
-    selectOrganization,
-    reload,
-  } = useAccount();
+  const { account, workspace, workspaces, organizations, setWorkspaceId, selectOrganization } =
+    useAccount();
   const activeOrgId = workspace?.accountId ?? organizations[0]?.accountId ?? null;
   const org = organizations.find((each) => each.accountId === activeOrgId);
   const inOrg = activeOrgId ? workspacesInOrg(workspaces, activeOrgId) : [];
@@ -82,22 +70,19 @@ function useWorkspaceMenu() {
       openOnWeb(account.baseUrl, webPaths.organizationSettings(workspace.id));
     }
   };
-  // Opening the menu refreshes the list, so a workspace made on another device
-  // since the app came to the front appears in it.
-  const onOpenMenu = () => void reload();
-  return { actions, onPressAction, onOpenMenu, workspace, org, personal };
+  return { actions, onPressAction, workspace, org, personal };
 }
 
 export function WorkspaceSwitcherBlock() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const { actions, onPressAction, onOpenMenu, workspace, org, personal } = useWorkspaceMenu();
+  const { actions, onPressAction, workspace, org, personal } = useWorkspaceMenu();
   const [width, setWidth] = useState(0);
 
   return (
     // A SwiftUI menu sizes to its trigger: measure the row so it spans it.
     <View onLayout={(event) => setWidth(Math.round(event.nativeEvent.layout.width))}>
-      <NativeMenu actions={actions} onPressAction={onPressAction} onOpenMenu={onOpenMenu}>
+      <NativeMenu actions={actions} onPressAction={onPressAction}>
         <View
           accessible
           accessibilityRole="button"
@@ -157,7 +142,7 @@ export function WorkspaceSwitcherBlock() {
 export function WorkspaceSwitcherTitle() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const { actions, onPressAction, onOpenMenu, workspace, org, personal } = useWorkspaceMenu();
+  const { actions, onPressAction, workspace, org, personal } = useWorkspaceMenu();
   const label = (
     <View
       accessible
@@ -169,7 +154,6 @@ export function WorkspaceSwitcherTitle() {
         {personal ? <Icon name="lock" size={13} color={c.fg} /> : null}
         <Text
           numberOfLines={1}
-          maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
           style={{
             ...fontStyle(theme, 600),
             fontSize: 16,
@@ -185,7 +169,6 @@ export function WorkspaceSwitcherTitle() {
       {org ? (
         <Text
           numberOfLines={1}
-          maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
           style={{
             ...fontStyle(theme, 500),
             fontSize: 12,
@@ -202,7 +185,7 @@ export function WorkspaceSwitcherTitle() {
     return <Pressable onPress={() => router.push("/workspaces")}>{label}</Pressable>;
   }
   return (
-    <NativeMenu actions={actions} onPressAction={onPressAction} onOpenMenu={onOpenMenu}>
+    <NativeMenu actions={actions} onPressAction={onPressAction}>
       {label}
     </NativeMenu>
   );

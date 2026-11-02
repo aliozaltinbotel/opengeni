@@ -19,7 +19,6 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { requireOrganizationApiKeyControlPermission, throwServiceAccountError } from "./api-keys";
-import { requireNativeOrganizationMutation } from "../http/organization-governance";
 
 /* ----------------------------------------------------------------------------
    Service accounts: organization identities with no person behind them. They
@@ -47,7 +46,6 @@ export function registerOrganizationServiceAccountRoutes(app: Hono, deps: ApiRou
     const { organizationId, context } = await requireControl(c, deps);
     const body = c.req.valid("json");
     if (body.role === "admin") requireOrganizationAdmin(context, organizationId);
-    await requireNativeOrganizationMutation(deps, organizationId, "service_account.create");
     const created = await createOrganizationServiceAccount(deps.db, {
       accountId: organizationId,
       name: body.name,
@@ -72,7 +70,6 @@ export function registerOrganizationServiceAccountRoutes(app: Hono, deps: ApiRou
       const { organizationId, context } = await requireControl(c, deps);
       const body = c.req.valid("json");
       if (body.role === "admin") requireOrganizationAdmin(context, organizationId);
-      await requireNativeOrganizationMutation(deps, organizationId, "service_account.update");
       try {
         return c.json(
           OrganizationServiceAccount.parse(
@@ -93,7 +90,6 @@ export function registerOrganizationServiceAccountRoutes(app: Hono, deps: ApiRou
 
   app.delete(`${path}/:serviceAccountId`, async (c) => {
     const { organizationId } = await requireControl(c, deps);
-    await requireNativeOrganizationMutation(deps, organizationId, "service_account.delete");
     try {
       await deleteOrganizationServiceAccount(deps.db, organizationId, serviceAccountId(c));
     } catch (error) {

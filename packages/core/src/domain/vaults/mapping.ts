@@ -6,7 +6,6 @@
 import {
   formatSecretReference,
   secretNameKey,
-  weakerArchiveKind,
   VaultProviderOperations,
   type VaultItem,
   type VaultItemField,
@@ -52,13 +51,16 @@ export function withoutProviderWrites(
   };
 }
 
-/** Operations both sides allow; an archive takes the weaker of the two kinds. */
+/** Operations both sides allow (an archive needs both to agree on its kind). */
 export function intersectProviderOperations(
   left: VaultProviderOperations,
   right: VaultProviderOperations,
 ): VaultProviderOperations {
-  const archiveKind = weakerArchiveKind(left.archiveKind, right.archiveKind);
-  const archiveItem = left.archiveItem && right.archiveItem && archiveKind !== "none";
+  const archiveItem =
+    left.archiveItem &&
+    right.archiveItem &&
+    left.archiveKind === right.archiveKind &&
+    left.archiveKind !== "none";
   return {
     createItemTypes: left.createItemTypes.filter(
       (type) => type !== "passkey" && right.createItemTypes.includes(type),
@@ -66,7 +68,7 @@ export function intersectProviderOperations(
     updateItem: left.updateItem && right.updateItem,
     removeField: left.removeField && right.removeField,
     archiveItem,
-    archiveKind: archiveItem ? archiveKind : "none",
+    archiveKind: archiveItem ? left.archiveKind : "none",
     deleteItem: false,
     restoreItem: left.restoreItem && right.restoreItem,
     readFiles: left.readFiles && right.readFiles,
@@ -213,10 +215,7 @@ function usernameOf(row: VaultItemRow, key: Uint8Array | null): string | null {
   const field = row.fields.find(
     (candidate) => candidate.kind === "text" && secretNameKey(candidate.name) === "username",
   );
-  if (field?.valueEncrypted != null) return decryptOrNull(key, field.valueEncrypted);
-  return row.vaultSource !== "opengeni"
-    ? decryptOrNull(key, row.usernameHintEncrypted ?? null)
-    : null;
+  return field ? decryptOrNull(key, field.valueEncrypted) : null;
 }
 
 export function toVaultItemSummary(row: VaultItemRow, key: Uint8Array | null): VaultItemSummary {
@@ -224,14 +223,11 @@ export function toVaultItemSummary(row: VaultItemRow, key: Uint8Array | null): V
     id: row.id,
     vaultId: row.vaultId,
     type: row.type,
-    category: row.category ?? null,
     name: row.name,
     websites: row.websites ?? [],
     username: usernameOf(row, key),
     hasTotp: row.fields.some((field) => field.kind === "totp"),
-    // A hosted passkey item, or a connected item (a password manager login)
-    // that holds a passkey.
-    hasPasskey: row.type === "passkey" || (row.providerPasskeys?.length ?? 0) > 0,
+    hasPasskey: row.type === "passkey",
     expiresAt: row.expiresAt,
     archivedAt: row.archivedAt,
     lastUsedAt: row.lastUsedAt,
@@ -265,7 +261,6 @@ export function toVaultItem(row: VaultItemRow, key: Uint8Array | null): VaultIte
     return field ? decryptOrNull(key, field.valueEncrypted) : null;
   };
   const credentialId = row.type === "passkey" ? (textField("credentialid") ?? "") : "";
-  const providerPasskey = row.type === "passkey" ? null : (row.providerPasskeys?.[0] ?? null);
   return {
     ...toVaultItemSummary(row, key),
     fields: row.fields.map((field) => toVaultItemField(row, field, key)),
@@ -279,16 +274,7 @@ export function toVaultItem(row: VaultItemRow, key: Uint8Array | null): VaultIte
             leasedUntil: row.passkeyLeasedUntil,
             lastUsedAt: row.lastUsedAt,
           }
-        : providerPasskey
-          ? {
-              rpId: providerPasskey.rpId,
-              userName: providerPasskey.userName,
-              credentialIdSuffix: providerPasskey.credentialId.slice(-8),
-              signCount: Number(row.passkeySignCount ?? 0),
-              leasedUntil: row.passkeyLeasedUntil,
-              lastUsedAt: row.lastUsedAt,
-            }
-          : null,
+        : null,
     aliases: row.aliases ?? [],
     primaryFieldId: row.primaryFieldId,
     createdBySubjectId: row.createdBySubjectId,

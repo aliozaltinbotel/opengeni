@@ -1,5 +1,5 @@
 import { CalendarIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
@@ -14,7 +14,7 @@ import {
 } from "@opengeni/react/ui/list-row";
 import { Notice } from "@opengeni/react/ui/notice";
 import { ReasonTooltip } from "@opengeni/react/ui/disabled-reason";
-import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
+import { Section, SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { StatGroup, StatTile, type StatDelta } from "@opengeni/react/ui/stat-tile";
@@ -76,8 +76,8 @@ import {
   type TokenClassId,
 } from "./usage-format";
 import { loadUsage, loadUsageCalls, type UsageLoad } from "./usage-source";
-import { SitesUsageSection } from "./sites-usage-section";
-import { PartlyUnpricedMark, Quiet, Unpriced } from "./usage-values";
+import { SitePlatformUsageSection } from "./site-platform-usage-section";
+import { SiteAiUsageSection } from "./site-ai-usage-section";
 import {
   activeFilterCount,
   nextUsageSearch,
@@ -313,11 +313,16 @@ export function UsageDashboard(props: UsageDashboardProps) {
         </p>
       </div>
       {props.scope.kind === "workspace" ? (
-        <SitesUsageSection
-          client={client}
-          workspaceId={props.scope.workspaceId}
-          range={query.range === "custom" ? null : query.range}
-        />
+        <Section title="Sites" contentClassName="flex flex-col gap-6">
+          {query.range !== "custom" ? (
+            <SiteAiUsageSection
+              client={client}
+              workspaceId={props.scope.workspaceId}
+              range={query.range}
+            />
+          ) : null}
+          <SitePlatformUsageSection client={client} workspaceId={props.scope.workspaceId} />
+        </Section>
       ) : null}
     </div>
   );
@@ -348,7 +353,7 @@ const FILTER_FIELD_LABEL: Record<UsageFilterField, string> = {
   projectId: "Project",
   person: "Person",
   rootSessionId: "Session",
-  scheduleId: "Automation",
+  scheduleId: "Schedule",
   source: "Source",
 };
 
@@ -591,6 +596,17 @@ function changeDelta(
   };
 }
 
+/** "—" with an explanation, for an amount nobody priced. */
+function Unpriced(props: { reason?: string }) {
+  return (
+    <ReasonTooltip reason={props.reason ?? "No list price is recorded for these models yet."}>
+      <span tabIndex={0} className="cursor-help text-fg-subtle" aria-label="Not priced">
+        —
+      </span>
+    </ReasonTooltip>
+  );
+}
+
 function MoneyValue(props: { measures: UsageMeasures; compact?: boolean }) {
   const { measures } = props;
   if (measures.calls > 0 && costUnknown(measures)) return <Unpriced />;
@@ -601,7 +617,13 @@ function MoneyValue(props: { measures: UsageMeasures; compact?: boolean }) {
       {costIsEstimate(measures) ? "~" : ""}
       {value}
       {partlyUnpriced ? (
-        <PartlyUnpricedMark calls={measures.calls} pricedCalls={measures.pricedCalls} />
+        <ReasonTooltip
+          reason={`${formatCount(measures.calls - measures.pricedCalls)} of ${formatCount(measures.calls)} calls have no list price yet and aren't counted.`}
+        >
+          <span tabIndex={0} className="ml-0.5 cursor-help align-super text-2xs text-fg-subtle">
+            *
+          </span>
+        </ReasonTooltip>
       ) : null}
     </span>
   );
@@ -1237,6 +1259,10 @@ function ShareCell(props: { share: number | null }) {
       </span>
     </span>
   );
+}
+
+function Quiet(props: { children: ReactNode }) {
+  return <span className="text-sm text-fg-muted tabular-nums">{props.children}</span>;
 }
 
 /* ----------------------------------------------------------------------------

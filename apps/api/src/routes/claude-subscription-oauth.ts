@@ -17,7 +17,6 @@ import {
 import { managedCookieHuman, requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { claudeCoreRoute, requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
-import { parseRequestBody } from "../http/request-body";
 
 export function registerClaudeSubscriptionOAuthRoutes(
   app: Hono,
@@ -131,17 +130,19 @@ export function registerClaudeSubscriptionOAuthRoutes(
     });
     app.post(`${path}/complete`, async (c) => {
       const inputScope = await scope(c, organization);
-      const payload = parseRequestBody(
-        ClaudeSubscriptionOAuthCompleteRequest,
+      const payload = ClaudeSubscriptionOAuthCompleteRequest.safeParse(
         await c.req.json().catch(() => null),
-        { status: 422, message: "Enter the authorization code from Claude." },
       );
+      if (!payload.success)
+        throw new HTTPException(422, {
+          message: "Enter the authorization code from Claude.",
+        });
       const core = await oauthCore(c, inputScope);
       return c.json(
         await completeClaudeSubscriptionOAuth(
           deps,
           inputScope,
-          payload,
+          payload.data,
           async (poolScope) => {
             if (!organization)
               await requireSubscriptionScopeMutation(

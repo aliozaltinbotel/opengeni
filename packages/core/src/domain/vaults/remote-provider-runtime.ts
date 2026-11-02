@@ -99,7 +99,7 @@ export function createRemoteExternalVaultFactories(
     credentials,
     operations,
   }) => {
-    if (credentials.provider !== "external")
+    if (credentials.provider !== "external" && credentials.provider !== "bitwarden")
       throw new VaultProviderError("provider_auth_invalid", "Vault provider does not match.");
     let endpoint: string;
     try {
@@ -125,5 +125,5 @@ export function createRemoteExternalVaultFactories(
       }),
     };
   };
-  return { external: factory };
+  return { external: factory, bitwarden: factory };
 }

@@ -14,8 +14,4 @@ export function accountRouteAuthNeededPayload(
     : payload;
 }
 
-export {
-  apiIntegrationAccountLabels,
-  expandMcpAccountRoutes,
-  expandApiIntegrationAccountRoutes,
-} from "@opengeni/core";
+export { expandMcpAccountRoutes, expandApiIntegrationAccountRoutes } from "@opengeni/core";

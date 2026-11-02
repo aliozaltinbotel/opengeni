@@ -3,7 +3,8 @@ import type { SitePlatformUsage } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 
 import { Notice } from "@opengeni/react/ui/notice";
-import { StatGroup, StatTile } from "@opengeni/react/ui/stat-tile";
+import { Section } from "@opengeni/react/ui/section";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
   PLATFORM_METER_LABELS,
@@ -11,21 +12,30 @@ import {
 } from "@opengeni/react/app/lib/site-publishing";
 import { formatCredits } from "@/lib/usage-allowances";
 
-export type SitePlatformUsageLoad =
+type Load =
   | { state: "loading" }
   | { state: "hidden" }
   | { state: "failed" }
   | { state: "ready"; usage: SitePlatformUsage };
 
+const MODE_DESCRIPTION: Record<SitePlatformUsage["billingMode"], string> = {
+  usage_only: "What this workspace's published Sites used this month. Not charged.",
+  shadow: "What this workspace's published Sites used this month. Not charged yet.",
+  credits: "Included every month. Use above it is paid with credits.",
+};
+
 /**
- * This month's Site platform metrics, separate from model charges and the
- * dashboard's selected window. Hidden where the workspace can't publish.
+ * Insights: this month's Site platform metrics, separate from model charges
+ * and the dashboard's selected model-usage window. Hidden without publishing.
  */
-export function useSitePlatformUsage(
-  client: Pick<OpenGeniBrowserClient, "getSitePlatformUsage">,
-  workspaceId: string,
-): SitePlatformUsageLoad {
-  const [load, setLoad] = useState<SitePlatformUsageLoad>({ state: "loading" });
+export function SitePlatformUsageSection({
+  client,
+  workspaceId,
+}: {
+  client: Pick<OpenGeniBrowserClient, "getSitePlatformUsage">;
+  workspaceId: string;
+}) {
+  const [load, setLoad] = useState<Load>({ state: "loading" });
   useEffect(() => {
     const abort = new AbortController();
     setLoad({ state: "loading" });
@@ -43,56 +53,57 @@ export function useSitePlatformUsage(
       });
     return () => abort.abort();
   }, [client, workspaceId]);
-  return load;
+  if (load.state === "hidden" || load.state === "loading") return null;
+  if (load.state === "failed")
+    return (
+      <Section title="Platform activity" headingLevel={3}>
+        <p className="text-sm text-fg-muted">Couldn't load Site platform activity.</p>
+      </Section>
+    );
+  return <SitePlatformUsageView usage={load.usage} />;
 }
 
-function platformNote(usage: SitePlatformUsage): string {
-  switch (usage.billingMode) {
-    case "usage_only":
-      return "Platform activity this month. Not charged.";
-    case "shadow":
-      return usage.shadowMicros > 0
-        ? `Platform activity this month. Not charged yet; ${formatCredits(usage.shadowMicros)} would have been charged.`
-        : "Platform activity this month. Not charged yet.";
-    case "credits":
-      return `Platform activity this month. Use above what's included is paid with credits; ${formatCredits(usage.chargedMicros)} charged so far.`;
-  }
-}
-
-/** "of 1M included", and how far over it when use passed the allowance. */
-function allowanceCaption(meter: SitePlatformUsage["meters"][number]): string {
-  const included = `of ${formatPlatformAmount(meter.meter, meter.allowance)} included`;
-  return meter.used > meter.allowance
-    ? `${included} · ${formatPlatformAmount(meter.meter, meter.used - meter.allowance)} over`
-    : included;
-}
-
-/**
- * One value per meter in the KPI tiles' style. Without a limit (usage_only)
- * a meter is a plain value; with one, the tile says how much is included.
- */
 export function SitePlatformUsageView({ usage }: { usage: SitePlatformUsage }) {
+  const charged =
+    usage.billingMode === "credits"
+      ? `${formatCredits(usage.chargedMicros)} charged this month`
+      : usage.billingMode === "shadow" && usage.shadowMicros > 0
+        ? `${formatCredits(usage.shadowMicros)} would have been charged this month`
+        : null;
   return (
-    <div className="flex min-w-0 flex-col gap-3">
-      {usage.brake.engaged ? (
-        <Notice tone="failed" title="Sites are paused">
-          Opengeni paused Site writes, publishing and visitor agents while it reviews unusual usage.
-          Pages still load.
-        </Notice>
-      ) : null}
-      {usage.meters.length > 0 ? (
-        <StatGroup columns={4} label="Site platform activity this month">
+    <Section
+      title="Platform activity"
+      headingLevel={3}
+      description={MODE_DESCRIPTION[usage.billingMode]}
+    >
+      <div className="flex min-w-0 flex-col gap-4 py-1">
+        {usage.brake.engaged ? (
+          <Notice tone="failed" title="Sites are paused">
+            Opengeni paused Site writes, publishing and visitor agents while it reviews unusual
+            usage. Pages still load.
+          </Notice>
+        ) : null}
+        <div className="grid min-w-0 grid-cols-2 gap-x-6 gap-y-4 max-sm:grid-cols-1">
           {usage.meters.map((meter) => (
-            <StatTile
+            <UsageMeter
               key={meter.meter}
               label={PLATFORM_METER_LABELS[meter.meter]}
-              value={formatPlatformAmount(meter.meter, meter.used)}
-              {...(usage.billingMode === "usage_only" ? {} : { caption: allowanceCaption(meter) })}
+              measure="used"
+              percent={
+                usage.billingMode !== "usage_only" && meter.allowance > 0
+                  ? (meter.used / meter.allowance) * 100
+                  : null
+              }
+              valueLabel={
+                usage.billingMode === "usage_only"
+                  ? formatPlatformAmount(meter.meter, meter.used)
+                  : `${formatPlatformAmount(meter.meter, meter.used)} of ${formatPlatformAmount(meter.meter, meter.allowance)}`
+              }
             />
           ))}
-        </StatGroup>
-      ) : null}
-      <p className="text-xs leading-4.5 text-fg-subtle">{platformNote(usage)}</p>
-    </div>
+        </div>
+        {charged ? <p className="text-xs text-fg-muted">{charged}</p> : null}
+      </div>
+    </Section>
   );
 }

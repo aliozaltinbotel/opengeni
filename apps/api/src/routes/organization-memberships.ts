@@ -1,7 +1,6 @@
 import { signupCreditModelIds } from "@opengeni/config";
 import { ApiHttpError } from "../http/api-error";
 import {
-  applyGovernedOrganizationPolicy,
   lookupExternalIdentityForRequest,
   cancelExternalWorkspaceMemberGrantForRequest,
   updateExternalWorkspaceMemberForRequest,
@@ -69,7 +68,6 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   getOrganizationAdministrationOverview,
   getOrganizationInvitationForAdministration,
-  getOrganizationPrivacyPreferences,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -100,18 +98,7 @@ import {
   assertOrganizationUserSetupDeliveryConfigured,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
-import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
-import {
-  lastSharedWorkspaceRemovalHttpError,
-  removalRequiresRemainingSharedWorkspace,
-  requireGovernedInvitationWorkspace,
-  requireGovernedReactivationWorkspaces,
-  requireNativeOrganizationMutation,
-  requireNativeOrganizationMutationForRequest,
-  requireOrganizationCreate,
-  requirePersonalWorkspacesSetting,
-} from "../http/organization-governance";
-import type { GovernedMutation } from "@opengeni/contracts/organization-governance";
+import { readRequestJson } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -244,11 +231,13 @@ async function requireOrganizationAdministrator(
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
-    status: 422,
-    message: "invalid organization membership request",
-  });
-  return parsed;
+  const parsed = schema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new HTTPException(422, {
+      message: "invalid organization membership request",
+    });
+  }
+  return parsed.data;
 }
 
 function parseId(schema: z.ZodString, value: string, label: string): string {
@@ -257,9 +246,7 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
   return parsed.data;
 }
 
-export function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
-  const lastSharedWorkspace = lastSharedWorkspaceRemovalHttpError(error);
-  if (lastSharedWorkspace) throw lastSharedWorkspace;
+function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
   const sqlState = nestedPostgresSqlState(error);
   if (sqlState === "P0S01") {
     throw new ApiHttpError(402, {
@@ -291,14 +278,6 @@ export function rethrowMembershipError(error: unknown, resourceLimitMessage?: st
   throw error;
 }
 
-/** The governed mutation each member transition is. */
-export const memberTransitionMutation = {
-  change_role: "membership.role.change",
-  suspend: "membership.suspend",
-  reactivate: "membership.reactivate",
-  offboard: "membership.offboard",
-} as const satisfies Record<UpdateOrganizationMemberRequest["kind"], GovernedMutation>;
-
 export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDeps): void {
   // POST carries an opaque identity reference; this lookup never provisions.
   app.post("/v1/organizations/:organizationId/external-identities/lookup", async (context) => {
@@ -323,12 +302,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const membershipId = parseId(MembershipId, context.req.param("membershipId"), "membership id");
-    await requireNativeOrganizationMutationForRequest(
-      context,
-      deps,
-      organizationId,
-      "external_member.update",
-    );
     try {
       return context.json(
         await updateExternalIdentityMembershipForRequest(
@@ -346,25 +319,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
-    await requireOrganizationCreate(deps, subjectId);
     const payload = await parseBody(context, CreateOrganizationRequest);
     try {
-      const created = CreateOrganizationResponse.parse(
-        await createManagedOrganization(deps.db, {
-          subjectId,
-          subjectLabel: session.user.email || session.user.name,
-          ...payload,
-          trialCreditModelIds: signupCreditModelIds(deps.settings),
-          trialCreditsEnabled:
-            deps.settings.productAccessMode === "managed" &&
-            deps.settings.verifiedSignupTrialCreditsEnabled,
-        }),
+      return context.json(
+        CreateOrganizationResponse.parse(
+          await createManagedOrganization(deps.db, {
+            subjectId,
+            subjectLabel: session.user.email || session.user.name,
+            ...payload,
+            trialCreditModelIds: signupCreditModelIds(deps.settings),
+            trialCreditsEnabled:
+              deps.settings.productAccessMode === "managed" &&
+              deps.settings.verifiedSignupTrialCreditsEnabled,
+          }),
+        ),
+        201,
       );
-      await applyGovernedOrganizationPolicy(deps, {
-        organizationId: created.organization.id,
-        actorSubjectId: subjectId,
-      });
-      return context.json(created, 201);
     } catch (error) {
       rethrowMembershipError(error);
     }
@@ -372,21 +342,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
 
   app.post("/v1/organizations/additional", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
-    await requireOrganizationCreate(deps, subjectId);
     const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
     try {
-      const created = CreateAdditionalOrganizationResponse.parse(
-        await createAdditionalManagedOrganization(deps.db, {
-          subjectId,
-          subjectLabel: session.user.email || session.user.name,
-          ...payload,
-        }),
+      return context.json(
+        CreateAdditionalOrganizationResponse.parse(
+          await createAdditionalManagedOrganization(deps.db, {
+            subjectId,
+            subjectLabel: session.user.email || session.user.name,
+            ...payload,
+          }),
+        ),
+        201,
       );
-      await applyGovernedOrganizationPolicy(deps, {
-        organizationId: created.organization.id,
-        actorSubjectId: subjectId,
-      });
-      return context.json(created, 201);
     } catch (error) {
       rethrowMembershipError(error, "additional organization limit reached");
     }
@@ -404,16 +371,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
-          // Each organization says whether its people keep a Personal
-          // workspace to see and work in, so the app can hide it when off.
-          memberships: await Promise.all(
-            result.organizationMemberships.map(async (membership) => ({
-              ...membership,
-              personalWorkspacesEnabled: (
-                await getOrganizationPrivacyPreferences(deps.db, membership.organizationId)
-              ).personalWorkspacesEnabled,
-            })),
-          ),
+          memberships: result.organizationMemberships,
         }),
       );
     } catch (error) {
@@ -433,10 +391,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
 
   app.get("/v1/organization-invitations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
-    const query = parseRequestQuery(ListOrganizationInvitationsPageQuery, context.req.query(), {
-      status: 422,
-      message: "invalid organization invitation page",
-    });
+    const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
+    if (!query.success) {
+      throw new HTTPException(422, {
+        message: "invalid organization invitation page",
+      });
+    }
     try {
       if (session.user.emailVerified) {
         await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
@@ -448,8 +408,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ListOrganizationInvitationsPageResponse.parse(
           await listSelfOrganizationInvitations(deps.db, {
             subjectId,
-            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-            limit: query.limit,
+            ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
+            limit: query.data.limit,
           }),
         ),
       );
@@ -569,13 +529,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       // quiescence rules. It confers no organization-administrator identity.
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
       await requireOrganizationKeyWorkspaceDeletion(context, deps, organizationId, workspaceId);
-      await requireNativeOrganizationMutation(deps, organizationId, "workspace.delete");
       await deleteWorkspaceForRequest(deps, { accountId: organizationId, workspaceId });
       return context.body(null, 204);
     }
     const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-    await requireNativeOrganizationMutation(deps, organizationId, "workspace.delete");
     await deleteWorkspaceForRequest(deps, {
       accountId: organizationId,
       workspaceId,
@@ -628,7 +586,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         "membership id",
       );
       const payload = await parseBody(context, PutOrganizationWorkspaceMemberRequest);
-      await requireNativeOrganizationMutation(deps, organizationId, "workspace_member.update");
       try {
         return context.json(
           OrganizationWorkspaceAccessMember.parse(
@@ -651,36 +608,17 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   // permissions in one shared workspace (keyed, idempotent, non-destructive).
   app.patch(
     "/v1/organizations/:organizationId/workspaces/:workspaceId/external-members/:membershipId",
-    async (context) => {
-      const organizationId = parseId(
-        OrganizationId,
-        context.req.param("organizationId"),
-        "organization id",
-      );
-      const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-      const membershipId = parseId(
-        MembershipId,
-        context.req.param("membershipId"),
-        "membership id",
-      );
-      const input = await readRequestJson(context);
-      await requireNativeOrganizationMutationForRequest(
-        context,
-        deps,
-        organizationId,
-        "external_member.update",
-      );
-      return context.json(
+    async (context) =>
+      context.json(
         await updateExternalWorkspaceMemberForRequest(
           context,
           deps,
-          organizationId,
-          workspaceId,
-          membershipId,
-          input,
+          parseId(OrganizationId, context.req.param("organizationId"), "organization id"),
+          parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id"),
+          parseId(MembershipId, context.req.param("membershipId"), "membership id"),
+          await readRequestJson(context),
         ),
-      );
-    },
+      ),
   );
 
   app.post(
@@ -688,30 +626,13 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     async (context) => {
       const input: unknown = await context.req.json().catch(() => null);
       if (input && typeof input === "object" && "cancelGrantOperationId" in input) {
-        const organizationId = parseId(
-          OrganizationId,
-          context.req.param("organizationId"),
-          "organization id",
-        );
-        const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-        const membershipId = parseId(
-          MembershipId,
-          context.req.param("membershipId"),
-          "membership id",
-        );
-        await requireNativeOrganizationMutationForRequest(
-          context,
-          deps,
-          organizationId,
-          "external_member.update",
-        );
         return context.json(
           await cancelExternalWorkspaceMemberGrantForRequest(
             context,
             deps,
-            organizationId,
-            workspaceId,
-            membershipId,
+            parseId(OrganizationId, context.req.param("organizationId"), "organization id"),
+            parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id"),
+            parseId(MembershipId, context.req.param("membershipId"), "membership id"),
             input,
           ),
         );
@@ -729,11 +650,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         "membership id",
       );
       const payload = await parseBody(context, RevokeOrganizationWorkspaceMemberRequest);
-      await requireNativeOrganizationMutation(deps, organizationId, "workspace_member.remove");
-      const requireRemainingSharedWorkspace = await removalRequiresRemainingSharedWorkspace(
-        deps,
-        organizationId,
-      );
       try {
         return context.json(
           RevokeOrganizationWorkspaceMemberResponse.parse(
@@ -744,7 +660,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
               targetOrganizationMembershipId: membershipId,
               expectedUpdatedAt: payload.expectedUpdatedAt,
               operationId: payload.operationId,
-              ...(requireRemainingSharedWorkspace ? { requireRemainingSharedWorkspace } : {}),
             }),
           ),
         );
@@ -838,7 +753,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     const request = await parseBody(context, UpdateOrganizationPrivacySettingsRequest);
-    await requirePersonalWorkspacesSetting(deps, organizationId, request.personalWorkspaces);
     try {
       return context.json(
         OrganizationPrivacySettings.parse(
@@ -865,8 +779,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
-    await requireNativeOrganizationMutation(deps, organizationId, "invitation.create");
-    await requireGovernedInvitationWorkspace(deps, organizationId, payload.initialWorkspaceIds);
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {
@@ -920,18 +832,20 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       context.req.param("organizationId"),
       "organization id",
     );
-    const query = parseRequestQuery(ListOrganizationInvitationsPageQuery, context.req.query(), {
-      status: 422,
-      message: "invalid organization invitation page",
-    });
+    const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
+    if (!query.success) {
+      throw new HTTPException(422, {
+        message: "invalid organization invitation page",
+      });
+    }
     try {
       return context.json(
         ListOrganizationInvitationsPageResponse.parse(
           await listOrganizationInvitations(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
-            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-            limit: query.limit,
+            ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
+            limit: query.data.limit,
           }),
         ),
       );
@@ -955,7 +869,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         "invitation id",
       );
       const payload = await parseBody(context, RetryOrganizationUserSetupDeliveryRequest);
-      await requireNativeOrganizationMutation(deps, organizationId, "invitation.delivery.retry");
       try {
         assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
       } catch {
@@ -1027,7 +940,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         "invitation id",
       );
       const payload = await parseBody(context, RevokeOrganizationInvitationRequest);
-      await requireNativeOrganizationMutation(deps, organizationId, "invitation.revoke");
       try {
         return context.json(
           OrganizationInvitation.parse(
@@ -1076,15 +988,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const membershipId = parseId(MembershipId, context.req.param("membershipId"), "membership id");
     const payload = await parseBody(context, UpdateOrganizationMemberRequest);
-    await requireNativeOrganizationMutation(
-      deps,
-      organizationId,
-      memberTransitionMutation[payload.kind],
-    );
-    // A native reactivation cannot re-grant: a governed organization's
-    // members are reactivated by the host command with workspaceIds.
-    if (payload.kind === "reactivate")
-      await requireGovernedReactivationWorkspaces(deps, organizationId, undefined);
     try {
       return context.json(
         OrganizationMember.parse(
@@ -1150,8 +1053,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 }
 
-/** Claims, prepares, sends and settles one invitation's account-setup email. */
-export async function deliverOrganizationUserSetup(
+async function deliverOrganizationUserSetup(
   deps: ApiRouteDeps,
   input: {
     organizationId: string;

@@ -74,20 +74,6 @@ export interface SdkItemCreateParams {
   notes?: string;
   tags?: string[];
   websites?: SdkWebsite[];
-  /** Files stored as fields of a section. */
-  files?: SdkFileCreateParams[];
-  /** The file of a Document item. */
-  document?: SdkDocumentCreateParams;
-}
-export interface SdkFileCreateParams {
-  name: string;
-  content: Uint8Array;
-  sectionId: string;
-  fieldId: string;
-}
-export interface SdkDocumentCreateParams {
-  name: string;
-  content: Uint8Array;
 }
 export interface SdkVaultOverview {
   id: string;
@@ -129,9 +115,6 @@ export interface OnePasswordSdkClient {
     delete(vaultId: string, itemId: string): Promise<void>;
     files: {
       read(vaultId: string, itemId: string, attributes: SdkFileAttributes): Promise<Uint8Array>;
-      attach(item: SdkItem, file: SdkFileCreateParams): Promise<SdkItem>;
-      delete(item: SdkItem, sectionId: string, fieldId: string): Promise<SdkItem>;
-      replaceDocument(item: SdkItem, document: SdkDocumentCreateParams): Promise<SdkItem>;
     };
   };
 }

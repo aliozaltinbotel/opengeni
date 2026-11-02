@@ -10,16 +10,10 @@ export type CuaDesktopTool = {
   annotations: Record<string, boolean>;
   capabilities: string[];
 };
-export const CUA_DESKTOP_TOOLS: readonly CuaDesktopTool[] = catalog.tools;
-export const CUA_LINUX_DESKTOP_TOOLS: readonly CuaDesktopTool[] = linuxCatalog.tools;
+export const CUA_DESKTOP_TOOLS: readonly CuaDesktopTool[] = catalog;
+export const CUA_LINUX_DESKTOP_TOOLS: readonly CuaDesktopTool[] = linuxCatalog;
 /** Windows publishes its own input schemas and omits tools it does not implement. */
-export const CUA_WINDOWS_DESKTOP_TOOLS: readonly CuaDesktopTool[] = windowsCatalog.tools;
-/** The CUA release each platform's catalog was generated from. */
-export const CUA_DESKTOP_TOOL_VERSIONS: Readonly<Record<"macos" | "linux" | "windows", string>> = {
-  macos: catalog.cuaVersion,
-  linux: linuxCatalog.cuaVersion,
-  windows: windowsCatalog.cuaVersion,
-};
+export const CUA_WINDOWS_DESKTOP_TOOLS: readonly CuaDesktopTool[] = windowsCatalog;
 
 export function cuaDesktopToolsFor(
   platform: "macos" | "windows" | "linux",

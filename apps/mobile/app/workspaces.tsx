@@ -1,7 +1,6 @@
 import { workspacesInOrg } from "@opengeni/react/organization-model";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
-import { useEffect } from "react";
 import { useAccount } from "@/account";
 import { SettingsList } from "@/settings-list";
 import type { SettingsSection } from "@/settings-model";
@@ -19,20 +18,8 @@ export default function WorkspacesSheet() {
 /* The workspace switcher as a sheet: the organization's workspaces, the other
    organizations for a person in several, and the web's settings pages. */
 function Workspaces() {
-  const {
-    account,
-    workspace,
-    workspaces,
-    organizations,
-    setWorkspaceId,
-    selectOrganization,
-    reload,
-  } = useAccount();
-  // A workspace made on another device since the app came to the front shows
-  // up while the sheet is open.
-  useEffect(() => {
-    void reload();
-  }, [reload]);
+  const { account, workspace, workspaces, organizations, setWorkspaceId, selectOrganization } =
+    useAccount();
   const activeOrgId = workspace?.accountId ?? organizations[0]?.accountId ?? null;
   const org = organizations.find((each) => each.accountId === activeOrgId);
   const inOrg = activeOrgId ? workspacesInOrg(workspaces, activeOrgId) : [];

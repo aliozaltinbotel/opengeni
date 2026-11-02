@@ -3,7 +3,7 @@ import {
   codeSearchSessionInExperiment,
   type CodeSearchDeploymentPolicy,
 } from "@opengeni/contracts/code-search";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
   configureCodeSearchDeploymentPolicy,

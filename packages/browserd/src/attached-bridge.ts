@@ -51,7 +51,6 @@ export class AttachedBrowserBridgeError extends Error {
       | "timeout"
       | "bridge_failed"
       | "debugger_unavailable"
-      | "invalid_request"
       | "driver_rejected",
     message: string,
     readonly retryable: boolean,
@@ -410,15 +409,13 @@ function errorFromWire(error: BridgeWireError): AttachedBrowserBridgeError {
     "timeout",
     "bridge_failed",
     "debugger_unavailable",
-    "invalid_request",
   ].includes(error.code)
     ? (error.code as
         | "resource_unavailable"
         | "fenced"
         | "timeout"
         | "bridge_failed"
-        | "debugger_unavailable"
-        | "invalid_request")
+        | "debugger_unavailable")
     : "driver_rejected";
   return new AttachedBrowserBridgeError(code, error.message, error.retryable);
 }

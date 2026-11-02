@@ -22,9 +22,12 @@ import {
   type SessionAttachRigAuthority,
   type SessionWorkflowClient,
 } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as sandboxRuntime from "@opengeni/runtime/sandbox";

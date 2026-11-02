@@ -2,8 +2,7 @@ import { expect, test } from "bun:test";
 import { OpenAIResponsesModel, type ModelRequest } from "@openai/agents";
 import { SandboxAgent } from "@openai/agents/sandbox";
 import OpenAI from "openai";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+import { ScriptedModel, testSettings } from "@opengeni/testing";
 import {
   bindModelSourceInput,modelSourceBindings,buildCompactionPromptInput,
   buildOpenGeniAgent,

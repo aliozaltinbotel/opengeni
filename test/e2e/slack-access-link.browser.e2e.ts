@@ -2,8 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;

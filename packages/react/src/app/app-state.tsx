@@ -4,7 +4,7 @@
 // creation). Every host renders the session UI on top of this one state
 // machine: the web app with its own sign-in (`authority: "app"`), embeds with a
 // client the embedding page already authenticated (`authority: "host"`).
-import { t } from "./lib/startup-text";
+import { t } from "./lib/console-text";
 import {
   createSessionEventFeedStore,
   useLatestCallback,
@@ -12,17 +12,10 @@ import {
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
-import {
-  startWorkspaceVoiceCapabilityRefresh,
-  workspaceScopedClientConfig,
-} from "./lib/workspace-voice-capability";
+import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
-import {
-  hasWorkspacePermission,
-  isWorkspacePermissionDenied,
-  lacksWorkspacePermission,
-} from "./lib/permissions";
+import { hasWorkspacePermission } from "./lib/permissions";
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
@@ -37,7 +30,6 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
-import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
 import {
@@ -53,11 +45,7 @@ import {
 import { flushSync } from "react-dom";
 import { toast } from "./lib/toast";
 import type { AnalyticsEventName, AnalyticsProperties } from "./lib/analytics-types";
-import {
-  bootstrapErrorPresentation,
-  bootstrapWaitingPresentation,
-  type BootstrapErrorPresentation,
-} from "./lib/bootstrap-error";
+import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "./lib/bootstrap-error";
 import { readBootstrap } from "./lib/bootstrap-read";
 import { hydrateWorkspaceAccessContext } from "./lib/workspace-scope-context";
 import { startDeploymentRefresh } from "./lib/deployment-refresh";
@@ -185,19 +173,11 @@ export type AppStateHost = Readonly<{
     password: string;
     rememberMe?: boolean;
   }) => Promise<unknown>;
-  signUpEmail: (input: {
-    name: string;
-    email: string;
-    password: string;
-    signupChallengeToken?: string;
-  }) => Promise<unknown>;
+  signUpEmail: (input: { name: string; email: string; password: string }) => Promise<unknown>;
   signOutManaged: () => Promise<unknown>;
   hasExternalAccessTokenSource?: () => boolean;
   signOutExternalAccess?: () => Promise<boolean>;
-  startManagedSocialSignIn: (
-    provider: "google" | "github",
-    signupChallengeToken?: string,
-  ) => Promise<void>;
+  startManagedSocialSignIn: (provider: "google" | "github") => Promise<void>;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -336,7 +316,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [workspaceVoiceInput, setWorkspaceVoiceInput] =
     useState<ClientConfig["voiceInput"]>(undefined);
-  const [workspaceFileUploads, setWorkspaceFileUploads] = useState<ClientConfig["fileUploads"]>();
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -600,7 +579,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
       setWorkspaceVoiceInput(undefined);
-      setWorkspaceFileUploads(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -635,7 +613,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       read: (signal) => fetchClientConfig(signal, workspaceId),
       ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
       apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
-      applyFileUploads: (fileUploads) => setWorkspaceFileUploads(fileUploads),
       subscribeFocus: (refresh) => {
         window.addEventListener("focus", refresh);
         return () => window.removeEventListener("focus", refresh);
@@ -683,17 +660,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           context: "client_configuration",
           request: () => fetchClientConfig(controller.signal),
           signal: controller.signal,
-          // An update parks the API for a while: say so calmly and continue
-          // on our own as soon as it answers.
-          waiting: {
-            onWaiting: (error, elapsedMs) => {
-              if (!cancelled) {
-                setConfigError(
-                  bootstrapWaitingPresentation(error, "client_configuration", elapsedMs),
-                );
-              }
-            },
-          },
         }),
       )
       .then((config) => {
@@ -747,23 +713,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
     let cancelled = false;
     const acceptedPrincipal = principalTransitionIdentity.current;
-    const controller = new AbortController();
     setManagedAuthBootstrapComplete(false);
     setAuthSession(undefined);
-    // During an update the session read fails transiently. That is not
-    // "signed out": keep waiting calmly and continue when the API answers.
-    void readBootstrap({
-      context: "client_configuration",
-      request: fetchAuthSession,
-      signal: controller.signal,
-      waiting: {
-        onWaiting: (error, elapsedMs) => {
-          if (!cancelled) {
-            setConfigError(bootstrapWaitingPresentation(error, "client_configuration", elapsedMs));
-          }
-        },
-      },
-    })
+    void fetchAuthSession()
       .then((nextSession) => {
         if (
           cancelled ||
@@ -771,7 +723,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           return;
         }
-        setConfigError((current) => (current?.recovering ? null : current));
         const nextPrincipalId = nextSession?.user.id ?? null;
         if (authPrincipalIdRef.current !== null && authPrincipalIdRef.current !== nextPrincipalId) {
           invalidatePrincipalWorkspaceState();
@@ -788,13 +739,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           return;
         }
-        setConfigError((current) => (current?.recovering ? null : current));
         setAuthSession(null);
         setManagedAuthBootstrapComplete(true);
       });
     return () => {
       cancelled = true;
-      controller.abort();
     };
   }, [clientConfig, fetchAuthSession, managedAuthRequired, invalidatePrincipalWorkspaceState]);
 
@@ -820,8 +769,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     managedSelfContextIdentityRef.current = acceptedManagedIdentity;
     setManagedSelfContext(null);
     setAccessLoading(true);
-    // A calm waiting state stays up while a retry runs.
-    setAccessError((current) => (current?.recovering ? current : null));
+    setAccessError(null);
     const controller = new AbortController();
     // These SDK reads do not accept a caller signal. Fence their late results
     // and every new attempt without changing the SDK's general retry policy.
@@ -832,16 +780,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         signal: controller.signal,
         isCurrent: () =>
           ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal),
-        waiting: {
-          onWaiting: (error, elapsedMs) => {
-            if (
-              !cancelled &&
-              ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
-            ) {
-              setAccessError(bootstrapWaitingPresentation(error, "workspace_access", elapsedMs));
-            }
-          },
-        },
       });
     const selfContextPromise = acceptedManagedIdentity
       ? loadCurrentManagedSelfContext({
@@ -862,8 +800,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           return;
         }
-        // The API answered: any calm "reconnecting" state is over.
-        setAccessError((current) => (current?.recovering ? null : current));
         if (acceptedManagedIdentity && nextManagedSelfContext === null) {
           return;
         }
@@ -905,9 +841,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           managedSelfContextIdentityRef.current = acceptedManagedIdentity;
         }
         accessPrincipalIdRef.current = context.subjectId;
-        // Unsent answers to agent questions belong to this tab's principal: a
-        // different one forgets them before any session route can render.
-        claimHumanInputDraftOwner(context.subjectId);
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
         setManagedSelfContext(nextManagedSelfContext);
@@ -1121,7 +1054,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         request: async () => await client.getAccessContext(),
       });
       if (accessRefresh.status === "stale") return null;
-      claimHumanInputDraftOwner(accessRefresh.value.subjectId);
       setAccessContext(accessRefresh.value);
     } catch {
       toast.warning("Permissions may be out of date", {
@@ -1408,7 +1340,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         request: async () => await client.getAccessContext(),
       });
       if (accessRefresh.status === "stale") return false;
-      claimHumanInputDraftOwner(accessRefresh.value.subjectId);
       setAccessContext(accessRefresh.value);
     } catch {
       toast.warning("Permissions may be out of date", {
@@ -1432,16 +1363,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
-      // A member whose loaded grant lacks GitHub has no GitHub state to read.
-      if (lacksWorkspacePermission(accessContextRef.current, workspaceId, "github:use")) {
-        setGithubStatus(null);
-        setGithubStatusFailed(false);
-        setGithubAppOpen(false);
-        setGithubRepos([]);
-        setGithubCatalogReady(true);
-        setRepoBusy(false);
-        return;
-      }
       setRepoBusy(true);
       try {
         const status = await client.getGitHubApp(workspaceId);
@@ -1482,8 +1403,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         // first-load failure must not look like an empty catalog, or draft
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
-        // Someone without GitHub access in this workspace has nothing to fix.
-        if (isWorkspacePermissionDenied(error)) return;
         toast.error("GitHub status unavailable", {
           description: userErrorText(error),
         });
@@ -1901,8 +1820,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
               outcomeUnknown,
             })
           : false;
-        // A caller that handles the refusal shows it inline instead of the dialog.
-        if (isPaymentRequiredError(problem) && handled !== true) {
+        if (isPaymentRequiredError(problem)) {
           const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
           setCreditRequired({
             workspaceId,
@@ -2172,7 +2090,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
 
   async function handleManagedAuth(
     mode: "signin" | "signup",
-    input: { name: string; email: string; password: string; signupChallengeToken?: string },
+    input: { name: string; email: string; password: string },
   ) {
     invalidatePrincipalWorkspaceState({
       preservePendingSlackLink: preserveSlackLinkForManagedAuth(mode, slackLink.phase()),
@@ -2218,7 +2136,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   async function handleManagedSessionSetSignup(input: {
-    signupChallengeToken?: string;
     name: string;
     email: string;
     password: string;
@@ -2237,15 +2154,12 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     });
   }
 
-  async function handleManagedSocialAuth(
-    provider: "google" | "github",
-    signupChallengeToken?: string,
-  ) {
+  async function handleManagedSocialAuth(provider: "google" | "github") {
     invalidatePrincipalWorkspaceState({
       preservePendingSlackLink: preserveSlackLinkForManagedAuth("signin", slackLink.phase()),
     });
     beginSocialLoginAnalytics(provider);
-    await startManagedSocialSignIn(provider, signupChallengeToken);
+    await startManagedSocialSignIn(provider);
   }
 
   async function handleManagedSignOut() {
@@ -2271,8 +2185,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setWorkspaces([]);
       setAccessError(null);
     });
-    // The next person in this tab never sees this person's unsent answers.
-    forgetAllHumanInputDrafts();
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
@@ -2441,7 +2353,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       return false;
     }
     accessPrincipalIdRef.current = nextAccessContext.subjectId;
-    claimHumanInputDraftOwner(nextAccessContext.subjectId);
     setAccessContext(nextAccessContext);
     setWorkspaces(nextWorkspaces);
     setManagedSelfContext(nextManagedSelfContext);
@@ -2490,10 +2401,14 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig: workspaceScopedClientConfig(clientConfig, {
-            voiceInput: workspaceVoiceInput,
-            fileUploads: workspaceFileUploads,
-          }),
+          clientConfig: {
+            ...clientConfig,
+            voiceInput:
+              workspaceVoiceInput ??
+              (clientConfig.voiceInput
+                ? { ...clientConfig.voiceInput, available: false, providers: [] }
+                : undefined),
+          },
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2604,7 +2519,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     client,
     clientConfig,
     workspaceVoiceInput,
-    workspaceFileUploads,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,
@@ -2691,8 +2605,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clientConfig,
     configError,
     retryClientConfig: () => {
-      // A calm waiting state stays up while the retry runs.
-      setConfigError((current) => (current?.recovering ? current : null));
+      setConfigError(null);
       setConfigRequestVersion((version) => version + 1);
     },
     authSession,

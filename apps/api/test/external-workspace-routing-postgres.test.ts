@@ -12,9 +12,12 @@ import {
 import * as schema from "@opengeni/db/schema";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../../../packages/db/src/lossless-json";
 import { createApp } from "../src/app";
 

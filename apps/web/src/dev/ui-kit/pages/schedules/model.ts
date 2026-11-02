@@ -7,6 +7,7 @@
 import {
   DEFAULT_CADENCE_TIME,
   describeCadence,
+  describeNextRuns,
   formatRunTime,
   nextRuns,
   normalizeCadenceRule,
@@ -16,6 +17,7 @@ import {
 import {
   KIT_NOW,
   KIT_TIME_ZONE,
+  learningModes,
   modelCatalog,
   personById,
   repositories,
@@ -218,6 +220,12 @@ export function nextRunOf(item: Pick<ScheduleItem, "cadence" | "state">): Date |
   })[0];
 }
 
+/** "Mon 28 Sep, 08:00, then Tue 29 Sep and Wed 30 Sep", in the viewer's zone. */
+export function upcomingRunsLine(cadence: CadenceValue): string {
+  const runs = nextRuns(cadence.rule, { timeZone: cadence.timeZone, now: KIT_NOW, count: 3 });
+  return describeNextRuns(runs, { timeZone: KIT_TIME_ZONE, now: KIT_NOW });
+}
+
 export function runTimeLabel(date: Date): string {
   return formatRunTime(date, { timeZone: KIT_TIME_ZONE, now: KIT_NOW });
 }
@@ -285,6 +293,14 @@ export function environmentName(id: string): string | undefined {
 }
 
 export const REPOSITORY_OPTIONS = repositories;
+
+const LEARNING_WORD = Object.fromEntries(
+  learningModes.map((mode) => [mode.id, mode.label]),
+) as Record<LearningMode, string>;
+
+export function learningWord(choice: LearningChoice): string {
+  return choice === "default" ? "Workspace default" : LEARNING_WORD[choice];
+}
 
 /** Any of the three learning choices differs from the workspace default. */
 export function hasCustomLearning(learning: LearningDraft): boolean {

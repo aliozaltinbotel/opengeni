@@ -35,56 +35,10 @@ exception text and core messages, is published as `Temporal SDK log record`.
 inherits that identity and exports `parentSpanId`; explicitly passing
 `parent: null` starts an independent root. The context contains only validated
 nonzero trace/span IDs and optional W3C trace flags, not baggage or customer attributes. Links are limited
-to eight validated identities. `parseTraceparent` follows W3C Trace Context
-level 1 (lowercase hex, no version `ff`, no all-zero IDs, repeated headers
-rejected); parsing never makes remote context a parent by itself.
+to eight validated identities. W3C traceparent helpers are provided for trusted
+adapters; public HTTP headers are not automatically admitted as trusted context.
 
-Physical worker attempts establish isolated roots. Each API request span
-(kind SERVER) reads the request's `traceparent` header:
-
-- By default a valid header becomes a span link and the request starts its own
-  trace. An untrusted client therefore cannot choose Opengeni's trace ID, join
-  an unrelated trace or grow one without bound, while a trace viewer can still
-  follow the link to the caller's span.
-- With `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` the request
-  span is the caller's child, in the caller's trace. Use it only when every
-  client that can reach the API is trusted, such as a backend that embeds
-  Opengeni or a trusted edge that strips client headers.
-- A missing, malformed or repeated header starts a plain root. `tracestate`
-  and baggage are never read.
-
-### Child spans under API requests
-
-An API request span is started with a child-span budget (256 spans per
-request, exported only when an OTLP endpoint is configured). Code running
-while the request is served records children through `startChildSpan`; outside
-such a scope (workers, background loops) it records nothing and costs only an
-async-local lookup. The budget stops at the request span's end, and a request
-that spends it exports `opengeni.child_spans_dropped` instead of more spans.
-
-- Database: one CLIENT span per statement, named from the statement's shape
-  (`SELECT sessions`, `SELECT list_stalled_recording_work_v1`), with
-  `db.system.name`, `db.operation.name`, `db.collection.name`, the returned row
-  count and, on failure, the SQLSTATE in `db.response.status_code`. Each
-  transaction or savepoint is a `db transaction` / `db savepoint` span over
-  its statements, so time spent waiting for a pooled connection shows as the
-  gap before its first statement. SQL text, bound parameters, rows and error
-  messages are never recorded (`packages/db/src/database-spans.ts`).
-- Outbound HTTP: the standalone API process wraps its global `fetch`; each call
-  is an `HTTP <METHOD>` CLIENT span with the method and response status only,
-  never the URL, host, headers or body. The wrapper is transparent (same
-  arguments, same response, called synchronously), and code that admits only a
-  specific fetch, such as the administered usage reads' native-fetch check
-  (`packages/db/src/usage-read-transport.ts`), must compare
-  `tracedFetchTarget(fetchImpl)`, never the wrapper itself.
-- Clients: the API's object storage and workflow clients are wrapped with
-  `traceClientCalls`, so each call is a `<client> <method>` CLIENT span
-  (`object_storage getFileBytes`, `temporal wakeSessionWorkflow`) with work
-  inside it nested beneath.
-
-Telemetry export itself always runs outside any trace, so exporting spans
-never records more spans.
-
+API requests and physical worker attempts each establish isolated roots.
 Model-call, MCP-tool-call and startup-phase measurements export child spans
 under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
@@ -428,15 +382,8 @@ Ordinary public logs are not a substitute for this protected receiver.
 The OTLP scope is `@opengeni/observability/diagnostics`, version `1`. Log bodies
 contain JSON with schema `opengeni.failure-diagnostic.v1`: a generated diagnostic
 UUID, closed code/stage/retry decision, reviewed constraint names, SQLSTATE,
-bounded contract event types, exact UUID attempt/session/turn/process correlation, the
-exact UUID organization of a tenant-wide operation (the API's startup session-policy
-pass, stage `governed_session_policy.startup_pass`, whose public warning carries only
-the diagnostic UUID as `correlationId`), the exact UUID connection and delivery of a
-host webhook delivery that could not be started (code
-`host_webhook_delivery_start_failed`, stage `host_webhook.delivery_start`, with its
-organization; the public warning carries only the closed code and `correlationId`,
-and `opengeni_host_webhook_delivery_start_failures_total{event,change}` counts it)
-and the 40-hex deployment revision when configured. IDs belong in restricted log
+bounded contract event types, exact UUID attempt/session/turn/process correlation and
+the 40-hex deployment revision when configured. IDs belong in restricted log
 bodies, never indexed metric labels. Unknown constraints and invalid IDs are
 omitted. Source failure classification and retries remain owned by the DB layer.
 

@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  AttemptToolCatalog,
-  AttemptToolResult,
-  McpAppResourceUri,
-  ToolGatewayCatalogEntry,
-  mcpAppToolUiMeta,
-  type AttemptToolCatalogEntry,
-} from "../src";
+import { AttemptToolCatalog, AttemptToolResult, type AttemptToolCatalogEntry } from "../src";
 
 const ids = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -113,77 +106,5 @@ describe("AttemptToolResult", () => {
       "resource",
     ]);
     expect(parsed.structuredContent).toEqual({ ok: true });
-  });
-});
-
-describe("tool catalog MCP Apps view", () => {
-  test("an entry may name its MCP Apps view by a ui:// HTML resource URI", () => {
-    const meta = { ui: { resourceUri: "ui://acme/views/status.html" } };
-    expect(AttemptToolCatalog.parse(catalog([entry({ meta })])).entries[0]?.meta).toEqual(meta);
-    expect(ToolGatewayCatalogEntry.parse(entry()).meta).toBeUndefined();
-  });
-
-  test.each([
-    "https://acme.example/views/status.html",
-    "ui://acme/views/status.js",
-    "ui://Acme/views/status.html",
-    "ui://acme/status.html?x=1",
-    "ui://acme",
-  ])("rejects the view URI %s", (resourceUri) => {
-    expect(
-      ToolGatewayCatalogEntry.safeParse(entry({ meta: { ui: { resourceUri } } })).success,
-    ).toBe(false);
-    expect(McpAppResourceUri.safeParse(resourceUri).success).toBe(false);
-  });
-
-  test("an entry may carry only a visibility, with no view", () => {
-    const meta = { ui: { visibility: ["model" as const] } };
-    expect(AttemptToolCatalog.parse(catalog([entry({ meta })])).entries[0]?.meta).toEqual(meta);
-    expect(ToolGatewayCatalogEntry.safeParse(entry({ meta: { ui: {} } } as never)).success).toBe(
-      false,
-    );
-  });
-
-  test("mcpAppToolUiMeta keeps a visibility without a view and drops a malformed view", () => {
-    expect(mcpAppToolUiMeta({ ui: { visibility: ["model"] } })).toEqual({ visibility: ["model"] });
-    expect(mcpAppToolUiMeta({ ui: { visibility: ["app"] } })).toEqual({ visibility: ["app"] });
-    expect(mcpAppToolUiMeta({ ui: {} })).toBeUndefined();
-    expect(mcpAppToolUiMeta({ ui: { visibility: ["everyone"] } })).toBeUndefined();
-    expect(
-      mcpAppToolUiMeta({
-        ui: { resourceUri: "https://acme.example/x.html", visibility: ["model"] },
-      }),
-    ).toEqual({ visibility: ["model"] });
-    expect(
-      mcpAppToolUiMeta({ "ui/resourceUri": "ui://acme", ui: { visibility: ["model"] } }),
-    ).toEqual({ visibility: ["model"] });
-    expect(
-      mcpAppToolUiMeta({ ui: { resourceUri: "ui://acme/views/status.html", visibility: ["app"] } }),
-    ).toEqual({ resourceUri: "ui://acme/views/status.html", visibility: ["app"] });
-  });
-
-  test("a malformed view preserves independently valid visibility", () => {
-    const visibilityOptions: Array<Array<"app" | "model">> = [["app"], ["model"], ["model", "app"]];
-    for (const visibility of visibilityOptions) {
-      expect(
-        mcpAppToolUiMeta({ ui: { resourceUri: "https://host.invalid/view.html", visibility } }),
-      ).toEqual({ visibility });
-    }
-    expect(
-      mcpAppToolUiMeta({ ui: { resourceUri: "https://host.invalid/view.html" } }),
-    ).toBeUndefined();
-    expect(
-      mcpAppToolUiMeta({
-        ui: {
-          resourceUri: "https://host.invalid/view.html",
-          visibility: ["everyone"],
-        },
-      }),
-    ).toBeUndefined();
-  });
-
-  test("rejects other tool metadata", () => {
-    const parsed = ToolGatewayCatalogEntry.safeParse({ ...entry(), meta: { other: true } });
-    expect(parsed.success).toBe(false);
   });
 });
