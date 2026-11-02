@@ -1,12 +1,12 @@
 import { beforeEach, afterEach, afterAll, describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
 import { TranscriptionServiceError } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   createTranscriptionService,
   orderedProviders,
   remainingTranscriptionProviderRequestMilliseconds,
-} from "@opengeni/core/transcription-service";
+} from "../src/transcription/service";
 
 let callReceipts: Array<Parameters<typeof dbModule.recordUsageEvent>[1]> = [];
 let receiptSpy: { mockRestore(): void };

@@ -35,13 +35,6 @@ export const CODEX_REALTIME_V3_PENDING_MAX_ENTRIES = 256;
 export const CODEX_REALTIME_V3_PENDING_MAX_BYTES = 16 * 1024 * 1024;
 const REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES = 65_536;
 const REALTIME_DELEGATION_INPUT_MAX_BYTES = 65_536;
-/**
- * Tells the session agent who wrote each part of a voice delegation. The voice
- * model relays the request; the transcript holds what was actually said, so
- * the person's words win over anything the relay added.
- */
-const REALTIME_DELEGATION_NOTE =
-  "Relayed by the voice assistant, which has no tools or workspace instructions. input is its relay of the request. transcript_delta, when present, is the voice conversation since the previous relay (user is the person, assistant is the voice assistant). The person's own words take precedence; details that appear only in input are the voice assistant's guesses, not the person's requirements.";
 const REALTIME_MODEL_CONTEXT_MAX_CHARACTERS = 32_768;
 
 export type CodexRealtimeV3BridgeFatal = {
@@ -86,16 +79,6 @@ export type CodexRealtimeV3BridgeOptions = {
   acceptedDelegationItemIds?: Set<string> | undefined;
   /** Unsynced delegation snapshots retained exactly across provider connection rotations. */
   pendingDelegations?: Map<string, SessionRealtimeInboundEntry> | undefined;
-  /**
-   * The finalized conversation since the last delegation, shared across
-   * provider connection rotations so a reconnect never drops what was said
-   * before it from the next delegation. Mutated in place.
-   */
-  undelegatedTranscript?: CodexRealtimeV3UndelegatedTranscript | undefined;
-  /** Best-effort persistence of `undelegatedTranscript` for a same-browser reload. */
-  onUndelegatedTranscriptChange?:
-    | ((entries: readonly CodexRealtimeV3TranscriptEntry[]) => void)
-    | undefined;
   /** Persist exact delegation replay state before it becomes browser-reload-sensitive. */
   onDelegationReplayStateChange?:
     | ((state: {
@@ -124,13 +107,11 @@ type PendingInbound = {
   bytes: number;
 };
 
-export type CodexRealtimeV3TranscriptEntry = {
+type FinalizedTranscript = {
   role: "user" | "assistant";
   text: string;
   turnId: string;
 };
-export type CodexRealtimeV3UndelegatedTranscript = CodexRealtimeV3TranscriptEntry[];
-type FinalizedTranscript = CodexRealtimeV3TranscriptEntry;
 
 export function createCodexRealtimeV3Bridge(
   options: CodexRealtimeV3BridgeOptions,
@@ -161,18 +142,7 @@ export function createCodexRealtimeV3Bridge(
   const acceptedDelegationItemIds = options.acceptedDelegationItemIds ?? new Set<string>();
   const pendingDelegations = options.pendingDelegations ?? new Map();
   const locallyQueuedDelegationItemIds = new Set<string>();
-  // Delegation items this provider conversation created. Anything else (a
-  // delegation from an earlier connection, or a replay after a reload) does
-  // not exist here, so its updates reach the voice model as session context.
-  const connectionDelegationItemIds = new Set<string>();
-  const transcriptSinceDelegation = options.undelegatedTranscript ?? [];
-  const undelegatedTranscriptChanged = (): void => {
-    try {
-      options.onUndelegatedTranscriptChange?.(transcriptSinceDelegation);
-    } catch {
-      // Reload persistence is best effort; the live call keeps the transcript.
-    }
-  };
+  let transcriptSinceDelegation: FinalizedTranscript[] = [];
   let pendingDelegationUserTranscript: {
     delegationItemId: string;
     text: string;
@@ -379,21 +349,11 @@ export function createCodexRealtimeV3Bridge(
             if (!sentSequences.has(candidate.sequence)) progress.push(candidate);
             index += 1;
           }
-          sendDelegationProgress(
-            options.events,
-            entry.delegationItemId,
-            progress,
-            connectionDelegationItemIds.has(entry.delegationItemId),
-          );
+          sendDelegationProgress(options.events, entry.delegationItemId, progress);
           for (const candidate of progress) sentSequences.add(candidate.sequence);
           continue;
         }
-        sendOutbound(
-          options.events,
-          entry,
-          entry.delegationItemId !== null &&
-            connectionDelegationItemIds.has(entry.delegationItemId),
-        );
+        sendOutbound(options.events, entry);
         sentSequences.add(entry.sequence);
         if (
           entry.kind === "session_update" &&
@@ -479,7 +439,6 @@ export function createCodexRealtimeV3Bridge(
       // These events are provider UI deltas. `turn.done` is the single
       // authoritative finalized transcript persisted below.
     } else if (event.type === "delegation.created") {
-      connectionDelegationItemIds.add(event.delegationItemId);
       if (acceptedDelegationItemIds.has(event.delegationItemId)) {
         ignoredEventCount += 1;
         lastIgnoredEventType = event.type;
@@ -539,8 +498,7 @@ export function createCodexRealtimeV3Bridge(
                 delegationItemId: event.delegationItemId,
                 text: frozenInputTranscript,
               };
-          transcriptSinceDelegation.length = 0;
-          undelegatedTranscriptChanged();
+          transcriptSinceDelegation = [];
         }
       }
     } else if (event.type === "output_audio.delta") {
@@ -568,8 +526,6 @@ export function createCodexRealtimeV3Bridge(
               text: event.transcript,
               turnId: event.turnId,
             });
-            boundTranscript(transcriptSinceDelegation);
-            undelegatedTranscriptChanged();
           }
         }
       }
@@ -640,18 +596,6 @@ function finalTranscript(
   };
 }
 
-/** Keep only the newest lines a delegation could carry. */
-function boundTranscript(entries: FinalizedTranscript[]): void {
-  let bytes = 0;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    bytes += utf8ByteLength(`${entries[index]!.role}: ${entries[index]!.text}`) + 1;
-    if (bytes > REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES) {
-      entries.splice(0, index + 1);
-      return;
-    }
-  }
-}
-
 function delegationTranscript(
   entries: readonly FinalizedTranscript[],
   inputTranscript: string,
@@ -690,7 +634,6 @@ function renderRealtimeDelegationInput(
   const transcriptDelta = transcript.map((entry) => `${entry.role}: ${entry.text}`).join("\n");
   return [
     "<realtime_delegation>",
-    `  <note>${REALTIME_DELEGATION_NOTE}</note>`,
     `  <input>${escapeXmlText(input)}</input>`,
     ...(transcriptDelta
       ? [`  <transcript_delta>${escapeXmlText(transcriptDelta)}</transcript_delta>`]
@@ -715,20 +658,7 @@ function escapeXmlText(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-/**
- * Updates for a delegation this provider conversation never created (it was
- * made before a reconnect or reload) arrive as session context, labelled so
- * the voice model knows which work they belong to.
- */
-const EARLIER_DELEGATION_RESULT = "Result of work requested earlier in this call:";
-const EARLIER_DELEGATION_ERROR = "Work requested earlier in this call failed:";
-const EARLIER_DELEGATION_PROGRESS = "Progress on work requested earlier in this call:";
-
-function sendOutbound(
-  events: RTCDataChannel,
-  entry: SessionRealtimeLedgerEntry,
-  delegationLive: boolean,
-): void {
+function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry): void {
   if (events.readyState !== "open") throw new Error("Codex realtime data channel is not open");
   const text = entry.text ?? JSON.stringify(entry.payload);
   const payloadChannel =
@@ -739,24 +669,17 @@ function sendOutbound(
         : entry.kind === "session_update"
           ? "commentary"
           : undefined;
-  const delegationOutcome =
-    (entry.kind === "delegation_result" || entry.kind === "error") && entry.delegationItemId;
   const messages =
-    delegationOutcome && delegationLive
+    (entry.kind === "delegation_result" || entry.kind === "error") && entry.delegationItemId
       ? encodeCodexRealtimeV3DelegationContextAppend({
-          delegationItemId: entry.delegationItemId!,
+          delegationItemId: entry.delegationItemId,
           text,
           channel: payloadChannel ?? "speakable",
         })
-      : delegationOutcome
-        ? encodeCodexRealtimeV3SessionContextAppend({
-            text: `${entry.kind === "error" ? EARLIER_DELEGATION_ERROR : EARLIER_DELEGATION_RESULT}\n${text}`,
-            channel: payloadChannel ?? "speakable",
-          })
-        : encodeCodexRealtimeV3SessionContextAppend({
-            text,
-            channel: payloadChannel,
-          });
+      : encodeCodexRealtimeV3SessionContextAppend({
+          text,
+          channel: payloadChannel,
+        });
   for (const message of messages) events.send(JSON.stringify(message));
 }
 
@@ -764,23 +687,18 @@ function sendDelegationProgress(
   events: RTCDataChannel,
   delegationItemId: string,
   entries: SessionRealtimeLedgerEntry[],
-  delegationLive: boolean,
 ): void {
   if (entries.length === 0) return;
   if (events.readyState !== "open") throw new Error("Codex realtime data channel is not open");
   const text = entries.map((entry) => entry.text ?? "").join("");
   if (text.length === 0) return;
-  const messages = delegationLive
-    ? encodeCodexRealtimeV3DelegationContextAppend({
-        delegationItemId,
-        text,
-        channel: "commentary",
-      })
-    : encodeCodexRealtimeV3SessionContextAppend({
-        text: `${EARLIER_DELEGATION_PROGRESS}\n${text}`,
-        channel: "commentary",
-      });
-  for (const message of messages) events.send(JSON.stringify(message));
+  for (const message of encodeCodexRealtimeV3DelegationContextAppend({
+    delegationItemId,
+    text,
+    channel: "commentary",
+  })) {
+    events.send(JSON.stringify(message));
+  }
 }
 
 function utf8ByteLength(value: string): number {

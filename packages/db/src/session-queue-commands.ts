@@ -1,9 +1,5 @@
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
-  MESSAGE_TIME_ZONE_METADATA_KEY,
-  SESSION_PENDING_INPUT_EXPIRED,
-  SESSION_PENDING_INPUT_LIMIT_REACHED,
-  type SessionPendingInputLimits,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
 } from "@opengeni/contracts";
 import {
@@ -56,7 +52,7 @@ import {
   type TimelineAnnotation,
   type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
@@ -71,16 +67,10 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
-import {
-  runnableQueuedTurnExists,
-  sessionMachineOwnerSubject,
-  waitsForMachineOwnerSql,
-} from "./machine-owner-wait";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
-  AgentCommandAuthorityError,
   assertAgentCommandAuthorityInTransaction,
   autoResumeSessionBranchInTransaction,
   canonicalSessionCommandHash,
@@ -133,8 +123,7 @@ export type QueueCommandConflictCode =
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
   | "EDIT_SOURCE_CHANGED"
-  | "ONCE_ATTACHMENT_IMMUTABLE"
-  | "WAITING_FOR_MACHINE_OWNER";
+  | "ONCE_ATTACHMENT_IMMUTABLE";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -235,12 +224,6 @@ export type SubmitHumanPromptResult = {
   wakeRevision: number;
   interruptionCount: number;
   workspaceControlEventId: string | null;
-  /**
-   * The chat runs on another person's personal machine, so this message waits
-   * for its owner instead of running (`machine-owner-wait.ts`). As decided at
-   * acceptance.
-   */
-  waitsForMachineOwner: boolean;
   replay: boolean;
 };
 
@@ -392,7 +375,6 @@ async function loadSubmittedHumanPromptReplay(
       typeof input.receipt.result.workspaceControlEventId === "string"
         ? input.receipt.result.workspaceControlEventId
         : null,
-    waitsForMachineOwner: input.receipt.result.waitsForMachineOwner === true,
     replay: true,
   };
 }
@@ -795,7 +777,6 @@ export async function supersedeSessionCurrentDirectionInTransaction(
         eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
         eq(schema.sessionHumanInputRequests.turnId, current.id),
         eq(schema.sessionHumanInputRequests.status, "pending"),
-        eq(schema.sessionHumanInputRequests.origin, "tool_call"),
       ),
     )
     .returning({
@@ -1597,201 +1578,6 @@ export async function deleteSessionQueueItemInTransaction(
   };
 }
 
-/** Seconds a sender is told to wait before retrying a refused Send or Steer. */
-export const SESSION_PENDING_INPUT_RETRY_AFTER_SECONDS = 10;
-
-/**
- * A Send or Steer that would pass the session's pending-input bounds
- * (`SESSION_PENDING_INPUT_LIMITS`). Thrown inside the prompt transaction
- * before the turn, event or command receipt commits, so nothing is written.
- * `limit` names the bound; `retryAfterSeconds` is null when the message alone
- * is larger than `maxBytes`, so no wait can admit it.
- */
-export class SessionPendingInputLimitError extends Error {
-  readonly name = "SessionPendingInputLimitError";
-  readonly code = SESSION_PENDING_INPUT_LIMIT_REACHED;
-  constructor(
-    readonly facts: {
-      limit: "count" | "bytes";
-      pendingCount: number;
-      pendingBytes: number;
-      messageBytes: number;
-      maxCount: number;
-      maxBytes: number;
-      retryAfterSeconds: number | null;
-    },
-  ) {
-    super(
-      facts.retryAfterSeconds === null
-        ? `This message is larger than the ${facts.maxBytes} bytes a chat can hold waiting. Send a shorter message.`
-        : facts.limit === "count"
-          ? `This chat already has ${facts.pendingCount} messages waiting (the limit is ${facts.maxCount}). Wait for one to start, or remove one from the queue, then send again.`
-          : `This chat's waiting messages already hold ${facts.pendingBytes} of ${facts.maxBytes} bytes. Wait for one to start, or remove one from the queue, then send again.`,
-    );
-  }
-}
-
-/** Human and API prompts the session accepted that no turn has claimed yet. */
-function pendingInputPredicate(workspaceId: string, sessionId: string) {
-  return and(
-    eq(schema.sessionTurns.workspaceId, workspaceId),
-    eq(schema.sessionTurns.sessionId, sessionId),
-    eq(schema.sessionTurns.status, "queued"),
-    inArray(schema.sessionTurns.source, ["user", "api"]),
-    isNull(schema.sessionTurns.startedAt),
-  );
-}
-
-function pendingInputExpiredBefore(ttlMs: number) {
-  return sql`${schema.sessionTurns.createdAt} < now() - make_interval(secs => ${ttlMs / 1_000})`;
-}
-
-/**
- * Retires the session's pending prompts older than `ttlMs` the way a person
- * deletes a waiting prompt: each is cancelled (`cancelReason:
- * "pending_input_expired"`), the queue renumbers, and one
- * `session.queue.changed` delete event names the reason. Its `user.message`
- * stays in the history. Caller holds the workspace control prefix and the
- * session's write rows (the prompt transaction). Returns the retired turn ids.
- */
-export async function retireExpiredPendingInputInTransaction(
-  db: SessionActivityDatabase,
-  input: { accountId: string; workspaceId: string; sessionId: string; ttlMs: number },
-): Promise<string[]> {
-  const candidates = await db
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        pendingInputPredicate(input.workspaceId, input.sessionId),
-        pendingInputExpiredBefore(input.ttlMs),
-      ),
-    )
-    .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.id));
-  if (candidates.length === 0) return [];
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
-  const turns = (
-    await lockSessionEventWriteRows(db, {
-      workspaceId: input.workspaceId,
-      controlLock: "already_locked",
-      workspaceLock: "already_locked",
-      turnIds: candidates.map((row) => row.id),
-    })
-  ).turns
-    .filter(
-      (turn) =>
-        turn.status === "queued" &&
-        turn.startedAt === null &&
-        (turn.source === "user" || turn.source === "api"),
-    )
-    // Retire in queue order, so the delete events read front to back.
-    .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
-  if (turns.length === 0) return [];
-  const now = new Date();
-  for (const turn of turns) {
-    await db
-      .update(schema.sessionTurns)
-      .set({
-        status: "cancelled",
-        cancelledBy: "system:pending_input_ttl",
-        cancelReason: SESSION_PENDING_INPUT_EXPIRED,
-        version: turn.version + 1,
-        finishedAt: now,
-        updatedAt: now,
-      })
-      .where(eq(schema.sessionTurns.id, turn.id));
-  }
-  const remaining = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
-  await normalizeQueuePositions(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    remaining.map((row) => row.id),
-  );
-  const events = turns.map((turn, index) =>
-    withLosslessContentWriteVersion(
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        sequence: session.lastSequence + index + 1,
-        type: "session.queue.changed",
-        turnId: turn.id,
-        payload: {
-          operation: "delete",
-          queueVersion: session.queueVersion + index + 1,
-          turnId: turn.id,
-          reason: SESSION_PENDING_INPUT_EXPIRED,
-        },
-        occurredAt: now,
-      },
-      "payload",
-      "payloadCodecVersion",
-    ),
-  );
-  await db.insert(schema.sessionEvents).values(events);
-  await db
-    .update(schema.sessions)
-    .set({
-      queueVersion: session.queueVersion + turns.length,
-      lastSequence: session.lastSequence + turns.length,
-      updatedAt: now,
-    })
-    .where(eq(schema.sessions.id, input.sessionId));
-  return turns.map((turn) => turn.id);
-}
-
-/**
- * Refuses a new prompt of `messageBytes` that would pass the session's
- * pending-input bounds; prompts older than `ttlMs` do not count.
- */
-export async function assertSessionPendingInputWithinLimitsInTransaction(
-  db: SessionActivityDatabase,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    messageBytes: number;
-    limits: SessionPendingInputLimits;
-  },
-): Promise<void> {
-  const [usage] = await db
-    .select({
-      count: sql<number>`count(*)::int`,
-      bytes: sql<number>`coalesce(sum(octet_length(${schema.sessionTurns.prompt}) + coalesce(octet_length(${schema.sessionTurns.modelContext}), 0)), 0)::bigint`,
-    })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        pendingInputPredicate(input.workspaceId, input.sessionId),
-        sql`not (${pendingInputExpiredBefore(input.limits.ttlMs)})`,
-      ),
-    );
-  const pendingCount = Number(usage?.count ?? 0);
-  const pendingBytes = Number(usage?.bytes ?? 0);
-  const { maxCount, maxBytes } = input.limits;
-  const facts = {
-    pendingCount,
-    pendingBytes,
-    messageBytes: input.messageBytes,
-    maxCount,
-    maxBytes,
-  };
-  if (input.messageBytes > maxBytes)
-    throw new SessionPendingInputLimitError({ ...facts, limit: "bytes", retryAfterSeconds: null });
-  if (pendingCount + 1 > maxCount)
-    throw new SessionPendingInputLimitError({
-      ...facts,
-      limit: "count",
-      retryAfterSeconds: SESSION_PENDING_INPUT_RETRY_AFTER_SECONDS,
-    });
-  if (pendingBytes + input.messageBytes > maxBytes)
-    throw new SessionPendingInputLimitError({
-      ...facts,
-      limit: "bytes",
-      retryAfterSeconds: SESSION_PENDING_INPUT_RETRY_AFTER_SECONDS,
-    });
-}
-
 export async function editQueuedTurnInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2072,7 +1858,7 @@ export async function steerQueuedTurnInTransaction(
       replay: true,
     };
   }
-  const lockedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  await lockSession(db, input.workspaceId, input.sessionId);
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {
       workspaceId: input.workspaceId,
@@ -2080,34 +1866,6 @@ export async function steerQueuedTurnInTransaction(
       targetSessionId: input.sessionId,
       action: "steer",
     });
-  }
-  // A message waiting for the personal machine's owner cannot run there, so
-  // it must not interrupt or replace the owner's work either.
-  const machineOwner = await sessionMachineOwnerSubject(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-  });
-  if (machineOwner !== null) {
-    const [waiting] = await db
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, input.sessionId),
-          eq(schema.sessionTurns.id, input.turnId),
-          waitsForMachineOwnerSql(machineOwner),
-        ),
-      )
-      .limit(1);
-    if (waiting) {
-      throw new QueueCommandConflictError(
-        "WAITING_FOR_MACHINE_OWNER",
-        "This message waits for the owner of the personal machine the chat runs on, so it cannot be sent now",
-        { queueVersion: lockedSession.queueVersion },
-      );
-    }
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
@@ -2315,80 +2073,6 @@ export async function steerQueuedTurnInTransaction(
   };
 }
 
-/**
- * The sender's time zone is presentation context, not part of a prompt's
- * request identity: a retry that names another zone (or none) replays the
- * original turn instead of conflicting with it.
- */
-function turnMetadataRequestIdentity(
-  turnMetadata: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-  if (!turnMetadata || !(MESSAGE_TIME_ZONE_METADATA_KEY in turnMetadata)) return turnMetadata ?? {};
-  const { [MESSAGE_TIME_ZONE_METADATA_KEY]: _timeZone, ...identity } = turnMetadata;
-  return identity;
-}
-
-/** A turn's causal person, read the way the attempt admission trigger reads it. */
-function causalHuman(
-  initiatingHumanSubjectId: string | null | undefined,
-  initiatorKind: string | null | undefined,
-  initiatorSubjectId: string | null | undefined,
-): string | null {
-  return (
-    initiatingHumanSubjectId?.trim() ||
-    (initiatorKind === "subject" ? initiatorSubjectId?.trim() : undefined) ||
-    null
-  );
-}
-
-/**
- * Whose message a prompt is, before any Steer or Resume decision: the edited
- * queued message's sender for a queue edit, otherwise the command's actor.
- */
-async function promptCausalHuman(
-  db: SessionActivityDatabase,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    sourceTurnId: string | null;
-    actorInitiator: FrozenTurnInitiator | null;
-  },
-): Promise<string | null> {
-  if (input.sourceTurnId) {
-    const [source] = await db
-      .select({
-        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-        initiatorKind: schema.sessionTurns.initiatorKind,
-        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, input.sessionId),
-          eq(schema.sessionTurns.id, input.sourceTurnId),
-        ),
-      )
-      .limit(1);
-    return source
-      ? causalHuman(
-          source.initiatingHumanSubjectId,
-          source.initiatorKind,
-          source.initiatorSubjectId,
-        )
-      : null;
-  }
-  const actor = input.actorInitiator;
-  if (!actor) return null;
-  return causalHuman(
-    actor.initiatingHumanSubjectId,
-    actor.initiator.kind,
-    actor.initiator.kind === "subject" ? actor.initiator.subjectId : null,
-  );
-}
-
-const PENDING_INPUT_ENCODER = new TextEncoder();
-
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2462,12 +2146,6 @@ export async function submitHumanPromptInTransaction(
 
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
-    /**
-     * Bounds on the session's pending input (`SESSION_PENDING_INPUT_LIMITS`),
-     * set by the API and MCP admission. Omitted (lifecycle callers), nothing
-     * is bounded or retired.
-     */
-    pendingInputLimits?: SessionPendingInputLimits;
   },
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
@@ -2523,7 +2201,7 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort: input.reasoningEffort ?? null,
     latencyMode: input.latencyMode ?? null,
     source: input.source,
-    turnMetadata: turnMetadataRequestIdentity(input.turnMetadata),
+    turnMetadata: input.turnMetadata ?? {},
     messagePresentation: input.messagePresentation ?? null,
     mirrorToRealtime: input.mirrorToRealtime ?? true,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
@@ -2582,24 +2260,6 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  if (input.pendingInputLimits) {
-    // Stale waiting prompts leave the queue first, then the new message must
-    // fit the bounds; a refusal rolls back the whole prompt transaction.
-    await retireExpiredPendingInputInTransaction(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      ttlMs: input.pendingInputLimits.ttlMs,
-    });
-    await assertSessionPendingInputWithinLimitsInTransaction(db, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      messageBytes:
-        PENDING_INPUT_ENCODER.encode(input.text).byteLength +
-        PENDING_INPUT_ENCODER.encode(input.modelContext ?? "").byteLength,
-      limits: input.pendingInputLimits,
-    });
-  }
   const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
   const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");
@@ -2622,33 +2282,6 @@ export async function submitHumanPromptInTransaction(
         });
   const isQueueEditSubmission = draft?.sourceTurnId !== null && draft?.sourceTurnId !== undefined;
 
-  // Only its owner can start work on a personal machine. Another person's
-  // message there waits for the owner (`machine-owner-wait.ts`): it is queued
-  // as a plain Send that never steers, interrupts or resumes anything, and the
-  // owner's next own message takes it in.
-  const actorInitiator =
-    input.delivery === "send" && draft?.sourceTurnId
-      ? null
-      : await frozenInitiatorForCommandActor(
-          db,
-          input.workspaceId,
-          input.actor,
-          input.subjectLabel,
-        );
-  const machineOwner = await sessionMachineOwnerSubject(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-  });
-  const waitsForMachineOwner =
-    machineOwner !== null &&
-    (await promptCausalHuman(db, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sourceTurnId: draft?.sourceTurnId ?? null,
-      actorInitiator,
-    })) !== machineOwner;
-
   // A normal Send received while the active branch is waiting in
   // `requires_action` is the human choosing to continue conversationally
   // instead of through the pending decision surface. Promote only that active
@@ -2658,15 +2291,14 @@ export async function submitHumanPromptInTransaction(
   // wait. An explicitly paused branch remains inert until Resume or an explicit
   // Steer; running, recovering, and capacity-waiting work also retain ordinary
   // queue semantics.
-  const effectiveDelivery = waitsForMachineOwner
-    ? "send"
-    : input.delivery === "send" &&
-        (input.actor.type === "human" || input.actor.type === "operator") &&
-        !isQueueEditSubmission &&
-        before.state === "active" &&
-        session.status === "requires_action" &&
-        !session.admissionBlock &&
-        session.activeTurnId !== null
+  const effectiveDelivery =
+    input.delivery === "send" &&
+    (input.actor.type === "human" || input.actor.type === "operator") &&
+    !isQueueEditSubmission &&
+    before.state === "active" &&
+    session.status === "requires_action" &&
+    !session.admissionBlock &&
+    session.activeTurnId !== null
       ? "steer"
       : input.delivery;
   const resumed =
@@ -2812,26 +2444,18 @@ export async function submitHumanPromptInTransaction(
       context: sourceTurn.initiatorContext ?? {},
     };
   } else {
-    frozenInitiator =
-      actorInitiator ??
-      (await frozenInitiatorForCommandActor(
-        db,
-        input.workspaceId,
-        input.actor,
-        input.subjectLabel,
-      ));
+    frozenInitiator = await frozenInitiatorForCommandActor(
+      db,
+      input.workspaceId,
+      input.actor,
+      input.subjectLabel,
+    );
   }
   const acceptedInitiatingHumanSubjectId = editedSourceTurn
     ? (editedSourceTurn.initiatingHumanSubjectId ??
       (editedSourceTurn.initiatorKind === "subject" ? editedSourceTurn.initiatorSubjectId : null))
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
-  if (
-    waitsForMachineOwner !==
-    (machineOwner !== null && (acceptedInitiatingHumanSubjectId?.trim() || null) !== machineOwner)
-  ) {
-    throw new SessionControlInvariantError("Prompt sender changed during admission");
-  }
   await assertPersonalSessionInitiatorInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -2950,21 +2574,10 @@ export async function submitHumanPromptInTransaction(
   delete sourceTurnMetadata.nativeMessageModelSourceRefs;
   if (effectiveMessageModelSourceRefs.length > 0) sourceTurnMetadata.nativeMessageModelSourceRefs = effectiveMessageModelSourceRefs;
   const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
-  // Messages waiting for the machine's owner are not ahead of anyone: the
-  // owner's message runs next and takes them in.
-  const queuedAhead =
-    machineOwner === null || existingQueued.length === 0
-      ? existingQueued.length > 0
-      : await runnableQueuedTurnExists(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          sources: ["user", "api"],
-        });
   const routing: SessionPromptRouting =
     effectiveDelivery === "steer"
       ? "accepted_for_steering"
-      : waitsForMachineOwner || before.state === "paused" || session.activeTurnId || queuedAhead
+      : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
         ? "queued_for_execution"
         : "accepted_for_execution";
   let sequence = session.lastSequence;
@@ -3263,16 +2876,12 @@ export async function submitHumanPromptInTransaction(
   // intent) resumes in this same commit; a user/API/agent/limits pause is never
   // touched here. Goal row FOR UPDATE follows the session and turn locks above,
   // the order the claim transaction uses.
-  // A message waiting for the machine's owner is not input the goal can act
-  // on yet.
-  const goalAutoResumed = waitsForMachineOwner
-    ? null
-    : await autoResumeGoalPausedByCapInTransaction(db, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        cause: { kind: "human_prompt", turnId },
-        now,
-      });
+  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    cause: { kind: "human_prompt", turnId },
+    now,
+  });
   if (goalAutoResumed) {
     eventValues.push({
       accountId: input.accountId,
@@ -3297,12 +2906,9 @@ export async function submitHumanPromptInTransaction(
   );
   const noCurrentAfter =
     effectiveDelivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
-  // A waiting message is not work the chat can start, so it leaves the
-  // status alone.
-  const nextStatus =
-    noCurrentAfter && !waitsForMachineOwner
-      ? "queued"
-      : (session.admissionBlock?.previousStatus ?? session.status);
+  const nextStatus = noCurrentAfter
+    ? "queued"
+    : (session.admissionBlock?.previousStatus ?? session.status);
   if (nextStatus !== session.status) {
     eventValues.push({
       accountId: input.accountId,
@@ -3476,7 +3082,6 @@ export async function submitHumanPromptInTransaction(
       deferredUntilModelStep,
       workspaceControlEventId: resumed.workspaceControlEventId,
       routing,
-      ...(waitsForMachineOwner ? { waitsForMachineOwner: true } : {}),
       ...(input.turnExecutionPolicy
         ? {
             executionPolicy: turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId),
@@ -3503,7 +3108,6 @@ export async function submitHumanPromptInTransaction(
     wakeRevision,
     interruptionCount,
     workspaceControlEventId: resumed.workspaceControlEventId,
-    waitsForMachineOwner,
     replay: false,
   };
 }
@@ -3897,27 +3501,6 @@ export async function steerAgentSessionInTransaction(
     input.workspaceId,
     input.actor,
   );
-  // Only its owner can start work on a personal machine, so a Steer from
-  // anyone else's work could only stop the owner's turn and then never run.
-  // Refuse it before anything changes; a message waits for the owner instead.
-  const machineOwner = await sessionMachineOwnerSubject(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.targetSessionId,
-  });
-  if (
-    machineOwner !== null &&
-    causalHuman(
-      sourceInitiator.initiatingHumanSubjectId,
-      sourceInitiator.initiator.kind,
-      sourceInitiator.initiator.kind === "subject" ? sourceInitiator.initiator.subjectId : null,
-    ) !== machineOwner
-  ) {
-    throw new AgentCommandAuthorityError(
-      "PERSONAL_MACHINE_OWNER_REQUIRED",
-      "The target session runs on another person's personal machine; only its owner can steer it",
-    );
-  }
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,

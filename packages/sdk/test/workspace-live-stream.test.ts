@@ -2,11 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import type { WorkspaceInteractionRevisionEvent } from "../src/interaction";
 import type { WorkspaceControlEvent } from "../src/types";
-import {
-  parseWorkspaceLiveEvent,
-  streamWorkspaceLiveEvents,
-  type WorkspaceLiveEvent,
-} from "../src/workspace-live-stream";
+import { streamWorkspaceLiveEvents, type WorkspaceLiveEvent } from "../src/workspace-live-stream";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000002";
 
@@ -53,19 +49,6 @@ function streamOf(...events: WorkspaceLiveEvent[]): ReadableStream<Uint8Array> {
 }
 
 describe("streamWorkspaceLiveEvents", () => {
-  test("list hints carry the viewer's Site conversations separately", () => {
-    const hint: WorkspaceLiveEvent = {
-      type: "workspace.sessions.changed",
-      workspaceId: WORKSPACE_ID,
-      available: true,
-      sessionIds: [],
-    };
-    expect(parseWorkspaceLiveEvent(JSON.stringify({ ...hint, siteSessionIds: ["a"] }))).toEqual({
-      ...hint,
-      siteSessionIds: ["a"],
-    });
-    expect(parseWorkspaceLiveEvent(JSON.stringify({ ...hint, siteSessionIds: [1] }))).toEqual(hint);
-  });
   test("transient list hints never advance either replay cursor", async () => {
     const opens: number[][] = [];
     const hints: WorkspaceLiveEvent[] = [];

@@ -38,8 +38,6 @@ export type CreatedConversation = {
   sessionId: string;
   /** The accepted first message; empty for voice-first creation. */
   initialMessage: string;
-  /** When the person sent it (ISO 8601); pass both as the conversation's `pendingPrompt`. */
-  sentAt: string;
   /** Newer unsent content, or the whole untouched draft for voice-first creation. */
   draft: InitialComposerDraft;
   realtimeModel?: SessionRealtimeModel | undefined;
@@ -67,7 +65,6 @@ type Choice = Pick<NewConversationCreateOptions, "model" | "reasoningEffort" | "
 type Attempt = {
   key: string;
   initialMessage: string;
-  sentAt: string;
   options: NewConversationCreateOptions;
   textRevision: number;
   clearDraft: boolean;
@@ -221,7 +218,6 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     notifyObserver(options.onCreated, {
       sessionId,
       initialMessage: attempt.initialMessage,
-      sentAt: attempt.sentAt,
       draft,
       ...(attempt.realtimeModel ? { realtimeModel: attempt.realtimeModel } : {}),
     });
@@ -292,7 +288,6 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     return deliver({
       key: crypto.randomUUID(),
       initialMessage,
-      sentAt: new Date().toISOString(),
       textRevision: textRevision.current,
       clearDraft: explicit === undefined,
       create,
@@ -316,7 +311,6 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     return deliver({
       key: crypto.randomUUID(),
       initialMessage: "",
-      sentAt: new Date().toISOString(),
       textRevision: textRevision.current,
       clearDraft: false,
       create,
@@ -330,8 +324,6 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     hasDraftContent: () => textRef.current.length > 0 || filesRef.current.attachments.length > 0,
     send: submit,
     steer: submit,
-    // Nothing runs before the conversation exists: Send just sends.
-    working: false,
     sending,
     canSend:
       available &&

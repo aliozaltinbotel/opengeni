@@ -1,14 +1,10 @@
 import type { MachineView } from "@opengeni/sdk";
+import { thisComputerNeedsPermissions } from "@opengeni/sdk/this-computer";
 import { ArrowUpRightIcon, CheckIcon, LaptopIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useOpenGeniText } from "../../messages/runtime";
 import { defaultThisComputerLabels, type ThisComputerLabels } from "./labels";
-import {
-  computerUseFix,
-  computerUsePermissionText,
-  computerUseProblemText,
-  computerUseState,
-} from "./computer-use";
+import { thisComputerView } from "./this-computer-status";
 import type { UseThisComputerResult } from "./use-this-computer";
 
 /** A personal machine that can take work now. */
@@ -36,14 +32,8 @@ export interface ThisComputerCardProps {
   /** The app's name, e.g. for "Get … for desktop". */
   productName: string;
   labels?: ThisComputerLabels;
-  /**
-   * "Open System Settings" for a missing permission, e.g. to open
-   * `ThisComputerSetup`. Without it, the card asks for the missing
-   * permissions itself (`computer.allowPermissions`).
-   */
+  /** Opens `ThisComputerSetup` to finish required system permissions. */
   onSetup?(): void;
-  /** Signs the person in again when computer use needs it; else that offers Try again. */
-  onSignIn?: (() => void) | undefined;
   /** Where to get the desktop app, outside it. */
   downloadUrl?: string | null;
   /** Host-owned OS-appropriate app downloads. Never inferred from a capability event. */
@@ -75,7 +65,6 @@ export function ThisComputerCard({
   productName,
   labels: given,
   onSetup,
-  onSignIn,
   downloadUrl,
   downloads,
   openAppUrl,
@@ -87,21 +76,22 @@ export function ThisComputerCard({
   const labels = given ?? defaultThisComputerLabels(catalogText);
   const card = labels.card;
   const status = computer?.status ?? null;
-  const use = computer ? computerUseState(computer) : ({ kind: "hidden" } as const);
+  const view = computer ? thisComputerView(status) : "hidden";
   const own = (machines ?? []).filter(
     (machine) => machine.scope === "user" && machine.enrollmentId,
   );
   const reachable = own.find(machineReachable) ?? null;
 
   const readyName =
-    use.kind === "on"
+    view === "ready"
       ? (status?.machineName ?? "")
-      : use.kind === "hidden" && reachable
+      : view === "hidden" && reachable
         ? reachable.name
         : null;
 
   // Tell the consumer once when what the person started here finishes.
   const started = useRef(false);
+  const starting = useRef(false);
   const wasReady = useRef(readyName !== null);
   useEffect(() => {
     if (readyName !== null && !wasReady.current && started.current) {
@@ -112,66 +102,83 @@ export function ThisComputerCard({
   }, [readyName, onReady]);
   const setup = () => {
     started.current = true;
-    if (onSetup) onSetup();
-    else computer?.allowPermissions();
+    onSetup?.();
   };
-  // Turning on asks for any missing permission itself.
-  const turnOn = () => {
-    if (!computer || computer.acting) return;
+  const connect = () => {
+    if (!computer || computer.acting || starting.current) return;
+    starting.current = true;
     started.current = true;
-    void computer.turnOn().then((next) => {
-      if (!next) started.current = false;
-    });
+    void computer
+      .connect({ screenControl: true })
+      .then((next) => {
+        if (!next) started.current = false;
+        if (thisComputerNeedsPermissions(next)) onSetup?.();
+      })
+      .finally(() => {
+        starting.current = false;
+      });
   };
 
   let copy: string;
   let action: ReactNode = null;
+  let error: string | null = null;
   // The agent's reason says what turning it on is for; in the plain offer it
   // replaces the generic offer line instead of repeating it.
   let reasonIsCopy = false;
   const machineName = status?.machineName ?? "";
   if (readyName !== null) {
     copy = card.canUse(readyName);
-  } else if (computer && use.kind !== "hidden") {
-    switch (use.kind) {
-      case "turning_on":
-        copy =
-          use.progress === null
-            ? catalogText("thisComputer.computerUse.turningOn")
-            : `${catalogText("thisComputer.computerUse.turningOn")} ${Math.round(use.progress * 100)}%`;
-        action = <span className="og-tc-spinner" aria-hidden />;
-        break;
-      case "needs_permission":
-        copy = computerUsePermissionText(use.appName ?? productName, catalogText);
+  } else if (computer && view !== "hidden") {
+    error =
+      computer.actionError !== null || status?.error
+        ? labels.error(status?.errorCode ?? null, status?.error || computer.actionError || null)
+        : null;
+    switch (view) {
+      case "paused":
+        copy = labels.paused(machineName);
         action = (
-          <button type="button" onClick={setup}>
-            {catalogText("thisComputer.computerUse.openSettings")}
+          <button
+            type="button"
+            disabled={computer.acting}
+            onClick={() => {
+              started.current = true;
+              void computer.resume();
+            }}
+          >
+            {labels.resume}
           </button>
         );
         break;
-      case "problem": {
-        copy = computerUseProblemText(use, machineName, catalogText, labels);
-        const fix = computerUseFix(use.problem);
-        action =
-          fix === "sign_in" && onSignIn ? (
-            <button type="button" onClick={onSignIn}>
-              {catalogText("thisComputer.computerUse.signIn")}
-            </button>
-          ) : (
-            <button type="button" disabled={computer.acting} onClick={turnOn}>
-              {labels.tryAgain}
-            </button>
-          );
+      case "resuming":
+        copy = labels.resuming;
+        action = <span className="og-tc-spinner" aria-hidden />;
         break;
-      }
-      default:
-        reasonIsCopy = Boolean(rationale);
-        copy = reasonIsCopy
-          ? rationale!
-          : catalogText("thisComputer.computerUse.off", { machineName });
+      case "reconnecting":
+        copy = labels.reconnecting(machineName);
+        action = <span className="og-tc-spinner" aria-hidden />;
+        break;
+      case "setting_up":
+        // The setup steps carry on by themselves and come back when they need the person.
+        copy =
+          status?.setupProgress === undefined
+            ? labels.settingUp(machineName)
+            : `${labels.settingUp(machineName)} ${Math.round(status.setupProgress * 100)}%`;
+        action = <span className="og-tc-spinner" aria-hidden />;
+        break;
+      case "finish_setup":
+        copy = labels.finishSetupDetail;
         action = (
-          <button type="button" disabled={computer.acting} onClick={turnOn}>
-            {labels.turnOn}
+          <button type="button" onClick={setup}>
+            {labels.finishSetup}
+          </button>
+        );
+        break;
+      default:
+        reasonIsCopy = Boolean(rationale) && !error;
+        copy = reasonIsCopy ? rationale! : labels.offer(machineName);
+        action = (
+          <button type="button" disabled={computer.acting} onClick={connect}>
+            {error ? labels.tryAgain : labels.offerAction}
           </button>
         );
     }
@@ -231,6 +238,11 @@ export function ThisComputerCard({
           <p data-complete={complete ? "" : undefined}>{copy}</p>
           {action}
         </div>
+        {!complete && status?.management === "service" ? (
+          <p className="og-session-capability-copy">
+            {catalogText("thisComputer.existingService")}
+          </p>
+        ) : null}
         {!computer && !complete && (downloads?.length || openAppUrl) ? (
           <div className="og-tc-card-foot og-tc-card-downloads">
             {downloads?.map((download) => (
@@ -242,6 +254,11 @@ export function ThisComputerCard({
               <a href={openAppUrl}>{catalogText("thisComputer.card.openApp")}</a>
             ) : null}
           </div>
+        ) : null}
+        {error ? (
+          <p className="og-tc-error" role="alert">
+            {error}
+          </p>
         ) : null}
         {!complete ? <p className="og-tc-card-note">{card.note}</p> : null}
       </div>

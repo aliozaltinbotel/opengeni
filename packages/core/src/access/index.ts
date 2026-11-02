@@ -23,10 +23,6 @@ import {
   type Workspace,
 } from "@opengeni/contracts";
 import {
-  PERSONAL_INTEGRATION_SETUP_PERMISSION,
-  permissionSetCovers,
-} from "@opengeni/contracts/personal-integration-setup";
-import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
@@ -48,19 +44,12 @@ import {
   getWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
   validateCanonicalHumanSession,
-  externalPersonPersonalWorkspaceId,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ManagedAuth } from "../managed-auth-type";
-import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
-import {
-  OrganizationGovernedByHostError,
-  organizationGovernanceDecision,
-  requireNativeOrganizationMutationAllowed,
-} from "../application/organization-governance";
 import {
   getManagedSession,
   getNativeAppManagedSession,
@@ -239,7 +228,7 @@ export function requireApiKeyDelegationContext(
   // Q-16 aliases apply to delegation as to access; explicit mode never borrows an admin wildcard.
   if (
     ceiling?.permissionMode === "explicit" &&
-    permissions.some((permission) => !ceilingCovers(ceiling.permissions, permission))
+    permissions.some((permission) => !hasPermission(ceiling.permissions, permission, "explicit"))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -251,7 +240,7 @@ export function requireApiKeyDelegationContext(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !ceilingCovers(ceiling.permissions, permission),
+        !hasPermission(ceiling.permissions, permission, "explicit"),
     )
   ) {
     throw new HTTPException(403, {
@@ -296,7 +285,7 @@ export function requireExplicitPermissionDelegation(
 ): void {
   if (
     grant.permissionMode === "explicit" &&
-    requested.some((permission) => !ceilingCovers(grant.permissions, permission))
+    requested.some((permission) => !hasPermission(grant.permissions, permission, "explicit"))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -308,7 +297,7 @@ export function requireExplicitPermissionDelegation(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !ceilingCovers(grant.permissions, permission),
+        !hasPermission(grant.permissions, permission, "explicit"),
     )
   ) {
     throw new HTTPException(403, {
@@ -338,8 +327,7 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
-/** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
-const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
+const verifiedSiteViewerProofs = new WeakSet<DelegatedHumanAuthorization>();
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -423,28 +411,6 @@ export function stampSiteViewerSessionAuthorization(
     permissions: Permission[];
   },
 ): void {
-  stampWorkspacePersonAuthorization(request, input);
-}
-
-/**
- * TRUSTED VERIFIED DISPATCH ONLY: act as one person in exactly one workspace.
- * The caller has already verified who the person is (a published Site's signed
- * viewer, or the person who sent a chat turn, frozen when it was accepted) and
- * caps the permissions. Native people use the delegated-human resolver limited
- * to that workspace. External users (people of a product that embeds Opengeni)
- * reload their live access to that one workspace, intersected with these
- * permissions, and get no organization-level authority; no identity is
- * provisioned. Never call it with headers, token claims or other unverified input.
- */
-export function stampWorkspacePersonAuthorization(
-  request: Request,
-  input: {
-    organizationId: string;
-    workspaceId: string;
-    subjectId: string;
-    permissions: Permission[];
-  },
-): void {
   if (input.subjectId.startsWith("user:")) {
     stampDelegatedHumanAuthorization(request, {
       ...input,
@@ -467,7 +433,7 @@ export function stampWorkspacePersonAuthorization(
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
-  workspaceExternalPersonProofs.add(proof);
+  verifiedSiteViewerProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }
 
@@ -805,8 +771,6 @@ export type AccessDeps = {
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
   /** Analytics only: notes canonical managed-cookie activity, never authority. */
   userPresence?: UserPresenceRecorder | null;
-  /** Host membership governance: refuses first-use external provisioning when the host does. */
-  organizationGovernance?: OrganizationGovernancePort | null;
 };
 
 /** null means this is not an authenticated external lane; [] means that lane
@@ -882,21 +846,11 @@ export async function requireFreshAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
-  return (await requireFreshAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
-}
-
-/** Fresh live grants with their original verified cookie/owning-user provenance. */
-export async function requireFreshAccessGrantAuthorization(
-  c: Context,
-  deps: AccessDeps,
-  workspaceId: string,
-  permission?: Permission,
-): Promise<AccessGrantAuthorization> {
   const context = await resolveAccessContext(c, deps);
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
   }
-  return accessGrantAuthorization(context, deps, workspaceId, permission);
+  return (await accessGrantAuthorization(context, deps, workspaceId, permission)).grant;
 }
 
 export type AccessGrantAuthorization = {
@@ -1237,12 +1191,6 @@ async function provisionExternalMemberOnFirstUse(
     workspace.externalSource?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
   )
     return false;
-  // The governing host decides at the moment the membership would be created.
-  await requireNativeOrganizationMutationAllowed(
-    deps,
-    external.identity.accountId,
-    "external_member.add",
-  );
   try {
     await ensureExternalWorkspaceMemberOnFirstUse(
       deps.db,
@@ -1483,21 +1431,11 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
  * {@link accessContextHasInbox}. An agent acting as a person (verified
  * in-process dispatch) reads that person's inbox within its organization and
  * workspaces: the inbox routes check each item's workspace on this context.
- * An external user (`external_user:`) reads their own inbox only through the
- * organization key that resolved them as an external actor, within that
- * organization; a linked native identity acts as its `user:` person, whose
- * inbox is read by signing in to Opengeni, not through a product's key.
  */
 export function inboxSubjectForContext(context: AccessContext): string | null {
   if (!accessContextHasInbox(context)) return null;
   if (context.subjectId.startsWith("user:")) {
     return canonicalManagedCookieContexts.has(context) || delegatedHumanContexts.has(context)
-      ? context.subjectId
-      : null;
-  }
-  if (context.subjectId.startsWith("external_user:")) {
-    const external = externalActorContexts.get(context);
-    return external && !external.linked && external.identity.subjectId === context.subjectId
       ? context.subjectId
       : null;
   }
@@ -1583,40 +1521,13 @@ export function hasPermission(
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
-  const granted =
-    permissions.includes(permission) ||
-    grantsSecretAlias(permissions, permission) ||
-    grantsPersonalIntegrationSetup(permissions, permission);
+  const granted = permissions.includes(permission) || grantsSecretAlias(permissions, permission);
   if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return granted;
   // Variable-set metadata, plaintext read, write/rotation, attachment, and
   // runtime use are independent capabilities. Deprecated broad permissions
   // remain parseable but do not imply any of the exact permissions.
   return granted || permissions.includes("workspace:admin");
 }
-
-/**
- * `connections:write` (connect accounts, including one's own) includes the
- * narrow personal setup permission, so roles, keys and policies that hold it
- * keep their meaning when a route asks for `connections:personal`.
- */
-function grantsPersonalIntegrationSetup(
-  permissions: readonly Permission[],
-  permission: Permission,
-): boolean {
-  return (
-    permission === PERSONAL_INTEGRATION_SETUP_PERMISSION &&
-    permissionSetCovers(permissions, permission)
-  );
-}
-
-/**
- * A ceiling (organization key policy) covers a requested permission. Cendra
- * fork (5b32e0b7c): explicit-mode coverage, so Q-16 secret aliases delegate as
- * they authorize; it includes upstream's personal setup rule and never borrows
- * the admin wildcard.
- */
-const ceilingCovers = (ceiling: readonly Permission[], permission: Permission): boolean =>
-  hasPermission(ceiling, permission, "explicit");
 
 /**
  * Stored roles and API keys keep their legacy variable-set names (Q-16): a
@@ -1777,13 +1688,13 @@ async function resolveDelegatedHumanAccessContext(
       message: "delegated humans require native organization access",
     });
   }
-  if (workspaceExternalPersonProofs.has(proof)) {
+  if (verifiedSiteViewerProofs.has(proof)) {
     const workspaceId =
       proof.workspaceScope.kind === "selected" && proof.workspaceScope.workspaceIds.length === 1
         ? proof.workspaceScope.workspaceIds[0]
         : null;
     if (!workspaceId)
-      throw new HTTPException(403, { message: "this person's workspace is unavailable" });
+      throw new HTTPException(403, { message: "Site viewer workspace unavailable" });
     const grant = await withWorkspaceSubjectRls(
       deps.db,
       workspaceId,
@@ -1797,32 +1708,13 @@ async function resolveDelegatedHumanAccessContext(
           }))
         )
           return null;
-        const membership = await getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
+        return getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
           principalKind: "human_session",
         });
-        if (membership) return membership;
-        // Otherwise only the person's own workspace, as their active
-        // organization membership names it: the same access their own
-        // requests get there.
-        if (
-          (await externalPersonPersonalWorkspaceId(tx, {
-            accountId: proof.organizationId,
-            subjectId: proof.subjectId,
-          })) !== workspaceId
-        )
-          return null;
-        const own: AccessGrant = {
-          accountId: proof.organizationId,
-          workspaceId,
-          subjectId: proof.subjectId,
-          principalKind: "human_session",
-          permissions: [...managedPersonalWorkspacePermissions],
-        };
-        return own;
       },
     );
     if (!grant || grant.accountId !== proof.organizationId)
-      throw new HTTPException(403, { message: "this person can no longer use this workspace" });
+      throw new HTTPException(403, { message: "Site viewer membership unavailable" });
     const bounded = Object.freeze({
       ...grant,
       permissionMode: "explicit" as const,
@@ -2003,15 +1895,6 @@ async function apiKeyAccessContext(
       throw new HTTPException(400, { message: "invalid external actor selection" });
     }
     const existingOnly = selection.mode === "external" && selection.existingOnly === true;
-    // A governing host that refuses external_member.add leaves only identities
-    // that already exist: first use neither provisions nor heals one.
-    const provisioningRefused =
-      !existingOnly &&
-      (await organizationGovernanceDecision(deps, {
-        organizationId: apiKey.accountId,
-        mutation: "external_member.add",
-        via: "native",
-      })) === "refuse";
     let identity: ExternalIdentity;
     try {
       identity = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
@@ -2019,10 +1902,7 @@ async function apiKeyAccessContext(
         // Claim the lifecycle prefix first so a membership-fenced session
         // writer can recheck that identity without a lock inversion.
         await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
-        const resolveIdentity =
-          existingOnly || provisioningRefused
-            ? readExistingExternalIdentity
-            : ensureExternalIdentity;
+        const resolveIdentity = existingOnly ? readExistingExternalIdentity : ensureExternalIdentity;
         return await resolveIdentity(tx, {
           accountId: apiKey.accountId,
           ...selection.identity,
@@ -2030,7 +1910,6 @@ async function apiKeyAccessContext(
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === "42501") {
-        if (provisioningRefused) throw new OrganizationGovernedByHostError("external_member.add");
         throw new HTTPException(403, { message: "external identity is unavailable" });
       }
       throw new HTTPException(503, { message: "external identity authority is unavailable" });

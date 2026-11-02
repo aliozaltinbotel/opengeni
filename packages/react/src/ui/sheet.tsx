@@ -8,32 +8,26 @@ import { containedPortal } from "./portal-container";
 
 const SheetContainedPortal = containedPortal(SheetPrimitive.Portal);
 
-function Sheet({ ...props }: React.ComponentPropsWithoutRef<typeof SheetPrimitive.Root>) {
+function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
   return <SheetPrimitive.Root data-slot="sheet" {...props} />;
 }
 
-const SheetTrigger = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Trigger>
->(function SheetTrigger({ ...props }, ref) {
-  return <SheetPrimitive.Trigger data-slot="sheet-trigger" ref={ref} {...props} />;
-});
+function SheetTrigger({ ...props }: React.ComponentProps<typeof SheetPrimitive.Trigger>) {
+  return <SheetPrimitive.Trigger data-slot="sheet-trigger" {...props} />;
+}
 
-const SheetClose = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Close>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Close>
->(function SheetClose({ ...props }, ref) {
-  return <SheetPrimitive.Close data-slot="sheet-close" ref={ref} {...props} />;
-});
+function SheetClose({ ...props }: React.ComponentProps<typeof SheetPrimitive.Close>) {
+  return <SheetPrimitive.Close data-slot="sheet-close" {...props} />;
+}
 
-function SheetPortal({ ...props }: React.ComponentPropsWithoutRef<typeof SheetPrimitive.Portal>) {
+function SheetPortal({ ...props }: React.ComponentProps<typeof SheetPrimitive.Portal>) {
   return <SheetContainedPortal data-slot="sheet-portal" {...props} />;
 }
 
-const SheetOverlay = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Overlay>
->(function SheetOverlay({ className, ...props }, ref) {
+function SheetOverlay({
+  className,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Overlay>) {
   return (
     <SheetPrimitive.Overlay
       data-slot="sheet-overlay"
@@ -41,22 +35,21 @@ const SheetOverlay = /* @__PURE__ */ React.forwardRef<
         "fixed inset-0 z-50 bg-black/50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
         className,
       )}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const SheetContent = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content> & {
-    side?: "top" | "right" | "bottom" | "left" | undefined;
-    showCloseButton?: boolean | undefined;
-  }
->(function SheetContent(
-  { className, children, side = "right", showCloseButton = true, ...props },
-  ref,
-) {
+function SheetContent({
+  className,
+  children,
+  side = "right",
+  showCloseButton = true,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Content> & {
+  side?: "top" | "right" | "bottom" | "left" | undefined;
+  showCloseButton?: boolean | undefined;
+}) {
   return (
     <SheetPortal>
       <SheetOverlay />
@@ -74,7 +67,6 @@ const SheetContent = /* @__PURE__ */ React.forwardRef<
             "inset-x-0 bottom-0 h-auto border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
           className,
         )}
-        ref={ref}
         {...props}
       >
         <SectionFrameReset>{children}</SectionFrameReset>
@@ -87,63 +79,50 @@ const SheetContent = /* @__PURE__ */ React.forwardRef<
       </SheetPrimitive.Content>
     </SheetPortal>
   );
-});
+}
 
-const SheetHeader = /* @__PURE__ */ React.forwardRef<
-  HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div">
->(function SheetHeader({ className, ...props }, ref) {
+function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="sheet-header"
       className={cn("flex flex-col gap-1.5 p-4", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const SheetFooter = /* @__PURE__ */ React.forwardRef<
-  HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div">
->(function SheetFooter({ className, ...props }, ref) {
+function SheetFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="sheet-footer"
       className={cn("mt-auto flex flex-col gap-2 p-4", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const SheetTitle = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Title>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Title>
->(function SheetTitle({ className, ...props }, ref) {
+function SheetTitle({ className, ...props }: React.ComponentProps<typeof SheetPrimitive.Title>) {
   return (
     <SheetPrimitive.Title
       data-slot="sheet-title"
       className={cn("font-semibold text-foreground", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const SheetDescription = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Description>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Description>
->(function SheetDescription({ className, ...props }, ref) {
+function SheetDescription({
+  className,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Description>) {
   return (
     <SheetPrimitive.Description
       data-slot="sheet-description"
       className={cn("text-sm text-muted-foreground", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 export {
   Sheet,

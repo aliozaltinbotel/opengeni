@@ -6,8 +6,7 @@ import type {
   ResolveConnectionCredentialInput,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { startTestMcpServer } from "@opengeni/testing/mcp";
-import { testSettings } from "@opengeni/testing/settings";
+import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import { createSiteToolBridge } from "@opengeni/sdk/site";
 
 // Only the fixture DB's inventory/catalog and credential IO are replaced. All

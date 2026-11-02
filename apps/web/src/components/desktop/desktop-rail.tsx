@@ -13,7 +13,6 @@ import {
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { desktopCapability } from "@opengeni/react/app/lib/desktop";
-import { afterHostSignOut } from "@/host-extension/lifecycle";
 
 /** Keep the desktop app's links, notifications and computer on the open workspace. */
 export function useDesktopWorkspace(workspaceId: string): void {
@@ -95,7 +94,7 @@ export function DesktopAccountMenuItems() {
         variant="destructive"
         disabled={!activeId}
         onSelect={() => {
-          if (activeId) void afterHostSignOut(() => bridge.accounts.signOut(activeId));
+          if (activeId) void bridge.accounts.signOut(activeId);
         }}
       >
         <LogOutIcon />

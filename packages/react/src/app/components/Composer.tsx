@@ -9,7 +9,6 @@ import {
 import type { ChatComposerMessages } from "../../components/composer";
 import type { ComposerState } from "../../hooks/use-composer";
 import type { SlashCommandContext } from "../../hooks/use-slash-commands";
-import type { ComposerQueuedRecall } from "../../hooks/use-queued-prompt-recall";
 import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/browser";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { useRef, type ReactNode } from "react";
@@ -56,10 +55,6 @@ export function ConsoleComposer(props: {
   transcriptionSuppressed?: boolean | undefined;
   /** Re-read the near/at-limit usage line when this changes (for example the session status). */
   usageRefreshKey?: unknown | undefined;
-  /** Up in an empty composer pulls the latest waiting prompt back for editing. */
-  queuedRecall?: ComposerQueuedRecall | undefined;
-  /** Work this session started is running, or a wake is pending; keeps Pause available while it is idle. */
-  running?: boolean | undefined;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
@@ -74,8 +69,6 @@ export function ConsoleComposer(props: {
         composer={props.composer}
         effectiveControl={props.effectiveControl}
         queuedAheadCount={props.queuedAheadCount}
-        queuedRecall={props.queuedRecall}
-        running={props.running === true}
         canControlWorkspace={props.canControlWorkspace}
         controlLinks={props.controlLinks}
         placeholder={props.placeholder}

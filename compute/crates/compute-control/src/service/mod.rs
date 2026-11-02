@@ -8,12 +8,11 @@
 //! another replica's decides again from the row as it is then.
 
 mod holds;
-mod images;
 mod moves;
 mod reach;
 mod requests;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -106,6 +105,8 @@ pub struct Settings {
     pub terms: LeaseTerms,
     /// Disk in MiB each sandbox is booked for where it is placed.
     pub disk_mib: u64,
+    /// How many hosts a create or adopt tries before it gives up.
+    pub max_tries: u32,
     /// How long a wake or connect may take in all.
     pub wake_within: Duration,
     /// The image a create that names none starts from.
@@ -115,21 +116,11 @@ pub struct Settings {
     /// The images creates may name, by the fleet's names for them: the id
     /// of each stored image (ADR 19), which hosts fetch by it, or `None`
     /// for the hosts' own base image. The default image is always known,
-    /// as the base image unless named here. Images built for a release
-    /// ([`crate::images`]) join it as they are built.
-    pub images: crate::images::Images,
+    /// as the base image unless named here.
+    pub images: BTreeMap<String, Option<ImageId>>,
     /// The agent link's keys and each team's gateway, if sandboxes may run
     /// Opengeni's agent.
     pub links: Option<Arc<Links>>,
-    /// How long the leader waits for a host whose renewals stopped while
-    /// it holds sandboxes, counted from its last renewal, before giving up
-    /// on it: giving up costs them their running programs and what they
-    /// wrote since their last archive, while a host cut off only by the
-    /// network keeps them, frozen, and runs them on once it renews again.
-    /// One that holds none, or whose instance its group finds stopped or
-    /// gone, is given up on as soon as its lease allows. Never shorter
-    /// than the lease's term and margin, which keep it safe.
-    pub give_up_after: Duration,
 }
 
 impl Settings {
@@ -138,7 +129,7 @@ impl Settings {
     #[must_use]
     pub fn image_named(&self, name: &str) -> Option<Option<ImageId>> {
         match self.images.get(name) {
-            Some(image) => Some(image),
+            Some(image) => Some(*image),
             None => (name == self.image).then_some(None),
         }
     }
@@ -149,12 +140,12 @@ impl Default for Settings {
         Self {
             terms: LeaseTerms::RECOMMENDED,
             disk_mib: 1024,
+            max_tries: 3,
             wake_within: Duration::from_secs(60),
             image: "base".into(),
             sleep: DEFAULT_SLEEP,
-            images: crate::images::Images::default(),
+            images: BTreeMap::new(),
             links: None,
-            give_up_after: Duration::from_secs(120),
         }
     }
 }
@@ -178,8 +169,7 @@ pub struct Service<S> {
     settings: Settings,
 }
 
-/// The wall-clock time in milliseconds since the Unix epoch.
-pub(crate) fn now_ms() -> u64 {
+fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -282,7 +272,7 @@ impl<S: Store> Service<S> {
     }
 
     /// Places `demand` on a host not in `exclude`.
-    fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Target, Failure> {
+    fn place(&self, demand: &Demand, exclude: &[HostId]) -> Result<Target, Failure> {
         let placement = self
             .view
             .place(demand, exclude)
@@ -311,6 +301,7 @@ impl<S: Store> Service<S> {
         id: Id,
         asked: Asked,
         reply: &Answered,
+        tries: u32,
     ) -> Result<(Next, Option<SandboxRow>), Failure> {
         let outcome = reply.outcome();
         let archived = if asked.op == Op::Wake && outcome == Outcome::NotFound {
@@ -331,6 +322,7 @@ impl<S: Store> Service<S> {
                 reply.at(),
                 row.ownership,
                 archived,
+                (tries, self.settings.max_tries),
             );
             match next {
                 Next::AdoptHere(change) => {
@@ -393,13 +385,11 @@ impl<S: Store> Service<S> {
     ) -> Result<SandboxRow, Failure> {
         let (mut row, demand) = self.new_row(id, team, spec, metadata)?;
         let id = row.id;
-        let mut exclude = HashSet::new();
+        let mut exclude = Vec::new();
         let mut inserted = false;
         // The last refusal of a host that holds nothing of it.
         let mut refused = None;
-        // Every host placement can find is tried once: one that refuses
-        // holds nothing of it, and refuses before making anything.
-        loop {
+        for tries in 1..=self.settings.max_tries {
             let target = match self.place(&demand, &exclude) {
                 Ok(target) => target,
                 Err(failure) => {
@@ -425,7 +415,7 @@ impl<S: Store> Service<S> {
                 // Given up on since it was placed: place it elsewhere,
                 // from the row as stored.
                 Write::OwnerLost => {
-                    exclude.insert(target.host);
+                    exclude.push(target.host);
                     if inserted {
                         row = self.store.sandbox(id).await?.ok_or(Failure::NotFound)?;
                     } else {
@@ -457,12 +447,12 @@ impl<S: Store> Service<S> {
                     id,
                     why: error.to_string(),
                 })?;
-            let (next, now) = self.settle(id, asked, &answered).await?;
+            let (next, now) = self.settle(id, asked, &answered, tries).await?;
             row = now.ok_or(Failure::NotFound)?;
             match next {
                 _ if answered.outcome() == Outcome::Done => return Ok(row),
                 Next::PlaceElsewhere => {
-                    exclude.insert(target.host);
+                    exclude.push(target.host);
                     refused = Some(answered);
                 }
                 _ => {
@@ -471,6 +461,8 @@ impl<S: Store> Service<S> {
                 }
             }
         }
+        self.forget_if_refused(&row, refused.as_ref()).await?;
+        Err(Failure::NoCapacity)
     }
 
     /// A new sandbox's row, not yet placed, and what it asks of a host.

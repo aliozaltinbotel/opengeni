@@ -1,15 +1,10 @@
 import {
-  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
-  isRetiredNativeGoogleDriveTask,
-} from "@opengeni/contracts/google-drive-native-retirement";
-import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   isRetiredNativeAtlassianTask,
 } from "@opengeni/contracts/atlassian-native-retirement";
 /**
- * One automation's own page: back to Automations, the header with its
- * actions, then Overview (on/off, the events it listens for, instructions,
- * setup) and Runs. Never a side sheet.
+ * One schedule's own page: back to Schedules, the header with its actions,
+ * then Overview (on/off, instructions, setup) and Runs. Never a side sheet.
  */
 import { Link } from "@tanstack/react-router";
 import {
@@ -23,7 +18,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  BookmarkPlusIcon,
   CalendarClockIcon,
   CopyIcon,
   LinkIcon,
@@ -34,11 +28,8 @@ import {
   SparklesIcon,
   TextCursorInputIcon,
   Trash2Icon,
-  ZapIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { t } from "@opengeni/react/app/lib/console-text";
-import { AutomationTemplateDialog, automationTemplateFromTask } from "@opengeni/react/automations";
 import { modelDisplayName } from "@opengeni/react";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -105,36 +96,25 @@ import type {
 
 import {
   NAME_MAX_LENGTH,
-  automationWhenSentence,
-  automationWhenWords,
-  hasEventTriggers,
-  isFinishedOnce,
   isKnowledgeSync,
   nextRunOf,
   ownerName,
-  runEventsLabel,
   runTimeLabel,
   scheduleErrorReference,
   scheduleErrorText,
   scheduleInheritsChatSettings,
+  scheduleWords,
 } from "./schedule-model";
 import {
-  NextRunValue,
   OwnerValue,
   RunStatusBadge,
   ScheduleTile,
-  eventSourcePath,
-  inAppClick,
   schedulePath,
   schedulePermissions,
-  scheduleSwitchedOn,
   useScheduleAccess,
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
-import { useEventSourceLogo, useEventSources, useEventTriggersEnabled } from "./use-event-sources";
-import { EventTriggerSummary } from "@opengeni/react/automations";
-import type { EventSource } from "@opengeni/sdk";
 import { scheduledRunErrorText, scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
 import { ScheduleBlockerNotice, SchedulePausedChatNotice } from "./schedule-blocker-notice";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
@@ -174,12 +154,7 @@ export function ScheduleDetailPage({
   const [clock, setClock] = useState(() => new Date());
   const [tab, setTab] = useState("overview");
   const [renaming, setRenaming] = useState(false);
-  const [savingTemplate, setSavingTemplate] = useState(false);
-  const eventTriggers = useEventTriggersEnabled();
-  // Source names and states for the When section; read only when it has triggers.
-  const listens = load.status === "ready" && hasEventTriggers(load.task);
-  const eventSources = useEventSources(workspaceId, eventTriggers && listens);
-  // Owner-only: this automation's latest run could not use a connector, or a
+  // Owner-only: this schedule's latest run could not use a connector, or a
   // chosen account is gone. Advisory; a failed read keeps the last answer.
   const [attention, setAttention] = useState<ScheduledTaskAccessAttention | null>(null);
   const [refreshingAccess, setRefreshingAccess] = useState(false);
@@ -257,7 +232,7 @@ export function ScheduleDetailPage({
 
   if (load.status === "loading") {
     return (
-      <DetailPage back={{ label: "Automations", onClick: go.list }}>
+      <DetailPage back={{ label: "Schedules", onClick: go.list }}>
         <div className="flex items-start gap-4 border-b border-border pb-4" aria-busy="true">
           <Skeleton className="size-10 rounded-[10px]" />
           <div className="flex-1 space-y-2">
@@ -266,7 +241,7 @@ export function ScheduleDetailPage({
           </div>
         </div>
         <span className="sr-only" role="status">
-          Loading automation
+          Loading schedule
         </span>
       </DetailPage>
     );
@@ -274,16 +249,16 @@ export function ScheduleDetailPage({
 
   if (load.status === "error") {
     return (
-      <DetailPage back={{ label: "Automations", onClick: go.list }}>
+      <DetailPage back={{ label: "Schedules", onClick: go.list }}>
         {load.missing ? (
           <EmptyState
             variant="page"
             icon={<CalendarClockIcon />}
-            title="This automation doesn't exist"
-            description="It may have been deleted. Your other automations are on the list."
+            title="This schedule doesn't exist"
+            description="It may have been deleted. Your other schedules are on the list."
             action={
               <Button type="button" variant="outline" onClick={go.list}>
-                Back to Automations
+                Back to Schedules
               </Button>
             }
             className="pt-12"
@@ -291,7 +266,7 @@ export function ScheduleDetailPage({
         ) : (
           <ErrorMessage
             align="center"
-            title="Couldn't load this automation"
+            title="Couldn't load this schedule"
             reference={scheduleErrorReference(load.error)}
             details={[{ label: "Error", value: scheduleErrorText(load.error) }]}
             action={
@@ -347,12 +322,12 @@ export function ScheduleDetailPage({
       });
       carryScheduledTaskDriftDismissal(workspaceId, task.id, dismissal, refreshed.executionDigest);
       toast.success("Access refreshed", {
-        description: "New runs of this automation use it. Run it now to check.",
+        description: "New runs of this schedule use it. Run it now to check.",
       });
       await refresh(true);
       notifyScheduledTaskAttentionUpdated();
     } catch (error) {
-      toast.error("Couldn't refresh this automation's access", {
+      toast.error("Couldn't refresh this schedule's access", {
         description: scheduleErrorText(error),
       });
     } finally {
@@ -407,7 +382,7 @@ export function ScheduleDetailPage({
       await refresh(true);
       notifyScheduledTaskAttentionUpdated();
     } catch (error) {
-      toast.error("Couldn't change this automation's accounts", {
+      toast.error("Couldn't change this schedule's accounts", {
         description: scheduleErrorText(error),
       });
     } finally {
@@ -437,7 +412,7 @@ export function ScheduleDetailPage({
   };
 
   return (
-    <DetailPage back={{ label: "Automations", onClick: go.list }}>
+    <DetailPage back={{ label: "Schedules", onClick: go.list }}>
       <LineTabs value={tab} onValueChange={setTab}>
         <div ref={titleRef}>
           <DetailPageHeader
@@ -445,7 +420,7 @@ export function ScheduleDetailPage({
             title={task.name}
             chips={<StatusChip task={task} latest={latest} />}
             meta={[
-              automationWhenWords(task, eventSources.sources ?? [], clock),
+              scheduleWords(task.schedule, clock).short,
               perms.own ? "by you" : `by ${ownerName(task)}`,
             ]}
             actions={
@@ -464,7 +439,7 @@ export function ScheduleDetailPage({
                 ) : null}
                 {task.status === "paused" &&
                 perms.canPauseOrDelete &&
-                !(isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task)) ? (
+                !isRetiredNativeAtlassianTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -475,8 +450,7 @@ export function ScheduleDetailPage({
                     <PlayIcon aria-hidden="true" />
                     Resume
                   </Button>
-                ) : perms.canRun &&
-                  !(isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task)) ? (
+                ) : perms.canRun && !isRetiredNativeAtlassianTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -511,16 +485,6 @@ export function ScheduleDetailPage({
                     <DropdownMenuItem onSelect={() => go.create({ from: task.id })}>
                       <CopyIcon />
                       Duplicate
-                    </DropdownMenuItem>
-                  ) : null}
-                  {perms.canDuplicate ? (
-                    <DropdownMenuItem
-                      // A trigger's kind of source comes from its source.
-                      disabled={listens && eventSources.sources === undefined}
-                      onSelect={() => setSavingTemplate(true)}
-                    >
-                      <BookmarkPlusIcon />
-                      Save as template
                     </DropdownMenuItem>
                   ) : null}
                   <DropdownMenuItem onSelect={copyLink}>
@@ -568,9 +532,6 @@ export function ScheduleDetailPage({
               workspaceId={workspaceId}
               accessNotices={accessNotices}
               accounts={accounts}
-              eventSources={eventSources.sources}
-              onEdit={() => go.edit(task.id)}
-              onOpenSource={go.source}
               onActiveChange={(active) =>
                 void (active ? actions.resume(task) : actions.pause(task))
               }
@@ -604,25 +565,6 @@ export function ScheduleDetailPage({
         onOpenChange={setRenaming}
         onRenamed={() => void refresh(true)}
       />
-      <AutomationTemplateDialog
-        open={savingTemplate}
-        onOpenChange={setSavingTemplate}
-        mode="save"
-        initial={{ name: task.name, description: "" }}
-        onSubmit={async (values) => {
-          const saved = await client.createAutomationTemplate(
-            workspaceId,
-            automationTemplateFromTask(t, task, eventSources.sources ?? [], {
-              ...values,
-              now: new Date(),
-            }),
-          );
-          toast.success("Saved as a template", {
-            description: saved.name,
-            action: { label: "Templates", onClick: go.templates },
-          });
-        }}
-      />
     </DetailPage>
   );
 }
@@ -631,17 +573,13 @@ export function ScheduleDetailPage({
    Header chip.
    -------------------------------------------------------------------------- */
 
-/**
- * Only a state worth noticing: running, paused, finished or a failed last run.
- * A healthy automation has no chip.
- */
+/** Only a state worth noticing: running, paused or a failed last run. A healthy schedule has no chip. */
 function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledTaskRun }) {
   const state = scheduledTaskStateLabel(task);
   if (latest?.status === "dispatched") return <StatusBadge status="running" />;
   if (!state.active) {
     return <StatusBadge status="paused">{state.label}</StatusBadge>;
   }
-  if (isFinishedOnce(task)) return <StatusBadge status="off">Finished</StatusBadge>;
   if (latest?.status === "failed") {
     return <StatusBadge status="failed">Last run failed</StatusBadge>;
   }
@@ -664,9 +602,6 @@ function Overview({
   workspaceId,
   accessNotices,
   accounts,
-  eventSources,
-  onEdit,
-  onOpenSource,
   onActiveChange,
   onOpenSession,
 }: {
@@ -680,10 +615,6 @@ function Overview({
   accessNotices: ReactNode;
   /** Which account each connector would use now; only the owner receives it. */
   accounts: ReactNode;
-  /** The event sources the viewer can see, for the When section. */
-  eventSources: EventSource[] | undefined;
-  onEdit: () => void;
-  onOpenSource: (sourceId: string) => void;
   onActiveChange: (active: boolean) => void;
   onOpenSession: (sessionId: string) => void;
 }) {
@@ -692,10 +623,7 @@ function Overview({
   const state = scheduledTaskStateLabel(task);
   const retired = state.reason === "provider_retired";
   const next = nextRunOf(task, now);
-  const sentence = automationWhenSentence(task, now);
-  const listens = hasEventTriggers(task);
-  const finished = isFinishedOnce(task);
-  const sourceLogo = useEventSourceLogo();
+  const sentence = `${scheduleWords(task.schedule, now).sentence}.`;
   const status =
     task.status === "paused"
       ? task.blocker?.state === "paused"
@@ -703,14 +631,11 @@ function Overview({
         : "Paused, so it won't run until you turn it back on."
       : !state.active
         ? `${state.label}, so it won't run.`
-        : finished
-          ? "It ran once and stopped listening. Turn it on to wait for the next matching event."
+        : task.schedule.type === "manual"
+          ? null
           : next
             ? `Next run ${runTimeLabel(next, now)}.`
-            : listens || task.schedule.type === "manual"
-              ? null
-              : "It has no runs left.";
-  const throttled = state.active && !finished ? task.events?.throttledSince : null;
+            : "It has no runs left.";
   const owner = ownerName(task);
   const firstName = owner.split(" ")[0] ?? owner;
   const description = scheduledTaskDescription(task);
@@ -741,30 +666,9 @@ function Overview({
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
           </Notice>
         ) : null}
-        {throttled ? (
-          <Notice
-            tone="waiting"
-            title="Holding events back"
-            className="mb-4"
-            actionLayout="responsive"
-            action={
-              perms.canEdit ? (
-                <Button type="button" variant="outline" size="sm" onClick={onEdit}>
-                  Change the limit
-                </Button>
-              ) : undefined
-            }
-          >
-            More events arrived than its {task.events?.maxRunsPerHour} event runs an hour allow. The
-            rest wait and arrive together in its next run.
-          </Notice>
-        ) : null}
         {retired ? (
-          <Notice tone="muted" title="Previous source sync retired">
-            {isRetiredNativeGoogleDriveTask(task)
-              ? GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE
-              : ATLASSIAN_NATIVE_RETIRED_MESSAGE}{" "}
-            Imported documents and previous runs remain.
+          <Notice tone="muted" title="Jira and Confluence sync retired">
+            {ATLASSIAN_NATIVE_RETIRED_MESSAGE} Imported documents and previous runs remain.
           </Notice>
         ) : (
           <SettingRow
@@ -778,13 +682,13 @@ function Overview({
             control={
               <Switch
                 aria-label={`${task.name} is active`}
-                checked={scheduleSwitchedOn(task)}
+                checked={task.status === "active"}
                 onCheckedChange={onActiveChange}
                 pending={busy}
                 disabled={!perms.canPauseOrDelete}
                 disabledReason={
                   perms.own
-                    ? "You need permission to manage automations in this workspace."
+                    ? "You need permission to manage schedules in this workspace."
                     : `Only ${owner} can pause or resume it.`
                 }
               />
@@ -794,7 +698,7 @@ function Overview({
         {!perms.own ? (
           <InlineHelp icon className="mt-3">
             {retired ? (
-              <>Only {firstName} can remove this retired sync.</>
+              <>Only {firstName} can remove this retired schedule.</>
             ) : (
               <>
                 It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
@@ -816,29 +720,9 @@ function Overview({
           </p>
         </DetailSection>
       ) : (
-        <>
-          {listens ? (
-            <DetailSection
-              title="When"
-              description={
-                task.events?.once
-                  ? "The first matching event runs it once."
-                  : `Each matching event runs it, up to ${task.events?.maxRunsPerHour} runs an hour.`
-              }
-            >
-              <EventTriggerSummary
-                triggers={task.events?.triggers ?? []}
-                sources={eventSources}
-                sourceLogo={sourceLogo}
-                sourceHref={(sourceId) => eventSourcePath(workspaceId, sourceId)}
-                onOpenSource={(sourceId, event) => inAppClick(() => onOpenSource(sourceId))(event)}
-              />
-            </DetailSection>
-          ) : null}
-          <DetailSection title="Message">
-            <Instructions text={task.agentConfig.prompt} />
-          </DetailSection>
-        </>
+        <DetailSection title="Message">
+          <Instructions text={task.agentConfig.prompt} />
+        </DetailSection>
       )}
       {knowledge ? null : (
         <DetailSection title="Setup">
@@ -900,15 +784,14 @@ function Instructions({ text }: { text: string }) {
 }
 
 const EACH_RUN: Record<ScheduledTask["runMode"], string> = {
-  new_session_per_run: "Starts a new chat",
-  reusable_session: "Continues one ongoing chat",
-  existing_session: "Continues an existing chat",
+  new_session_per_run: "New chat each run",
+  reusable_session: "One ongoing chat",
+  existing_session: "Posts into an existing chat",
 };
 
 const IF_STILL_RUNNING: Record<ScheduledTask["overlapPolicy"], string> = {
   allow_concurrent: "Queue the next run",
   buffer_one: "Queue the next run",
-  steer: "Steer the current run",
   skip: "Skip the next run",
 };
 
@@ -1038,6 +921,8 @@ function ScheduleAside({
   const catalog = useWorkspaceModelCatalog(isKnowledgeSync(task) ? null : workspaceId);
   const machineId = task.agentConfig.machineTarget?.targetSandboxId;
   const fleet = useWorkspaceMachines({ enabled: Boolean(machineId) });
+  const state = scheduledTaskStateLabel(task);
+  const next = nextRunOf(task, now);
   const model = useMemo(() => {
     if (isKnowledgeSync(task) || scheduleInheritsChatSettings(task)) return null;
     const chosen = task.agentConfig.model;
@@ -1072,11 +957,16 @@ function ScheduleAside({
       <DetailAsideItem label="Owner">
         <OwnerValue task={task} viewerSubjectId={access.viewerSubjectId} size="md" />
       </DetailAsideItem>
-      <DetailAsideItem
-        label="Next run"
-        icon={hasEventTriggers(task) && !nextRunOf(task, now) ? <ZapIcon /> : <CalendarClockIcon />}
-      >
-        <NextRunValue task={task} now={now} />
+      <DetailAsideItem label="Next run" icon={<CalendarClockIcon />}>
+        {!state.active ? (
+          <span className="text-fg-muted">{state.label}</span>
+        ) : next ? (
+          <RelativeTime date={next} format="absolute" />
+        ) : (
+          <span className="text-fg-muted">
+            {task.schedule.type === "manual" ? "On demand" : "No runs left"}
+          </span>
+        )}
       </DetailAsideItem>
       {model ? (
         <DetailAsideItem label="Model" icon={<SparklesIcon />}>
@@ -1157,7 +1047,7 @@ function RunsList({
   if (runs.status === "error") {
     return (
       <ErrorMessage
-        title="Couldn't load this automation's runs"
+        title="Couldn't load this schedule's runs"
         action={
           <Button type="button" variant="outline" size="sm" onClick={onRetry}>
             Try again
@@ -1215,7 +1105,7 @@ function RunsList({
                 />
               }
               titleAddon={<RunStatusBadge run={run} />}
-              description={runOutcome(run) ?? runEventsLabel(run) ?? undefined}
+              description={runOutcome(run)}
               meta={meta}
               {...(sessionAccess === "open" && sessionId
                 ? { onOpen: () => onOpenSession(sessionId), indicator: "open" as const }
@@ -1259,7 +1149,7 @@ function RenameDialog({
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
-      title="Rename automation"
+      title="Rename schedule"
       submitLabel="Rename"
       pendingLabel="Renaming…"
       onSubmit={async () => {
@@ -1276,7 +1166,7 @@ function RenameDialog({
         try {
           await client.updateScheduledTask(workspaceId, task.id, { name: trimmed });
         } catch (caught) {
-          throw new Error(`Couldn't rename the automation. ${scheduleErrorText(caught)}`, {
+          throw new Error(`Couldn't rename the schedule. ${scheduleErrorText(caught)}`, {
             cause: caught,
           });
         }
@@ -1287,7 +1177,7 @@ function RenameDialog({
       onSubmitted={() => onOpenChange(false)}
     >
       <FieldStack>
-        <Field label="Name" error={error} hint="Shown in the automations list.">
+        <Field label="Name" error={error} hint="Shown in the schedules list.">
           <TextInput
             value={name}
             onChange={(event) => {

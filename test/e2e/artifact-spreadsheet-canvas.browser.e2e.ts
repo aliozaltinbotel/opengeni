@@ -12,8 +12,7 @@ import {
   type WebKitBrowser,
 } from "playwright";
 
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 type SpreadsheetUxWindow = typeof globalThis & {

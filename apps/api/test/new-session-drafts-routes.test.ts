@@ -3,8 +3,7 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { SaveNewSessionDraftRequest } from "@opengeni/contracts";
 import type { AccessGrant, ApiRouteDeps } from "@opengeni/core";
 import { NewSessionDraftConflictError } from "@opengeni/db";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 
 const delegationSecret = "new-session-drafts-route-secret";

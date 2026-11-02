@@ -1,5 +1,4 @@
 import type {
-  WorkspaceArtifact,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
@@ -45,15 +44,10 @@ export function redactWorkspaceArtifactListProvenance(
 ): WorkspaceArtifactListResponse {
   return {
     ...response,
-    artifacts: response.artifacts.map(redactWorkspaceArtifactProvenance),
-  };
-}
-
-/** A Site without who made its current version, as lists show it. */
-export function redactWorkspaceArtifactProvenance(artifact: WorkspaceArtifact): WorkspaceArtifact {
-  return {
-    ...artifact,
-    currentVersion: artifact.currentVersion ? redactProvenance(artifact.currentVersion) : null,
+    artifacts: response.artifacts.map((artifact) => ({
+      ...artifact,
+      currentVersion: artifact.currentVersion ? redactProvenance(artifact.currentVersion) : null,
+    })),
   };
 }
 

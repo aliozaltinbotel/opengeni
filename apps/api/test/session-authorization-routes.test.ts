@@ -10,7 +10,6 @@ import {
   upsertSessionGoalWithEvent,
   setSessionGoalStatusWithEvent,
   getSessionGoal,
-  acceptSessionHumanInputResponse,
   bootstrapWorkspace,
   acquireLease,
   claimSessionWorkForAttempt,
@@ -41,9 +40,12 @@ import {
   type ApiRouteDeps,
   type SessionWorkflowClient,
 } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import postgres from "postgres";
 import { createApp } from "../src/app";
@@ -424,9 +426,7 @@ describe("embedding host session authorization routes", () => {
       { headers: { authorization: value.authorization } },
     );
     expect(malformedPageResponse.status).toBe(400);
-    expect(await malformedPageResponse.text()).toStartWith(
-      "invalid goal revision page query: limit: ",
-    );
+    expect(await malformedPageResponse.text()).toBe("invalid goal revision page query");
 
     await shared.admin`
       insert into session_goals (account_id, workspace_id, session_id, text)
@@ -887,51 +887,6 @@ describe("embedding host session authorization routes", () => {
     const headers = { authorization: value.authorization };
     const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}`;
 
-    for (const path of [base, `/v1/workspaces/${value.grant.workspaceId}/sessions`]) {
-      const response = await app.request(path, { headers });
-      expect(response.status).toBe(200);
-      const body = await response.text();
-      expect(body).not.toContain('"initialModelContext"');
-      expect(body).not.toContain('"modelContext"');
-      expect(body).not.toContain("host-only selected-record context");
-    }
-
-    const eventsResponse = await app.request(`${base}/events?mode=forensic&payloadMode=full`, {
-      headers,
-    });
-    expect(eventsResponse.status).toBe(200);
-    expect(eventsResponse.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
-    const events = (await eventsResponse.json()) as Array<{
-      type: string;
-      payload: Record<string, unknown>;
-    }>;
-    const message = events.find((event) => event.type === "user.message");
-    expect(message?.payload.text).toBe("private child");
-    expect(message?.payload).not.toHaveProperty("modelContext");
-
-    const streamAbort = new AbortController();
-    const streamResponse = await app.request(`${base}/events/stream`, {
-      headers,
-      signal: streamAbort.signal,
-    });
-    expect(streamResponse.status).toBe(200);
-    const reader = streamResponse.body?.getReader();
-    if (!reader) throw new Error("event stream has no body");
-    let replay = "";
-    try {
-      while (!replay.includes('"type":"user.message"')) {
-        const chunk = await reader.read();
-        if (chunk.done) throw new Error("event stream ended before the user message");
-        replay += new TextDecoder().decode(chunk.value);
-      }
-      expect(replay).toContain("private child");
-      expect(replay).not.toContain("modelContext");
-      expect(replay).not.toContain("host-only selected-record context");
-    } finally {
-      streamAbort.abort();
-      await reader.cancel();
-    }
-
     const turnsResponse = await app.request(`${base}/turns`, { headers });
     expect(turnsResponse.status).toBe(200);
     const turns = (await turnsResponse.json()) as Array<Record<string, unknown>>;
@@ -988,7 +943,7 @@ describe("embedding host session authorization routes", () => {
     });
     expect(claimed).toMatchObject({ action: "claimed", turn: { id: started.turn.id } });
     if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.reason}`);
-    expect(claimed.turn.modelContext).toBe("host-only selected-record context");
+    expect(claimed.turn).not.toHaveProperty("modelContext");
     const history = await getActiveSessionHistoryItems(
       client.db,
       value.grant.workspaceId,
@@ -1031,8 +986,6 @@ describe("embedding host session authorization routes", () => {
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,
-      ownerSubjectId: null,
-      visibility: "workspace_shared",
       operation: "session.read",
       surface: "http",
     });
@@ -1047,16 +1000,12 @@ describe("embedding host session authorization routes", () => {
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,
-      ownerSubjectId: null,
-      visibility: "workspace_shared",
       operation: "session.composer.read",
       surface: "http",
     });
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,
-      ownerSubjectId: null,
-      visibility: "workspace_shared",
       operation: "session.composer.read",
       surface: "core",
     });
@@ -1105,8 +1054,6 @@ describe("embedding host session authorization routes", () => {
       children: [],
       truncated: false,
       sessionHasSchedules: false,
-      sessionHasUpcomingSchedules: false,
-      sessionWaitingForEvents: false,
     });
 
     await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
@@ -1588,8 +1535,8 @@ describe("embedding host session authorization routes", () => {
     ]);
   });
 
-  /** A live root attempt plus a child frozen on one structured question. */
-  async function childHumanInputFixture() {
+  test("lets a live agent answer a child's human-input request but never decide a tool approval", async () => {
+    if (!available) return;
     const value = await fixture();
     const noop = async () => undefined;
     // Live caller attempt on the root.
@@ -1706,13 +1653,6 @@ describe("embedding host session authorization routes", () => {
       },
     };
     const server = buildOpenGeniMcpServer(mcpDeps, agentGrant);
-    return { value, attemptId, requestId, mcpDeps, agentGrant, server };
-  }
-
-  test("lets a live agent answer a child's human-input request but never decide a tool approval", async () => {
-    if (!available) return;
-    const { value, attemptId, requestId, mcpDeps, agentGrant, server } =
-      await childHumanInputFixture();
 
     // Tool approvals remain human-only for agent attempts, on every surface.
     await expect(
@@ -1731,24 +1671,21 @@ describe("embedding host session authorization routes", () => {
       }),
     ).resolves.toBeTruthy();
 
-    const idempotencyKey = crypto.randomUUID();
-    const answer = (key: string, values = ["staging"]) =>
-      callMcpTool<McpMutationReceiptType>(server, "session_human_input_respond", {
+    const answered = await callMcpTool<McpMutationReceiptType>(
+      server,
+      "session_human_input_respond",
+      {
         sessionId: value.child.id,
         requestId,
-        response: {
-          outcome: "answered",
-          answers: [{ questionId: "env", values }],
-        },
-        idempotencyKey: key,
-      });
-    const answered = await answer(idempotencyKey);
+        response: { outcome: "answered", answers: [{ questionId: "env", values: ["staging"] }] },
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
     expect(answered.resource).toMatchObject({
       type: "session_human_input_request",
       id: requestId,
       state: "answered",
     });
-    expect(answered).toMatchObject({ outcome: "updated", changed: true });
     const request = await getSessionHumanInputRequest(
       client.db,
       value.grant.workspaceId,
@@ -1760,276 +1697,7 @@ describe("embedding host session authorization routes", () => {
       respondedBy: `agent_attempt:${attemptId}`,
     });
     const events = await listSessionEvents(client.db, value.grant.workspaceId, value.child.id);
-    const responses = events.filter((event) => event.type === "user.humanInputResponse");
-    expect(responses).toHaveLength(1);
-    // The conversation can say an agent answered, without any subject id.
-    expect(responses[0]!.payload).toMatchObject({
-      requestId,
-      respondedByKind: "agent_attempt",
-    });
-
-    // A retry with the same key replays this attempt's own committed answer...
-    expect(await answer(idempotencyKey)).toMatchObject({
-      outcome: "replayed",
-      changed: false,
-    });
-    // ...while a second, different answer is a clear "already answered" result.
-    const again = await answer(crypto.randomUUID(), ["production"]);
-    expect(again).toMatchObject({
-      outcome: "unchanged",
-      changed: false,
-      resource: { state: "answered" },
-      facts: { alreadyAnswered: true, answeredBy: "you", outcome: "answered" },
-    });
-    expect(again.warnings[0]).toContain("not used");
-    // A person submitting after the agent gets the agent's committed event
-    // back, never a second answer.
-    const late = await acceptSessionHumanInputResponse(client.db, {
-      accountId: value.grant.accountId,
-      workspaceId: value.grant.workspaceId,
-      sessionId: value.child.id,
-      requestId,
-      response: { outcome: "answered", answers: [{ questionId: "env", values: ["production"] }] },
-      respondedBy: value.grant.subjectId,
-      respondedByKind: "human",
-      clientEventId: crypto.randomUUID(),
-    });
-    expect(late).toMatchObject({ action: "completed", settledBy: "earlier_response" });
-    if (late.action !== "completed") throw new Error("unreachable");
-    expect(late.event.id).toBe(responses[0]!.id);
-    const after = await listSessionEvents(client.db, value.grant.workspaceId, value.child.id);
-    expect(after.filter((event) => event.type === "user.humanInputResponse")).toHaveLength(1);
-  });
-
-  test("a person's answer and the parent agent's answer race: exactly one wins, the loser is told", async () => {
-    if (!available || !shared) return;
-    // The agent's call does authorization work before it reaches the database,
-    // so a plain Promise.all almost always lets the person win. Force each
-    // order instead: hold the request row lock, start the first answer and
-    // wait until it is queued on that lock, then start the second and wait
-    // until it is queued too, and only then release. Both answers are in
-    // flight together; the first in line must win and the other must be told.
-    const blocker = postgres(shared.adminUrl, { max: 1 });
-    const monitor = postgres(shared.adminUrl, { max: 1 });
-    const lockWaiters = async () => {
-      const [row] = await monitor<{ waiting: number }[]>`
-        select count(*)::int as waiting from pg_stat_activity
-        where datname = current_database() and wait_event_type = 'Lock'
-      `;
-      return row?.waiting ?? 0;
-    };
-    const waitForLockWaiters = async (count: number) => {
-      const deadline = Date.now() + 20_000;
-      while ((await lockWaiters()) < count) {
-        if (Date.now() > deadline)
-          throw new Error(`fewer than ${count} answers queued on the lock`);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    };
-    const raceInOrder = async <First, Second>(
-      requestId: string,
-      first: () => Promise<First>,
-      second: () => Promise<Second>,
-    ): Promise<[First, Second]> => {
-      let release!: () => void;
-      const released = new Promise<void>((resolve) => (release = resolve));
-      let locked!: () => void;
-      const lockHeld = new Promise<void>((resolve) => (locked = resolve));
-      const holder = blocker.begin(async (tx) => {
-        await tx`select id from session_human_input_requests where id = ${requestId} for update`;
-        locked();
-        await released;
-      });
-      await lockHeld;
-      const baseline = await lockWaiters();
-      const firstRun = first();
-      await waitForLockWaiters(baseline + 1);
-      const secondRun = second();
-      await waitForLockWaiters(baseline + 2);
-      release();
-      await holder;
-      return [await firstRun, await secondRun];
-    };
-    const seen = new Set<string>();
-    try {
-      for (const round of [0, 1, 2, 3]) {
-        const { value, attemptId, requestId, server } = await childHumanInputFixture();
-        const human = () =>
-          acceptSessionHumanInputResponse(client.db, {
-            accountId: value.grant.accountId,
-            workspaceId: value.grant.workspaceId,
-            sessionId: value.child.id,
-            requestId,
-            response: {
-              outcome: "answered",
-              answers: [{ questionId: "env", values: ["production"] }],
-            },
-            respondedBy: value.grant.subjectId,
-            respondedByKind: "human",
-            clientEventId: crypto.randomUUID(),
-          });
-        const agent = () =>
-          callMcpTool<McpMutationReceiptType>(server, "session_human_input_respond", {
-            sessionId: value.child.id,
-            requestId,
-            response: {
-              outcome: "answered",
-              answers: [{ questionId: "env", values: ["staging"] }],
-            },
-            idempotencyKey: crypto.randomUUID(),
-          });
-        // Alternate who is first in line; both are in flight when the lock opens.
-        const humanFirst = round % 2 === 0;
-        const [humanResult, agentReceipt] = humanFirst
-          ? await raceInOrder(requestId, human, agent)
-          : await raceInOrder(requestId, agent, human).then(
-              ([agentRun, humanRun]) => [humanRun, agentRun] as const,
-            );
-        const request = await getSessionHumanInputRequest(
-          client.db,
-          value.grant.workspaceId,
-          value.child.id,
-          requestId,
-        );
-        const events = await listSessionEvents(client.db, value.grant.workspaceId, value.child.id);
-        const responses = events.filter((event) => event.type === "user.humanInputResponse");
-        // Exactly one durable answer, whoever won.
-        expect(responses).toHaveLength(1);
-        seen.add(humanFirst ? "person" : "agent");
-        if (humanFirst) {
-          expect(request?.respondedBy).toBe(value.grant.subjectId);
-          expect(humanResult.action).toBe("accepted");
-          expect(request.response).toMatchObject({
-            answers: [{ questionId: "env", values: ["production"] }],
-          });
-          expect(responses[0]!.payload).toMatchObject({
-            respondedByKind: "human",
-          });
-          expect(agentReceipt).toMatchObject({
-            outcome: "unchanged",
-            changed: false,
-            facts: {
-              alreadyAnswered: true,
-              answeredBy: "person",
-              outcome: "answered",
-            },
-          });
-        } else {
-          expect(request?.respondedBy).toBe(`agent_attempt:${attemptId}`);
-          expect(agentReceipt).toMatchObject({
-            outcome: "updated",
-            changed: true,
-          });
-          expect(responses[0]!.payload).toMatchObject({
-            respondedByKind: "agent_attempt",
-          });
-          // The person's late submission returns the winning event, not theirs,
-          // so a client can tell that someone else answered first.
-          expect(humanResult.action).toBe("completed");
-          if (humanResult.action !== "completed") throw new Error("unreachable");
-          expect(humanResult.settledBy).toBe("earlier_response");
-          expect(humanResult.event.id).toBe(responses[0]!.id);
-        }
-      }
-    } finally {
-      await blocker.end();
-      await monitor.end();
-    }
-    expect([...seen].sort()).toEqual(["agent", "person"]);
-  });
-
-  test("a parent agent answering after the person answered gets alreadyAnswered", async () => {
-    if (!available) return;
-    const { value, requestId, server } = await childHumanInputFixture();
-    const human = await acceptSessionHumanInputResponse(client.db, {
-      accountId: value.grant.accountId,
-      workspaceId: value.grant.workspaceId,
-      sessionId: value.child.id,
-      requestId,
-      response: {
-        outcome: "answered",
-        answers: [{ questionId: "env", values: ["production"] }],
-      },
-      respondedBy: value.grant.subjectId,
-      respondedByKind: "human",
-      clientEventId: crypto.randomUUID(),
-    });
-    expect(human.action).toBe("accepted");
-    const receipt = await callMcpTool<McpMutationReceiptType>(
-      server,
-      "session_human_input_respond",
-      {
-        sessionId: value.child.id,
-        requestId,
-        response: {
-          outcome: "answered",
-          answers: [{ questionId: "env", values: ["staging"] }],
-        },
-        idempotencyKey: crypto.randomUUID(),
-      },
-    );
-    expect(receipt).toMatchObject({
-      outcome: "unchanged",
-      changed: false,
-      resource: { id: requestId, state: "answered" },
-      facts: {
-        alreadyAnswered: true,
-        answeredBy: "person",
-        outcome: "answered",
-      },
-    });
-    expect(receipt.warnings).toEqual([
-      "Already answered by a person; this answer was not used. Do not answer again.",
-    ]);
-    const request = await getSessionHumanInputRequest(
-      client.db,
-      value.grant.workspaceId,
-      value.child.id,
-      requestId,
-    );
-    expect(request).toMatchObject({
-      respondedBy: value.grant.subjectId,
-      response: { answers: [{ questionId: "env", values: ["production"] }] },
-    });
-  });
-
-  test("a parent agent answering after an API client answered is told it was an API client", async () => {
-    if (!available) return;
-    const { value, requestId, server } = await childHumanInputFixture();
-    const api = await acceptSessionHumanInputResponse(client.db, {
-      accountId: value.grant.accountId,
-      workspaceId: value.grant.workspaceId,
-      sessionId: value.child.id,
-      requestId,
-      response: {
-        outcome: "answered",
-        answers: [{ questionId: "env", values: ["production"] }],
-      },
-      respondedBy: "api_key:test-key",
-      respondedByKind: "api",
-      clientEventId: crypto.randomUUID(),
-    });
-    expect(api.action).toBe("accepted");
-    const receipt = await callMcpTool<McpMutationReceiptType>(
-      server,
-      "session_human_input_respond",
-      {
-        sessionId: value.child.id,
-        requestId,
-        response: {
-          outcome: "answered",
-          answers: [{ questionId: "env", values: ["staging"] }],
-        },
-        idempotencyKey: crypto.randomUUID(),
-      },
-    );
-    expect(receipt).toMatchObject({
-      outcome: "unchanged",
-      facts: { alreadyAnswered: true, answeredBy: "api", outcome: "answered" },
-    });
-    expect(receipt.warnings).toEqual([
-      "Already answered by an API client; this answer was not used. Do not answer again.",
-    ]);
+    expect(events.some((event) => event.type === "user.humanInputResponse")).toBe(true);
   });
 
   test("lets a live agent address peer sessions while host policy can only narrow", async () => {
@@ -2389,23 +2057,13 @@ test("session schedule projections follow current targets and schedule permissio
     expect(response.status).toBe(200);
     return await response.json();
   };
-  // A paused schedule is still a schedule relationship, but never upcoming.
-  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({
-    hasSchedules: true,
-    hasUpcomingSchedules: false,
-    automationWait: null,
-  });
+  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({ hasSchedules: true });
   expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
     sessionHasSchedules: true,
-    sessionHasUpcomingSchedules: false,
-    sessionAutomationWait: null,
   });
-  const withoutScheduleAccess = await read(`/sessions/${value.child.id}`, value.authorization);
-  expect(withoutScheduleAccess).toMatchObject({
+  expect(await read(`/sessions/${value.child.id}`, value.authorization)).toMatchObject({
     hasSchedules: false,
-    hasUpcomingSchedules: false,
   });
-  expect(withoutScheduleAccess).not.toHaveProperty("automationWait");
   expect(await read(`/scheduled-tasks?sessionId=${value.child.id}`)).toMatchObject([
     { id: task.id },
   ]);
@@ -2413,40 +2071,7 @@ test("session schedule projections follow current targets and schedule permissio
   const page = await read("/sessions?view=page");
   expect(
     page.sessions.find((session: { id: string }) => session.id === value.child.id),
-  ).toMatchObject({ hasSchedules: true, hasUpcomingSchedules: false });
-  const upcoming = await createScheduledTask(client.db, {
-    accountId: value.grant.accountId,
-    workspaceId: value.grant.workspaceId,
-    name: "Daily review",
-    status: "active",
-    schedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
-    temporalScheduleId: crypto.randomUUID(),
-    runMode: "existing_session",
-    overlapPolicy: "skip",
-    targetSessionId: value.child.id,
-    agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {} },
-    createdBy: { kind: "service", subjectId: "scheduler" },
-    metadata: {},
-  });
-  const nextNine = new Date();
-  nextNine.setUTCHours(9, 0, 0, 0);
-  if (nextNine.getTime() <= Date.now()) nextNine.setUTCDate(nextNine.getUTCDate() + 1);
-  const dailyWait = { nextRunAt: nextNine.toISOString(), event: null, automations: 1 };
-  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({
-    hasSchedules: true,
-    hasUpcomingSchedules: true,
-    automationWait: dailyWait,
-  });
-  expect(
-    (await read("/sessions?view=page")).sessions.find(
-      (session: { id: string }) => session.id === value.child.id,
-    ),
-  ).toMatchObject({ hasSchedules: true, hasUpcomingSchedules: true, automationWait: dailyWait });
-  expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
-    sessionHasUpcomingSchedules: true,
-    sessionAutomationWait: dailyWait,
-  });
-  await deleteScheduledTask(client.db, value.grant.workspaceId, upcoming.id);
+  ).toMatchObject({ hasSchedules: true });
   const denied = await app.request(`${base}/scheduled-tasks?sessionId=${value.child.id}`, {
     headers: { authorization: value.authorization },
   });

@@ -1,7 +1,7 @@
 import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   applyKnowledgeMemoryOperation,

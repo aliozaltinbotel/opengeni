@@ -31,18 +31,13 @@ pub fn sample(spool_root: &Path) -> HostCapacity {
     }
 }
 
-/// Available physical memory, in bytes: `MemAvailable` from `/proc/meminfo` on
-/// Linux, `GlobalMemoryStatusEx` on Windows; `None` elsewhere.
+/// `MemAvailable` from `/proc/meminfo`, in bytes. Linux-only; `None` elsewhere.
 fn mem_available_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         parse_mem_available(&std::fs::read_to_string("/proc/meminfo").ok()?)
     }
-    #[cfg(windows)]
-    {
-        opengeni_agent_windows_ffi::system::memory().map(|memory| memory.available_bytes)
-    }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(target_os = "linux"))]
     {
         None
     }
@@ -62,8 +57,7 @@ fn parse_mem_available(meminfo: &str) -> Option<u64> {
 
 /// Free bytes (available to an unprivileged user) on `spool_root`'s
 /// filesystem, via the SAFE `nix` statvfs binding (the same pattern as the
-/// metrics disk sample; f_frsize is the correct unit), or the volume's bytes
-/// available to this user on Windows.
+/// metrics disk sample; f_frsize is the correct unit).
 #[allow(clippy::unnecessary_cast, clippy::cast_lossless)] // statvfs counts: u64 on Linux, u32 on macOS
 fn disk_free_bytes(spool_root: &Path) -> Option<u64> {
     #[cfg(unix)]
@@ -72,12 +66,7 @@ fn disk_free_bytes(spool_root: &Path) -> Option<u64> {
         let stat = nix::sys::statvfs::statvfs(spool_root).ok()?;
         Some((stat.blocks_available() as u64).saturating_mul(stat.fragment_size() as u64))
     }
-    #[cfg(windows)]
-    {
-        let _ = std::fs::create_dir_all(spool_root);
-        opengeni_agent_windows_ffi::system::volume(spool_root).map(|volume| volume.available_bytes)
-    }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     {
         let _ = spool_root;
         None
@@ -197,14 +186,5 @@ mod tests {
         assert!(capacity.fd_headroom > 0);
         assert!(capacity.pid_headroom > 0);
         assert!(capacity.nproc > 0);
-    }
-
-    /// Windows measures memory and the spool's disk instead of assuming defaults.
-    #[cfg(windows)]
-    #[test]
-    fn windows_measures_memory_and_spool_disk() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(mem_available_bytes().is_some_and(|bytes| bytes > 0));
-        assert!(disk_free_bytes(&dir.path().join("spool")).is_some_and(|bytes| bytes > 0));
     }
 }

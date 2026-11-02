@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { existsSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -28,7 +27,7 @@ type ParsedWorkflow = {
 };
 
 async function workflow(name: string): Promise<string> {
-  return readRetiredWorkflow(name);
+  return readFile(resolve(root, ".github/workflows", name), "utf8");
 }
 
 async function action(name: string): Promise<string> {
@@ -149,7 +148,7 @@ function stepIndex(parsed: ParsedWorkflow, jobName: string, name: string): numbe
 }
 
 describe("release image workflow contract", () => {
-  test("historical workflow fixture: both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
+  test("both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
     const [ci, candidate] = await Promise.all([
       workflow("ci.yml"),
       workflow("release-candidate.yml"),
@@ -224,7 +223,7 @@ describe("release image workflow contract", () => {
     expect(validConsumer(wrongControllerIdentity)).toBe(false);
   });
 
-  test("historical workflow fixture: runs controller and source phases with their owner-specific Bun pins", async () => {
+  test("runs controller and source phases with their owner-specific Bun pins", async () => {
     const [candidate, acceptance, release, embedded] = await Promise.all([
       workflow("release-candidate.yml"),
       workflow("release-acceptance.yml"),
@@ -565,8 +564,7 @@ describe("release image workflow contract", () => {
     expect(dockerfile).toContain("xdotool scrot ffmpeg");
     expect(dockerfile).toContain("COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc");
     expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
-    expect(dockerfile).toContain("COPY --from=browserd-build /out/opengeni-browserd");
-    expect(dockerfile).not.toContain("agent-browser");
+    expect(dockerfile).toContain("COPY --from=browserd-build /out/agent-browser");
     expect(dockerfile).toContain("ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome");
   });
 
@@ -622,7 +620,7 @@ describe("release image workflow contract", () => {
     expect(dockerfile).not.toContain('"start:artifact-outbox"');
   });
 
-  test("historical workflow fixture: coalesces mutable Version-PR work without cancelling immutable publication", async () => {
+  test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
     const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
     const versionProjection = release.slice(
       release.indexOf("\n  version:\n"),
@@ -633,9 +631,11 @@ describe("release image workflow contract", () => {
       "github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha)",
     );
     expect(release).toContain("cancel-in-progress: ${{ github.event_name == 'push' }}");
-    expect(ci).toContain("format('ci-{0}-{1}', github.run_id, github.run_attempt)");
     expect(ci).toContain(
-      "cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
+      "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
+    );
+    expect(ci).toContain(
+      "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
     );
     expect(ci).not.toContain(
       "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
@@ -652,7 +652,7 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("historical workflow fixture: downloads artifact ZIPs through portable gh api stdout redirection", async () => {
+  test("downloads artifact ZIPs through portable gh api stdout redirection", async () => {
     const workflows = await Promise.all(
       ["release-acceptance.yml", "release.yml", "release-embedded.yml"].map(workflow),
     );
@@ -668,7 +668,7 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("historical workflow fixture: candidate builds every image under a fresh attempt tag and freezes a full-SHA receipt", async () => {
+  test("candidate builds every image under a fresh attempt tag and freezes a full-SHA receipt", async () => {
     const [candidate, admissionWorkflow] = await Promise.all([
       workflow("release-candidate.yml"),
       workflow("release-source-admission.yml"),
@@ -676,7 +676,7 @@ describe("release image workflow contract", () => {
     const parsed = Bun.YAML.parse(candidate) as {
       on: {
         workflow_dispatch: {
-          inputs: Record<string, { required?: boolean; default?: unknown }>;
+          inputs: Record<string, { required?: boolean }>;
         };
       };
       jobs: Record<
@@ -696,9 +696,6 @@ describe("release image workflow contract", () => {
       >;
     };
     const admissionParsed = Bun.YAML.parse(admissionWorkflow) as {
-      on: {
-        workflow_call: { inputs: Record<string, { required?: boolean; default?: unknown }> };
-      };
       permissions: Record<string, string>;
       jobs: Record<
         string,
@@ -706,10 +703,8 @@ describe("release image workflow contract", () => {
           permissions?: Record<string, string>;
           steps?: Array<{
             name?: string;
-            if?: string;
             run?: string;
             uses?: string;
-            env?: Record<string, string>;
             with?: Record<string, unknown>;
           }>;
         }
@@ -787,32 +782,23 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(candidate).not.toContain('[ "$(git rev-parse origin/production)" = "$SOURCE_SHA" ]');
     expect(parsed.on.workflow_dispatch.inputs.controller_sha?.required).toBe(true);
-    expect(parsed.on.workflow_dispatch.inputs.provenance_sha).toMatchObject({
-      required: false,
-      default: "",
-    });
     expect(parsed.jobs.admission?.uses).toBe("./.github/workflows/release-source-admission.yml");
     expect(parsed.jobs.admission?.with).toEqual({
       source_sha: "${{ inputs.source_sha }}",
       controller_sha: "${{ inputs.controller_sha }}",
-      provenance_sha: "${{ inputs.provenance_sha }}",
     });
     expect(parsed.jobs["artifact-runtime"]?.needs).toBe("admission");
     expect(parsed.jobs.candidate?.needs).toEqual(["admission", "artifact-runtime"]);
     expect(parsed.jobs.admission?.permissions).toEqual({
-      actions: "read",
       checks: "read",
       contents: "read",
       "pull-requests": "read",
-      statuses: "read",
     });
     expect(admissionParsed.permissions).toEqual({ contents: "read" });
     expect(admissionParsed.jobs.verify?.permissions).toEqual({
-      actions: "read",
       checks: "read",
       contents: "read",
       "pull-requests": "read",
-      statuses: "read",
     });
     const controllerCheckout = admissionParsed.jobs.verify?.steps?.find(
       (step) => step.name === "Check out exact retained release controller",
@@ -823,35 +809,6 @@ describe("release image workflow contract", () => {
         (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
       )?.run,
     ).toBe("node scripts/check-release-pr-automation.mjs verify-approved-merge");
-    // Tested-descendant admission: explicit separate provenance, Git objects
-    // fetched only for that lane, and no release-source checkout.
-    expect(admissionParsed.on.workflow_call.inputs.provenance_sha).toMatchObject({
-      required: false,
-      default: "",
-    });
-    const verifyStep = admissionParsed.jobs.verify?.steps?.find(
-      (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
-    );
-    expect(verifyStep?.env).toMatchObject({
-      SOURCE_SHA: "${{ inputs.source_sha }}",
-      RELEASE_PROVENANCE_SHA: "${{ inputs.provenance_sha }}",
-      RELEASE_DESCENDANT_GIT_DIR: "${{ github.workspace }}",
-    });
-    const historyStep = admissionParsed.jobs.verify?.steps?.find(
-      (step) =>
-        step.name === "Restore protected main history as Git data for the descendant merge audit",
-    );
-    expect(historyStep?.if).toBe(
-      "${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
-    );
-    expect(historyStep?.run).toContain("--unshallow origin");
-    expect(historyStep?.run).toContain("'+refs/heads/main:refs/remotes/origin/main'");
-    expect(historyStep?.run).not.toMatch(/git (checkout|switch|restore|worktree|reset)/);
-    expect(admissionParsed.jobs.verify?.steps?.map((step) => step.name)).toEqual([
-      "Check out exact retained release controller",
-      "Restore protected main history as Git data for the descendant merge audit",
-      "Verify controller identity and exact reviewed merge provenance",
-    ]);
     expect(admissionWorkflow).not.toContain("ref: ${{ inputs.source_sha }}");
     expect(candidate).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
     expect(parsed.jobs.candidate?.permissions).toEqual({
@@ -864,7 +821,7 @@ describe("release image workflow contract", () => {
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
 
-  test("historical workflow fixture: candidate web deployment identity uses the validated source SHA, not its release version or controller", async () => {
+  test("candidate web deployment identity uses the validated source SHA, not its release version or controller", async () => {
     const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
     const steps = parsed.jobs.candidate?.steps ?? [];
     const sourceRevision = "${{ inputs.source_sha }}";
@@ -909,7 +866,7 @@ describe("release image workflow contract", () => {
     );
   });
 
-  test("historical workflow fixture: main CI publishes exact-SHA canary images without granting PR publication", async () => {
+  test("main CI publishes exact-SHA canary images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
     const images = ci.slice(ci.indexOf("\n  api-image:\n"), ci.indexOf("\n  automation-report:\n"));
     const parsed = Bun.YAML.parse(ci) as {
@@ -948,20 +905,18 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
-    for (const jobName of ["artifact-materializer-image", "sandbox-image", "desktop-image"]) {
+    for (const jobName of [
+      "api-image",
+      "artifact-materializer-image",
+      "sandbox-image",
+      "desktop-image",
+    ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual([
         "automation-admission",
         "plan",
         "artifact-runtime",
       ]);
     }
-    // The protected API image additionally waits for pre-image validation.
-    expect(parsed.jobs["api-image"]?.needs).toEqual([
-      "automation-admission",
-      "plan",
-      "artifact-runtime",
-      "release-image-validation",
-    ]);
     expect(parsed.jobs.images?.name).toBe("Workload image builds");
     expect(parsed.jobs.images?.needs).toEqual([
       "automation-admission",
@@ -975,17 +930,14 @@ describe("release image workflow contract", () => {
       "sandbox-image",
       "desktop-image",
     ]);
-    for (const jobName of ["artifact-materializer-image", "sandbox-image", "desktop-image"]) {
-      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["artifact-materializer-image"]?.if);
+    for (const jobName of [
+      "api-image",
+      "artifact-materializer-image",
+      "sandbox-image",
+      "desktop-image",
+    ]) {
+      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
-    // Same selection as its peers, plus: a main push requests public-release
-    // approval only after every non-image lane succeeded.
-    expect(parsed.jobs["api-image"]?.if).toBe(
-      parsed.jobs["artifact-materializer-image"]!.if!.replace(
-        / \}\}$/u,
-        " && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}",
-      ),
-    );
     for (const jobName of [
       "worker-image",
       "web-image",
@@ -1117,7 +1069,7 @@ describe("release image workflow contract", () => {
     expect(images).not.toMatch(/:latest(?:['"}\s]|$)/);
   });
 
-  test("historical workflow fixture: final release promotes accepted manifests and has no image build boundary", async () => {
+  test("final release promotes accepted manifests and has no image build boundary", async () => {
     const release = await workflow("release.yml");
     const publicationAdmission = await workflow("release-publication-admission.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
@@ -1207,7 +1159,7 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("historical workflow fixture: acceptance imports only an exact protected operator artifact", async () => {
+  test("acceptance imports only an exact protected operator artifact", async () => {
     const acceptance = await workflow("release-acceptance.yml");
     expect(acceptance).toContain(".github/workflows/release-acceptance.yml");
     expect(acceptance).toContain("name: production-acceptance");
@@ -1241,7 +1193,7 @@ describe("release image workflow contract", () => {
     );
   });
 
-  test("historical workflow fixture: embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
+  test("embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
     const release = await workflow("release-embedded.yml");
     const candidateAdmission = release.indexOf("Admit the candidate before source execution");
     const candidateReceipt = release.indexOf(
@@ -1369,7 +1321,7 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain('--tag "${name}:latest"');
   });
 
-  test("historical workflow fixture: package-only publication is exact-source, CI-gated, and evidence-bound", async () => {
+  test("package-only publication is exact-source, CI-gated, and evidence-bound", async () => {
     const publish = await workflow("publish-packages.yml");
     const sourceGate = publish.indexOf("Require successful protected source CI");
     const plan = publish.indexOf("Plan exact package publication");
@@ -1409,7 +1361,7 @@ describe("release image workflow contract", () => {
     expect(reconciliation).toBeGreaterThan(mutation);
   });
 
-  test("historical workflow fixture: public registry authentication is portable, short-lived, and version-bound", async () => {
+  test("public registry authentication is portable, short-lived, and version-bound", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");
     const embedded = await workflow("release-embedded.yml");
@@ -1445,7 +1397,7 @@ describe("release image workflow contract", () => {
     expect(login).not.toContain("admin-password");
   });
 
-  test("historical workflow fixture: agent publication pins a new release tag to the built source on manual dispatch", async () => {
+  test("agent publication pins a new release tag to the built source on manual dispatch", async () => {
     const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
     const publish = parsed.jobs.publish!.steps!.find((step) =>
       step.uses?.startsWith("softprops/action-gh-release@"),
@@ -1456,7 +1408,7 @@ describe("release image workflow contract", () => {
     expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
   });
 
-  test("historical workflow fixture: standalone macOS agent signing keeps the same stable identity as the app", async () => {
+  test("standalone macOS agent signing keeps the same stable identity as the app", async () => {
     const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
     const steps = parsed.jobs.build!.steps!;
     for (const name of [
@@ -1466,23 +1418,9 @@ describe("release image workflow contract", () => {
       const step = steps.find((candidate) => candidate.name === name);
       expect(step?.run).toContain("--binary-identifier ai.opengeni.agent");
     }
-    // The LaunchAgent names this bundle in AssociatedBundleIdentifiers so macOS
-    // attributes the background item to the app, not the signing developer.
-    const bundle = steps.find(
-      (candidate) =>
-        candidate.name === "macOS assemble + sign + notarize .app bundle (if creds present)",
-    );
-    expect(bundle?.run).toContain(
-      "<key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>",
-    );
-    const launchd = await readFile(
-      resolve(root, "agent/crates/opengeni-agent-platform/src/service.rs"),
-      "utf8",
-    );
-    expect(launchd).toContain('pub const MACOS_APP_BUNDLE_ID: &str = "ai.opengeni.agent";');
   });
 
-  test("historical workflow fixture: agent publication creates only immutable-compatible versioned releases", async () => {
+  test("agent publication creates only immutable-compatible versioned releases", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
     expect(agentRelease).toContain("https://app.opengeni.ai/install.sh");
@@ -1539,6 +1477,7 @@ describe("release image workflow contract", () => {
     for (const executable of [
       "Contents/MacOS/opengeni-agent",
       "Contents/Helpers/opengeni-browserd",
+      "Contents/Helpers/agent-browser",
       "Contents/Helpers/opengeni-computer-native",
     ]) {
       expect(agentRelease.slice(finalBundleValidation)).toContain(executable);
@@ -1558,12 +1497,13 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("releases/download/agent-latest");
   });
 
-  test("historical workflow fixture: linux agent release embeds a glibc browserd sidecar", async () => {
+  test("linux agent release embeds a glibc browserd sidecar", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
     expect(agentRelease).toContain("Build interaction helpers (Linux glibc)");
     expect(agentRelease).toContain("bun_target=bun-linux-x64;");
     expect(agentRelease).toContain("bun_target=bun-linux-arm64;");
+    expect(agentRelease).toContain("OPENGENI_BROWSERD_TARGET_MUSL=false");
     expect(agentRelease).toContain("linux browserd must use the glibc dynamic linker");
     expect(agentRelease).not.toContain("bun-linux-x64-musl");
     expect(agentRelease).not.toContain("bun-linux-arm64-musl");
@@ -1571,7 +1511,7 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("Build interaction helpers (Linux musl)");
   });
 
-  test("historical workflow fixture: release-state parsing accepts a valid absent release without weakening type checks", async () => {
+  test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");
     const embedded = await workflow("release-embedded.yml");
@@ -1613,7 +1553,7 @@ ${parser}`,
     expect(invalidResult.status).not.toBe(0);
   });
 
-  test("historical workflow fixture: ordinary CI builds the same seven physical image roles", async () => {
+  test("ordinary CI builds the same seven physical image roles", async () => {
     const ci = await workflow("ci.yml");
     const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
     const imagesJob = ci.slice(ci.indexOf("\n  api-image:\n"));

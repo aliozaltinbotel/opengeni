@@ -12,6 +12,7 @@ e2e(
     const sockets = await mkdtemp("/tmp/oge-s-");
     let supervisor = await BrowserSupervisor.open({
       rootDirectory: root,
+      socketRootDirectory: sockets,
       ephemeralContextPoolEnabled: true,
       maxSessions: 3,
     });
@@ -111,6 +112,7 @@ e2e(
       await supervisor.close();
       supervisor = await BrowserSupervisor.open({
         rootDirectory: root,
+        socketRootDirectory: sockets,
         ephemeralContextPoolEnabled: true,
       });
       await expect(supervisor.createSession(a)).rejects.toThrow("generation already issued");

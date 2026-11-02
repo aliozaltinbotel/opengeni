@@ -1,6 +1,6 @@
 // opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { createDb, provisionRoles, rotateMcpOAuthRefreshToken, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
@@ -54,16 +54,6 @@ beforeAll(async () => {
   await admin.begin(async (transaction) => {
     await transaction.unsafe(organizationConnectionsSource);
   });
-  // The current repository reads the additive consent/admission grant columns.
-  for (const name of [
-    "1021_mcp_oauth_workspace_consent_preset.sql",
-    "1022_mcp_oauth_consented_tool_set_versions.sql",
-    "1028_mcp_oauth_host_consent.sql",
-  ]) {
-    await admin.begin(async (tx) => {
-      await tx.unsafe(await Bun.file(new URL(`../drizzle/${name}`, import.meta.url)).text());
-    });
-  }
   await provisionRoles(blank.databaseUrl, {
     appRole: "opengeni_app",
     appPassword: blank.appPassword,

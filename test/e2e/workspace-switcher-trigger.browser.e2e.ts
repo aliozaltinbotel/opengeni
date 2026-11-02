@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
 
 describe("Workspace switcher trigger in Chromium", () => {
@@ -63,52 +62,19 @@ describe("Workspace switcher trigger in Chromium", () => {
     );
     expect(await trigger.getAttribute("aria-expanded")).toBe("true");
 
-    // Every workspace open to the person is listed, grouped by organization,
-    // the current organization first.
-    expect(
-      await page
-        .getByRole("group")
-        .evaluateAll((groups) => groups.map((group) => group.getAttribute("aria-label"))),
-    ).toEqual([
-      "Workspaces in CloudGeni Product Engineering and Reliability",
-      "Workspaces in CloudGeni Research",
-    ]);
-    const currentOrganization = page.getByRole("group", {
-      name: "Workspaces in CloudGeni Product Engineering and Reliability",
-      exact: true,
-    });
-    expect(await currentOrganization.getByRole("menuitem").count()).toBe(4);
     for (const label of [
       "Default workspace",
       "Product Testing",
-      // An administrator gets one quiet create row, in the current organization only.
+      // An administrator gets one quiet create row for the current organization.
       "New workspace",
-    ]) {
-      expect(
-        await currentOrganization.getByRole("menuitem", { name: label, exact: true }).isVisible(),
-      ).toBe(true);
-    }
-    const otherOrganization = page.getByRole("group", {
-      name: "Workspaces in CloudGeni Research",
-      exact: true,
-    });
-    expect(await otherOrganization.getByRole("menuitem").count()).toBe(1);
-    expect(
-      await otherOrganization
-        .getByRole("menuitem", { name: "Research Sandbox", exact: true })
-        .isVisible(),
-    ).toBe(true);
-    expect(await page.getByRole("menuitem", { name: "New workspace", exact: true }).count()).toBe(
-      1,
-    );
-    // Organizations head their groups instead of being rows; organization
-    // settings and new organizations live in the account menu and settings.
-    for (const label of [
-      "CloudGeni Product Engineering and Reliability",
+      // Another organization is one row that opens its workspace.
       "CloudGeni Research",
-      "Organization settings",
-      "New organization",
     ]) {
+      expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
+    }
+    // Only the current organization's workspaces are listed; organization
+    // settings and new organizations live in the account menu and settings.
+    for (const label of ["Research Sandbox", "Organization settings", "New organization"]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).count()).toBe(0);
     }
     const personalMenuItem = page.getByRole("menuitem", {

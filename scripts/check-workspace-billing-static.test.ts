@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   checkBillingPortalSurface,
   checkForbiddenProviderImports,
-  checkGithubWebhookAdvertising,
   checkMcpDefaults,
   checkUnscopedOperationalRoutes,
   type Finding,
@@ -13,42 +12,6 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
   await checkForbiddenProviderImports(file, source, findings);
   return findings;
 }
-
-describe("GitHub App webhook advertising guard", () => {
-  const manifestFile = "packages/github/src/index.ts";
-  const receiverPath = ["/v1", "webhooks", "github"].join("/");
-  const manifest = `manifest.hook_attributes = { url: \`\${base}${receiverPath}\`, active: true };`;
-  const baseVariable = `\${base}`;
-  const receiver = 'headers.get("x-hub-signature-256"); headers.get("x-github-delivery");';
-  const run = (file: string, text: string, receiverText: string): Finding[] => {
-    const findings: Finding[] = [];
-    checkGithubWebhookAdvertising(file, text, receiverText, findings);
-    return findings;
-  };
-
-  test("allows the manifest to advertise the signed, idempotent receiver", () => {
-    expect(run(manifestFile, manifest, receiver)).toEqual([]);
-    expect(run(manifestFile, manifest.replace(baseVariable, `\${webhookBase}`), receiver)).toEqual(
-      [],
-    );
-    expect(run(manifestFile, "const manifest = {};", "")).toEqual([]);
-  });
-
-  test("refuses a webhook URL other than the receiver, or a receiver that stops verifying", () => {
-    expect(
-      run(manifestFile, manifest.replace(receiverPath, "/v1/github/webhook"), receiver),
-    ).toHaveLength(1);
-    expect(
-      run(
-        manifestFile,
-        manifest.replace(baseVariable, `https://elsewhere.example${baseVariable}`),
-        receiver,
-      ),
-    ).toHaveLength(1);
-    expect(run(manifestFile, manifest, 'headers.get("x-github-delivery");')).toHaveLength(1);
-    expect(run(manifestFile, manifest, 'headers.get("x-hub-signature-256");')).toHaveLength(1);
-  });
-});
 
 describe("workspace provider import guard", () => {
   test.each([
@@ -79,7 +42,7 @@ describe("workspace provider import guard", () => {
     expect(allowed).toEqual([]);
 
     checkBillingPortalSurface(
-      "packages/contracts/src/app-action-catalog.gen.ts",
+      "apps/api/src/mcp/action-catalog.gen.ts",
       `const action = { path: "${portalPath}" };`,
       allowed,
     );
@@ -124,7 +87,7 @@ describe("workspace provider import guard", () => {
     ]);
   });
 
-  test.each(["apps/api/src/routes/example.ts", "packages/contracts/src/app-action-catalog.gen.ts"])(
+  test.each(["apps/api/src/routes/example.ts", "apps/api/src/mcp/action-catalog.gen.ts"])(
     "rejects Stripe module edges outside billing provider code: %s",
     async (file) => {
       const findings = await findingsFor(file, 'import Stripe from "stripe";');

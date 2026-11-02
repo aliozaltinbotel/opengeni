@@ -82,7 +82,7 @@ export function signupReturnPath(path: string, marker?: AuthReturnEvent): string
     }
   }
   if (marker) url.searchParams.set(AUTH_RETURN_PARAMETER, marker);
-  return `${url.pathname}${url.search}${url.hash}`;
+  return `${url.pathname}${url.search}`;
 }
 
 /** Consume the return marker observed at boot, at most once. */

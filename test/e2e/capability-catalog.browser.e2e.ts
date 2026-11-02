@@ -2,8 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess } from "@opengeni/testing/process";
+import { freePort, startProcess } from "@opengeni/testing";
 
 test("connections, skills, and plugins share row geometry and a single dialog action", async () => {
   const port = await freePort();

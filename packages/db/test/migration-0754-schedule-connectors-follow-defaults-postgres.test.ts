@@ -13,7 +13,7 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
 import { migrate } from "../src/migrate";

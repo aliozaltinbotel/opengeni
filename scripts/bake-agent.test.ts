@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import {
   chmod,
@@ -17,7 +16,12 @@ import { parse } from "yaml";
 const root = resolve(import.meta.dir, "..");
 const sourceId = "1111111111111111111111111111111111111111";
 const targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"];
-const components = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"];
+const components = [
+  "opengeni-agent",
+  "opengeni-browserd",
+  "opengeni-agent-browser",
+  "opengeni-computer-native",
+];
 const files = targets.flatMap((target) =>
   components.flatMap((component) =>
     ["", ".sha256", ".minisig"].map((suffix) => component + "-" + target + suffix),
@@ -41,7 +45,7 @@ async function fixture() {
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
-const embedded = Object.fromEntries(["OPENGENI_EMBEDDED_BROWSERD", "OPENGENI_EMBEDDED_COMPUTER_NATIVE"].map(name => [name, process.env[name]]));
+const embedded = Object.fromEntries(["OPENGENI_EMBEDDED_BROWSERD", "OPENGENI_EMBEDDED_AGENT_BROWSER", "OPENGENI_EMBEDDED_COMPUTER_NATIVE"].map(name => [name, process.env[name]]));
 await appendFile(process.env.BAKE_FIXTURE_LOG, JSON.stringify({tool, args, buildId:process.env.OPENGENI_RUNTIME_BUILD_ID, embedded}) + "\n");
 async function output(path, bytes) {
   await mkdir(dirname(path), {recursive:true});
@@ -61,6 +65,8 @@ if (tool === "git") {
 } else if (tool === "bun") {
   if (args[0] === "build") {
     if (process.env.BAKE_FIXTURE_SKIP !== "browserd") await output(args[args.indexOf("--outfile") + 1], "browserd " + process.env.OPENGENI_RUNTIME_BUILD_ID);
+  } else if (args[0] === "packages/browserd/scripts/stage-agent-browser.ts") {
+    await output(join(process.cwd(), "packages/browserd/dist", process.env.OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT), "pinned-driver");
   } else if (args[0] === "docker/distrust-embedded-roots.ts") {
     // The fixture binaries carry no root list; the call itself is asserted.
   } else throw Error("unexpected Bun command");
@@ -138,6 +144,7 @@ describe("exact-source canary interaction bundle", () => {
         const agent = JSON.parse(await readFile(join(baked, "opengeni-agent-" + target), "utf8"));
         expect(agent.buildId).toBe(sourceId);
         expect(agent.bundle.OPENGENI_EMBEDDED_BROWSERD).toBe("browserd " + sourceId);
+        expect(agent.bundle.OPENGENI_EMBEDDED_AGENT_BROWSER).toBe("pinned-driver");
         expect(JSON.parse(agent.bundle.OPENGENI_EMBEDDED_COMPUTER_NATIVE).buildId).toBe(sourceId);
         for (const component of components) {
           const asset = component + "-" + target;
@@ -225,8 +232,8 @@ describe("exact-source canary interaction bundle", () => {
     }
   });
 
-  test("historical workflow fixture: the image completeness gate rejects every missing cohort asset or sidecar", async () => {
-    const workflow = parse(readRetiredWorkflow("ci.yml"));
+  test("the image completeness gate rejects every missing cohort asset or sidecar", async () => {
+    const workflow = parse(await readFile(join(root, ".github/workflows/ci.yml"), "utf8"));
     const step = workflow.jobs["api-image"].steps.find(
       (entry: { name?: string }) => entry.name === "Require complete exact-SHA canary agent bake",
     );

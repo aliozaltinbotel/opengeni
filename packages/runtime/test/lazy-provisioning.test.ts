@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
-import { testSettings } from "@opengeni/testing/settings";
+import { ScriptedModel, testSettings } from "@opengeni/testing";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { dir, Manifest } from "@openai/agents/sandbox";
@@ -25,34 +24,6 @@ async function manifestEnv(manifest: {
 }
 
 describe("lazy provisioning synthetic manifest", () => {
-  test.each([false, true])(
-    "owned setup observes client and seed for lazy=%s",
-    async (recordLazyManifest) => {
-      const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
-      const environment = { HOME: "/workspace" };
-      const agent = buildOpenGeniAgent(settings, [], {
-        model: new ScriptedModel([]),
-        sandboxEnvironment: environment,
-        codemodeTokenSeed: "fixture-token",
-        codemodeTokenSessionId: "fixture-session",
-      });
-      const backend = {
-        state: { manifest: buildManifest(settings, [], environment) },
-        exec: async () => ({ exitCode: 0, output: "" }),
-      };
-      const phases: string[] = [];
-      await runOwnedSandboxSetup(agent, backend as never, backend as never, {
-        settings,
-        environment,
-        recordLazyManifest,
-        measureSetup: async (phase, work) => {
-          phases.push(phase);
-          await work();
-        },
-      });
-      expect(phases.sort()).toEqual(["client_readiness", "credential_seed"]);
-    },
-  );
   test("lazy owned setup reconciles verified repository placeholders only when opted in", async () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = { HOME: "/workspace" };

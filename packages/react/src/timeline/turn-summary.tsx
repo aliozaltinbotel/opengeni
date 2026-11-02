@@ -14,6 +14,7 @@ import { Collapsible } from "radix-ui";
 import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
+import { presentTurnFailureText } from "./compaction-copy";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { useEntranceAnimation } from "./entrance";
@@ -30,7 +31,6 @@ import {
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { ShimmerText } from "./shimmer-text";
 
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, formatElapsed };
 export type {
@@ -82,8 +82,6 @@ export type TurnSummaryProps = {
   outcome?: TurnOutcome | undefined;
   /** A short failure reason shown inline on a failed chip (never hidden). */
   failureText?: string | undefined;
-  /** The recorded diagnostic text `failureText` replaced; the chip's hover title. */
-  failureDetail?: string | undefined;
   /** Elapsed turn duration; shown as a trailing facet when at least 1s. */
   durationMs?: number | undefined;
   /** Start expanded. */
@@ -153,7 +151,6 @@ export function TurnSummary({
   items,
   outcome,
   failureText,
-  failureDetail,
   durationMs,
   defaultOpen,
   liveHeader,
@@ -374,9 +371,8 @@ export function TurnSummary({
     () => selectTurnSummaryFacets(facetDefinitions, context, statusKind),
     [context, facetDefinitions, statusKind],
   );
-  // The chip names the failure (the projection already replaced diagnostic
-  // text with its outcome); recorded technical text stays a hover title.
-  const failure = outcome === "failed" ? failureText?.trim() || null : null;
+  // The chip names the failure; recorded technical text stays a hover title.
+  const failure = outcome === "failed" ? presentTurnFailureText(t, failureText) : null;
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // and quieter until there is an outcome or a settle beat — but still
@@ -493,9 +489,9 @@ export function TurnSummary({
                 </FacetRenderBoundary>
               ))}
         {failure ? (
-          <span className="text-og-status-failed" title={failureDetail}>
+          <span className="text-og-status-failed" title={failure.detail}>
             {" "}
-            · {failure}
+            · {failure.summary}
           </span>
         ) : null}
         {outcome === "cancelled" ? (
@@ -615,7 +611,7 @@ function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): Reac
       : t("timeline.turnSummary.waiting"));
   return (
     <span data-og-exchange-status={status.kind}>
-      {status.kind === "working" ? <ShimmerText>{label}</ShimmerText> : <span>{label}</span>}
+      <span className={status.kind === "working" ? "og-shimmer-text" : undefined}>{label}</span>
       {status.since ? <LiveElapsed since={status.since} /> : null}
     </span>
   );

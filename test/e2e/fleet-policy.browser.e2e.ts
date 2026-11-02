@@ -2,8 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { createFleetPolicyCanonicalProof } from "../../packages/react/demo/fleet-policy-canonical-proof";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;

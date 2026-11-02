@@ -1,7 +1,6 @@
 import { CheckIcon } from "lucide-react";
 import {
   createContext,
-  forwardRef,
   useContext,
   useEffect,
   useMemo,
@@ -16,7 +15,6 @@ import {
   MENU_META_CLASS,
 } from "../../../ui/menu-styles";
 import { cn } from "../../lib/utils";
-import { useMergedRefs } from "../../../lib/refs";
 
 /** Dropdowns rove through menu items; dialogs use ordinary Tab stops. */
 export type MenuBodyPresentation = "menu" | "dialog";
@@ -54,20 +52,16 @@ export function RadioGroup(props: {
   );
 }
 
-export const RadioRow = /* @__PURE__ */ forwardRef<
-  HTMLElement,
-  {
-    value: string;
-    disabled?: boolean | undefined;
-    icon?: ReactNode | undefined;
-    label: string;
-    meta?: string | undefined;
-    className?: string | undefined;
-    onSelect: () => void;
-  }
->(function RadioRow(props, forwardedRef) {
-  // The row is a menu item or a button; either way the caller gets the element.
-  const ref = useMergedRefs(forwardedRef);
+export function RadioRow(props: {
+  value: string;
+  disabled?: boolean | undefined;
+  icon?: ReactNode | undefined;
+  label: string;
+  meta?: string | undefined;
+  className?: string | undefined;
+  ref?: ((node: HTMLElement | null) => void) | undefined;
+  onSelect: () => void;
+}) {
   const group = useContext(RadioGroupContext);
   const content = (
     <>
@@ -79,7 +73,7 @@ export const RadioRow = /* @__PURE__ */ forwardRef<
   if (group.presentation === "menu") {
     return (
       <DropdownMenuRadioItem
-        ref={ref}
+        ref={props.ref}
         value={props.value}
         disabled={props.disabled}
         onSelect={(event) => {
@@ -96,7 +90,7 @@ export const RadioRow = /* @__PURE__ */ forwardRef<
   const checked = group.value === props.value;
   return (
     <button
-      ref={ref}
+      ref={props.ref}
       type="button"
       role="radio"
       aria-checked={checked}
@@ -110,7 +104,7 @@ export const RadioRow = /* @__PURE__ */ forwardRef<
       </span>
     </button>
   );
-});
+}
 
 /** A drill-in replaces its opener; start roving focus on the checked enabled row. */
 export function useFocusCheckedRow(

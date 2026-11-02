@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
   createDb,

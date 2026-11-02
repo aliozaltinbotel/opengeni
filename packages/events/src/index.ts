@@ -1,15 +1,5 @@
 import {
-  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
-  type SessionEventDurableFanoutCapability,
-} from "./durable-fanout";
-export {
-  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
-  requireSessionEventDurableFanoutCapability,
-  type SessionEventDurableFanoutCapability,
-} from "./durable-fanout";
-import {
   boundSessionEvent,
-  projectSessionEventForPublic,
   boundWorkspaceControlEvent,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -71,7 +61,6 @@ export {
   coalesceSessionEventDeltas,
   coalesceSessionEventDeltasWithCoverage,
   reasoningDeltaSeparator,
-  canMergeReasoningDelta,
   type CoalescedSessionEventPage,
 } from "./coalesce";
 
@@ -575,6 +564,41 @@ export type RequestHandler = (
   request: Uint8Array,
   subject: string,
 ) => Promise<Uint8Array> | Uint8Array;
+
+/**
+ * Versioned recovery contract for already-durable session-event fanout.
+ *
+ * A publisher acknowledgement alone cannot prove that every API subscriber was
+ * connected for the live message. Supported broker-backed buses must therefore
+ * notify consumers after transport subscriptions have been restored so an
+ * already-open SSE stream can run one bounded Postgres catch-up. A bus that can
+ * never disconnect may implement this as a listener registry that never fires.
+ */
+export const SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION = 1 as const;
+
+export type SessionEventDurableFanoutCapability = {
+  version: typeof SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION;
+  subscribeRecovery: (onRecovery: (generation: number) => void) => () => void;
+};
+
+export function requireSessionEventDurableFanoutCapability(
+  bus: unknown,
+): SessionEventDurableFanoutCapability {
+  const capability = (bus as { sessionEventDurableFanout?: unknown } | null)
+    ?.sessionEventDurableFanout as
+    | { version?: unknown; subscribeRecovery?: unknown }
+    | null
+    | undefined;
+  if (
+    capability?.version !== SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION ||
+    typeof capability.subscribeRecovery !== "function"
+  ) {
+    throw new Error(
+      "EventBus must provide sessionEventDurableFanout v1 so accepted durable publications reconcile after subscriber reconnect",
+    );
+  }
+  return capability as SessionEventDurableFanoutCapability;
+}
 
 export type EventBus = {
   /**
@@ -1388,24 +1412,14 @@ export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): st
   return formatted;
 }
 
-/**
- * Cursor-only control frame. A reader that may not see some session-scope
- * control events (another person's private chat) still needs to advance past
- * them, or a finite batch made only of hidden events would be re-read forever.
- * It carries no session, action or actor.
- */
-export function formatWorkspaceControlCursorSse(workspaceId: string, sequence: number): string {
-  return formatSse({ type: "workspace.control.cursor", workspaceId, sequence });
-}
-
-/** Serialize public durable content; the SSE queue backpressures whole frames. */
+/** Serialize exact durable content; the SSE queue backpressures whole frames. */
 export function formatSessionEventSse(
   event: SessionEvent,
   coveredThrough = event.sequence,
 ): string {
   // Session content is not a diagnostic preview. Page replay and coalescing
-  // bound accumulation. Only host-context fields are omitted at this public boundary.
-  return formatSse(projectSessionEventForPublic(event), coveredThrough);
+  // bound accumulation without rewriting an individual durable event.
+  return formatSse(event, coveredThrough);
 }
 
 /**
@@ -1472,11 +1486,10 @@ export function boundSessionEventHttpPage(
   const maxBytes = options.maxBytes ?? SESSION_EVENT_HTTP_PAGE_MAX_BYTES;
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
-  const publicEvents = events.map(projectSessionEventForPublic);
   const projected =
     options.eventProjection !== "bounded"
-      ? publicEvents
-      : publicEvents.map((event) => boundSessionEventForSurface(event, "http_projection"));
+      ? [...events]
+      : events.map((event) => boundSessionEventForSurface(event, "http_projection"));
   const candidates = options.direction === "after" ? projected : [...projected].reverse();
   for (const event of candidates) {
     const eventBytes = sessionEventJsonBytes(event);

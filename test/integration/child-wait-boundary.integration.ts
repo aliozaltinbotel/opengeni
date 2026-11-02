@@ -2,14 +2,15 @@ import { test, expect } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startTestServices, freePort } from "@opengeni/testing/compose";
 import {
+  startTestServices,
   startProcess,
   startE2eWorkerTopology,
+  freePort,
   waitFor,
   type StartedProcess,
   type StartedE2eWorkerTopology,
-} from "@opengeni/testing/process";
+} from "@opengeni/testing";
 type SessionProjection = { id: string; parentSessionId: string | null };
 type EventProjection = {
   type: string;

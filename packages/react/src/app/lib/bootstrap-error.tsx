@@ -5,11 +5,6 @@ export type BootstrapErrorPresentation = Readonly<{
   description: string;
   /** Optional host recovery; never authorizes a request or changes retry policy. */
   recovery?: "authentication";
-  /**
-   * Startup is still retrying by itself (an update or a dropped connection):
-   * show a calm waiting state with retry as a secondary action.
-   */
-  recovering?: true | undefined;
 }>;
 
 type ErrorMetadata = {
@@ -19,35 +14,35 @@ type ErrorMetadata = {
 };
 
 const maintenancePresentation: BootstrapErrorPresentation = {
-  title: "Under maintenance",
+  title: "Opengeni is under maintenance",
   description: "We'll be back shortly. Try again in a moment.",
 };
 
 const temporaryUnavailablePresentation: BootstrapErrorPresentation = {
-  title: "Temporarily unavailable",
+  title: "Opengeni is temporarily unavailable",
   description: "The service could not finish loading. Try again shortly.",
 };
 
 const networkUnavailablePresentation: BootstrapErrorPresentation = {
-  title: "Can't connect",
-  description: "The app could not reach its server. Check your connection and try again.",
+  title: "Opengeni is unreachable",
+  description: "The app could not reach the Opengeni API. Check your connection and try again.",
 };
 
 const invalidConfigurationResponsePresentation: BootstrapErrorPresentation = {
-  title: "Couldn't start",
+  title: "Opengeni couldn't start",
   description:
     "The API returned an invalid configuration response. Check the deployment or proxy configuration, then try again.",
 };
 
 const clientConfigurationPresentation: BootstrapErrorPresentation = {
-  title: "Couldn't start",
+  title: "Opengeni couldn't start",
   description:
     "The client configuration could not be loaded. Check the deployment settings and server logs, then try again.",
 };
 
 const workspaceAccessPresentation: BootstrapErrorPresentation = {
   title: "Workspace access unavailable",
-  description: "Your workspace access couldn't be loaded. Try again.",
+  description: "Opengeni couldn't load your workspace access. Try again.",
 };
 
 function normalizedErrorCode(value: unknown): string | null {
@@ -98,16 +93,10 @@ function errorMetadata(error: unknown): ErrorMetadata {
   };
 }
 
-/**
- * Only transient bootstrap reads qualify; presentation copy is not retry
- * authority. The maintenance marker is transient: the deployment is updating
- * and answers again on its own.
- */
+/** Only transient bootstrap reads qualify; presentation copy is not retry authority. */
 export function isTransientBootstrapError(error: unknown, context: BootstrapErrorContext): boolean {
   const metadata = errorMetadata(error);
-  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) {
-    return metadata.status === null || metadata.status >= 500 || metadata.status === 0;
-  }
+  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) return false;
   if (metadata.status !== null) {
     return (
       [0, 502, 503, 504].includes(metadata.status) ||
@@ -121,46 +110,6 @@ export function isTransientBootstrapError(error: unknown, context: BootstrapErro
       error.message,
     )
   );
-}
-
-/** Startup is waiting for the API and will continue by itself. */
-export type BootstrapWaitingPresentation = BootstrapErrorPresentation &
-  Readonly<{ recovering: true }>;
-
-/**
- * How long an ordinary transient failure reads as "reconnecting" before
- * startup names the problem (it still reconnects by itself after that).
- */
-export const BOOTSTRAP_CALM_WINDOW_MS = 120_000;
-
-const updatingPresentation: BootstrapWaitingPresentation = {
-  title: "Updating",
-  description: "This page continues by itself when the update finishes.",
-  recovering: true,
-};
-
-const reconnectingPresentation: BootstrapWaitingPresentation = {
-  title: "Reconnecting",
-  description: "This page continues by itself when the connection is back.",
-  recovering: true,
-};
-
-/**
- * The calm state shown while startup keeps retrying a transient failure: an
- * update (the maintenance marker) for as long as it lasts, any other transient
- * failure for the calm window, then the named problem, still retrying.
- */
-export function bootstrapWaitingPresentation(
-  error: unknown,
-  context: BootstrapErrorContext,
-  elapsedMs: number,
-): BootstrapWaitingPresentation {
-  const metadata = errorMetadata(error);
-  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) {
-    return updatingPresentation;
-  }
-  if (elapsedMs < BOOTSTRAP_CALM_WINDOW_MS) return reconnectingPresentation;
-  return { ...bootstrapErrorPresentation(error, context), recovering: true };
 }
 
 /**

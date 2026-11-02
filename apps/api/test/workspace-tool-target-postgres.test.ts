@@ -4,9 +4,12 @@ import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { startTestMcpServer } from "@opengeni/testing/mcp";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  startTestMcpServer,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   bootstrapWorkspace,
   createDb,

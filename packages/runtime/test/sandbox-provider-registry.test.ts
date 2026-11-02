@@ -7,7 +7,7 @@ import {
   SandboxBackend,
   type SandboxBackend as SandboxBackendType,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   PROVIDER_REGISTRY,
   SandboxConfigError,

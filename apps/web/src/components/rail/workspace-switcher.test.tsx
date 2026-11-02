@@ -88,19 +88,8 @@ mock.module("@opengeni/react/app/app-context", () => ({
   }),
 }));
 
-// A host extension's workspace filter, changed by a test; it keeps every workspace by default.
-let keepWorkspace: (candidate: { id: string; accountId: string }) => boolean = () => true;
-mock.module("@opengeni/web-host-extension", () => ({
-  default: {
-    id: "fixture",
-    workspaceFilter: (candidate: { id: string; accountId: string }) => keepWorkspace(candidate),
-  },
-}));
-
 GlobalRegistrator.register({ url: "http://homeserver/workspaces/ws-design/sessions" });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-// The console's startup module installs the (mocked) extension for every reader.
-await import("@/host-extension/startup");
 const { WorkspaceSwitcherMenu } = await import("./workspace-switcher");
 
 afterAll(() => {
@@ -110,7 +99,6 @@ afterAll(() => {
 beforeEach(() => {
   authMode = "managedSession";
   singleOrganization = false;
-  keepWorkspace = () => true;
   createRequests.length = 0;
   localStorage.clear();
   document.body.replaceChildren();
@@ -186,34 +174,37 @@ describe("workspace picker", () => {
     }
   });
 
-  test("lists every workspace open to the person, grouped by organization", async () => {
+  test("lists only the current organization's workspaces, then the other organizations", async () => {
     const picker = await renderPicker("ws-design");
     try {
-      const groups = Array.from(
-        document.body.querySelectorAll<HTMLElement>('[role="group"][aria-label^="Workspaces in"]'),
+      const group = document.body.querySelector(
+        '[role="group"][aria-label="Workspaces in Acme Robotics"]',
       );
-      // The default organization first, then by name, as the workspace keys walk them;
-      // an organization with nothing open to this person is left out.
-      expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
-        "Workspaces in Acme Robotics",
-        "Workspaces in Beta Partners",
-        "Workspaces in Northwind Labs",
-      ]);
-      const rows = (group: HTMLElement) =>
-        Array.from(group.querySelectorAll('[role="menuitem"]')).map((row) => row.textContent ?? "");
-      const acmeRows = rows(groups[0]!);
-      expect(acmeRows).toHaveLength(4);
-      expect(acmeRows[0]).toContain("Design preview");
-      expect(acmeRows[1]).toContain("Personal workspace");
-      expect(acmeRows[2]).toContain("Production");
-      // An owner gets one quiet quick path to the organization's create page, here only.
-      expect(acmeRows[3]).toBe("New workspace");
-      expect(rows(groups[1]!)).toEqual(["LLaunch room"]); // The tile shows its initial.
-      expect(rows(groups[2]!)[0]).toContain("Alpha personal");
-      expect(rows(groups[2]!)[1]).toContain("General");
+      expect(group?.textContent).toContain("Acme Robotics");
+      expect(group?.textContent).toContain("Organization");
+      const workspaceRows = Array.from(group!.querySelectorAll('[role="menuitem"]')).map(
+        (row) => row.textContent ?? "",
+      );
+      expect(workspaceRows).toHaveLength(4);
+      expect(workspaceRows[0]).toContain("Design preview");
+      expect(workspaceRows[1]).toContain("Personal workspace");
+      expect(workspaceRows[2]).toContain("Production");
+      // An owner gets one quiet quick path to the organization's create page.
+      expect(workspaceRows[3]).toBe("New workspace");
       const create = item("New workspace");
       expect(create?.getAttribute("href")).toContain("/organization");
       expect(create?.getAttribute("href")).toContain("view=new-workspace");
+      expect(menuText()).not.toContain("Launch room");
+
+      const switchGroup = document.body.querySelector(
+        '[role="group"][aria-label="Switch organization"]',
+      );
+      expect(
+        Array.from(switchGroup!.querySelectorAll('[role="menuitem"]')).map(
+          (row) => row.textContent,
+        ),
+      ).toEqual(["Beta Partners", "Northwind Labs"]);
+      // An organization with nothing open to this person can't be switched to.
       expect(menuText()).not.toContain("Empty Org");
       // Administering lives elsewhere.
       expect(item("Organization settings")).toBeUndefined();
@@ -223,28 +214,50 @@ describe("workspace picker", () => {
     }
   });
 
-  test("a person in one organization sees its name once, above its workspaces", async () => {
+  test("a person in one organization sees no organization switcher", async () => {
     singleOrganization = true;
     const picker = await renderPicker("ws-design");
     try {
       expect(menuText()).toContain("Design preview");
       expect(
-        document.body.querySelectorAll('[role="group"][aria-label^="Workspaces in"]'),
-      ).toHaveLength(1);
-      expect(menuText()).toContain("Organization");
+        document.body.querySelector('[role="group"][aria-label="Switch organization"]'),
+      ).toBeNull();
+      expect(menuText()).not.toContain("Switch organization");
       expect(item("New organization")).toBeUndefined();
     } finally {
       await picker.unmount();
     }
   });
 
-  test("a workspace in another organization opens straight from the list", async () => {
+  test("switching organization opens that organization's shared workspace", async () => {
     const picker = await renderPicker("ws-design");
     try {
-      await act(async () => item("Launch room")!.click());
-      expect(picker.selected).toEqual(["ws-launch"]);
+      await act(async () => item("Northwind Labs")!.click());
+      expect(picker.selected).toEqual(["ws-northwind"]);
     } finally {
       await picker.unmount();
+    }
+  });
+
+  test("switching organization returns to the workspace last used there", async () => {
+    localStorage.setItem(
+      "og.workspace.navigation.organizations:v1:user%3Aalex",
+      JSON.stringify({ [northwind]: "ws-northwind-personal", [beta]: "ws-gone" }),
+    );
+    const picker = await renderPicker("ws-design");
+    try {
+      await act(async () => item("Northwind Labs")!.click());
+      expect(picker.selected).toEqual(["ws-northwind-personal"]);
+    } finally {
+      await picker.unmount();
+    }
+    // A remembered workspace that is no longer open falls back to the first shared one.
+    const again = await renderPicker("ws-design");
+    try {
+      await act(async () => item("Beta Partners")!.click());
+      expect(again.selected).toEqual(["ws-launch"]);
+    } finally {
+      await again.unmount();
     }
   });
 
@@ -274,27 +287,6 @@ describe("workspace picker", () => {
       expect(picker.selected).toEqual(["ws-created"]);
     } finally {
       await picker.unmount();
-    }
-  });
-
-  test("leaves out the workspaces a host extension filters out, except the one the person is in", async () => {
-    keepWorkspace = (candidate) => candidate.accountId === acme && candidate.id !== "ws-production";
-    const picker = await renderPicker("ws-design");
-    try {
-      const names = items().map((row) => row.textContent ?? "");
-      expect(names.some((name) => name.includes("Design preview"))).toBe(true);
-      expect(names.some((name) => name.includes("Personal workspace"))).toBe(true);
-      expect(menuText()).not.toContain("Production");
-      expect(menuText()).not.toContain("Launch room");
-      expect(menuText()).not.toContain("Northwind Labs");
-    } finally {
-      await picker.unmount();
-    }
-    const inFiltered = await renderPicker("ws-production");
-    try {
-      expect(item("Production")).toBeDefined();
-    } finally {
-      await inFiltered.unmount();
     }
   });
 });

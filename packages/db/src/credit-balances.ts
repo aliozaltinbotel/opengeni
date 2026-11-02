@@ -16,7 +16,6 @@ export async function getBillingBalance(
   accountId: string,
   policyRevision?: number,
   settlementAt?: string,
-  includeHeldForSettlement = false,
 ): Promise<CreditBalanceSnapshot> {
   return await withAccountRls(db, accountId, async (tx) => {
     const [row] = await rawRows<{
@@ -24,8 +23,6 @@ export async function getBillingBalance(
       grants: PromotionalCreditBalance[];
       revision: number;
       plan: BillingPlanBalance | null;
-      decision: NonNullable<BillingBalance["promotionDecision"]>;
-      enforcement: boolean;
     }>(
       tx,
       sql`
@@ -35,8 +32,6 @@ export async function getBillingBalance(
         order by revision desc limit 1
       )
       select
-        coalesce((select decision from promotion_decisions where account_id=${accountId}::uuid), 'eligible') as decision,
-        (select enabled from promotion_enforcement where singleton) as enforcement,
         coalesce((select revision from current_policy), 0)::int as revision,
         read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
         (select coalesce(sum(amount_micros), 0)::text
@@ -52,10 +47,7 @@ export async function getBillingBalance(
             ) from current_policy), to_jsonb(g.eligible_model_ids)),
           'remainingMicros', g.amount_micros - coalesce(used.amount, 0),
           'coversVoice', g.source_type = 'verified_signup_trial',
-          'planCredit', g.type = 'plan_credit_grant',
-          'held', coalesce((g.source_type = 'verified_signup_trial' OR (g.type='plan_credit_grant' AND period.plan_key='free'))
-            AND EXISTS (SELECT 1 FROM promotion_enforcement WHERE enabled)
-            AND EXISTS (SELECT 1 FROM promotion_decisions WHERE account_id=${accountId}::uuid AND decision <> 'eligible'), false)
+          'planCredit', g.type = 'plan_credit_grant'
         ) order by g.created_at, g.id)
           from ${schema.creditLedgerEntries} g
           left join plan_credit_periods period on period.grant_entry_id = g.id
@@ -74,35 +66,13 @@ export async function getBillingBalance(
     // Expiry cannot depend on a maintenance worker being awake. Keep this read
     // lock-free; writers settle the same expiry under the account lock first.
     const balanceMicros = Number(row?.balance ?? 0) - (row?.plan?.creditPendingExpiryMicros ?? 0);
-    const promotionalCredits = (row?.grants ?? []).map((grant) => ({
-      ...grant,
-      held: includeHeldForSettlement ? false : grant.held,
-    }));
-    const generalBalanceMicros =
-      balanceMicros - promotionalCredits.reduce((sum, grant) => sum + grant.remainingMicros, 0);
-    // Legacy Free periods were unrestricted, but have their own immutable
-    // period usage accounting. Never mistake paid-plan periods for subsidies.
-    const heldGeneralCreditMicros =
-      !includeHeldForSettlement &&
-      row?.enforcement &&
-      row.decision !== "eligible" &&
-      row.plan?.key === "free" &&
-      !row.plan.creditScoped
-        ? Math.min(Math.max(0, generalBalanceMicros), row.plan.creditRemainingMicros)
-        : 0;
+    const promotionalCredits = row?.grants ?? [];
     return {
       accountId,
       creditPolicyRevision: row?.revision ?? 0,
       balanceMicros,
-      generalBalanceMicros,
-      heldGeneralCreditMicros,
-      heldCreditMicros:
-        heldGeneralCreditMicros +
-        promotionalCredits.reduce(
-          (sum, grant) => sum + (grant.held ? grant.remainingMicros : 0),
-          0,
-        ),
-      promotionDecision: row?.enforcement ? row.decision : "eligible",
+      generalBalanceMicros:
+        balanceMicros - promotionalCredits.reduce((sum, grant) => sum + grant.remainingMicros, 0),
       promotionalCredits,
       plan: row?.plan ?? null,
       currency: "usd",
@@ -123,18 +93,14 @@ export type CreditUsage = string | { readonly kind: "voice" } | undefined;
 export const VOICE_CREDIT_USAGE: { readonly kind: "voice" } = Object.freeze({ kind: "voice" });
 
 function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boolean {
-  if (grant.held || !usage) return false;
+  if (!usage) return false;
   if (typeof usage === "string") return grant.eligibleModelIds.includes(usage);
   return grant.coversVoice === true;
 }
 
 export function spendableCreditMicros(balance: BillingBalance, usage?: CreditUsage): number {
   return (
-    Math.max(
-      0,
-      (balance.generalBalanceMicros ?? balance.balanceMicros) -
-        (balance.heldGeneralCreditMicros ?? 0),
-    ) +
+    Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros) +
     (balance.promotionalCredits ?? []).reduce(
       (sum, grant) => sum + (grantCovers(grant, usage) ? grant.remainingMicros : 0),
       0,
@@ -149,11 +115,6 @@ export async function getSpendableCreditBalance(
   policyRevision?: number,
   settlementAt?: string,
 ): Promise<CreditBalanceSnapshot> {
-  // This existing definer also refreshes structured abuse evidence. Run it
-  // only for admission, never for settlement of an already-dispatched call.
-  await withAccountRls(db, accountId, async (tx) => {
-    await tx.execute(sql`select free_plan_credit_eligible(${accountId}::uuid)`);
-  });
   const balance = await getBillingBalance(db, accountId, policyRevision, settlementAt);
   return { ...balance, balanceMicros: spendableCreditMicros(balance, usage) };
 }

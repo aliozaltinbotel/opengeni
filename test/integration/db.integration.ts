@@ -56,8 +56,12 @@ import {
   type AccessGrant,
   type Permission,
 } from "@opengeni/contracts";
-import { applyRawSql, startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { expectContiguousSequences } from "@opengeni/testing/assertions";
+import {
+  applyRawSql,
+  expectContiguousSequences,
+  startTestServices,
+  type TestServices,
+} from "@opengeni/testing";
 
 describe("DB integration", () => {
   let services: TestServices;

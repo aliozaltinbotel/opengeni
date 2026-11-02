@@ -2,15 +2,16 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { Session, SessionTurn } from "@opengeni/sdk";
 import { conversationTimeline } from "../../session";
-import { sessionInputWait } from "./session-rail";
+import { SessionWaitStatus } from "../components/session/session-wait-status";
 import {
   SESSION_STARTUP_GRACE_MS,
   sessionStartupPhase,
   useSessionStartup,
   SessionStartupProvider,
-} from "../../lib/session-startup";
+} from "./session-startup";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -66,8 +67,9 @@ test("only pre-execution active admission can be Starting; capacity/recovery/pau
     expect(sessionStartupPhase(session({ dispatchWait: wait }), 0)).toBe("retrying");
 });
 
-test("initial dispatch does not flash a wait chip above the composer", () => {
-  expect(sessionInputWait(session())).toBeNull();
+test("initial dispatch does not flash a status strip above the composer", () => {
+  const html = renderToStaticMarkup(<SessionWaitStatus session={session()} />);
+  expect(html).toBe("");
 });
 
 test("accepted idle Send remains in conversation before/after replay, independently of later genuine queued work", () => {
@@ -106,11 +108,6 @@ test("accepted idle Send remains in conversation before/after replay, independen
   }
 });
 
-/** Stands in for the wait chip, which the session route shows only for sessionInputWait. */
-function WaitProbe({ value }: { value: Session }) {
-  return sessionInputWait(value) ? <span role="status" /> : null;
-}
-
 function Probe({ value }: { value: Session }) {
   return <span>{useSessionStartup(value)}</span>;
 }
@@ -123,7 +120,7 @@ test("a newly mounted wait surface shares the header's new episode after long id
       <div data-header>
         <Probe value={value} />
       </div>
-      {value.status === "queued" ? <WaitProbe value={value} /> : null}
+      {value.status === "queued" ? <SessionWaitStatus session={value} /> : null}
     </SessionStartupProvider>
   );
   const oldIdle = session({ status: "idle", updatedAt: "2000-01-01T00:00:00Z" });
@@ -178,12 +175,13 @@ test("polls cannot reset grace; account/session changes and new idle episodes re
   }
 });
 
-test("reopening a stalled queued session keeps the wait chip absent", () => {
-  expect(
-    sessionInputWait(
-      session({
+test("reopening a stalled queued session keeps the composer strip absent", () => {
+  const html = renderToStaticMarkup(
+    <SessionWaitStatus
+      session={session({
         updatedAt: new Date(Date.now() - SESSION_STARTUP_GRACE_MS - 1).toISOString(),
-      }),
-    ),
-  ).toBeNull();
+      })}
+    />,
+  );
+  expect(html).toBe("");
 });

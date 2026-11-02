@@ -9,9 +9,12 @@ import {
   grantWorkspaceAccess,
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  MemoryEventBus,
+  startTestServices,
+  testSettings,
+  type TestServices,
+} from "@opengeni/testing";
 
 const delegationSecret = "workspace-isolation-delegation-secret";
 

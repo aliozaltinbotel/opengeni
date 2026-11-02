@@ -26,7 +26,6 @@ import {
 import { CapabilityLogo } from "./capability-logo";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
 import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
-import { ExcelAddinSetupSteps } from "./excel-addin-catalog-link";
 import { CapabilityDialogContent } from "./detail-dialog";
 import {
   capabilityPresentation,
@@ -60,7 +59,6 @@ import {
 import { focusCapabilitySuccessor } from "../../lib/capability-focus";
 import { analyticsAction, type AnalyticsAction } from "../../../ui/analytics-actions";
 import { cn } from "../../lib/utils";
-import { useNativeDestinationVisible } from "../../lib/app-host";
 import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
@@ -291,7 +289,6 @@ export function DetailBody({
   onRetryAuthInspection?: (() => void) | undefined;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  const secretsVisible = useNativeDestinationVisible("secrets");
   const defaultOwnership = defaultCapabilityConnectionOwnership(item);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
@@ -459,16 +456,12 @@ export function DetailBody({
                   : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
               </p>
             </div>
-          ) : item.surfaceType === "first_party_excel_addin" ? (
-            <ExcelAddinSetupSteps item={item} preserveChat={setupOnly} />
           ) : item.surfaceType === "first_party_onepassword" && workspaceId ? (
             <div className="space-y-3">
-              {secretsVisible ? (
-                <p className="text-sm text-fg-muted">
-                  {setupOnly ? "Opens Secrets in a new tab. " : ""}
-                  Connect a service account and choose which vaults agents can use.
-                </p>
-              ) : null}
+              <p className="text-sm text-fg-muted">
+                {setupOnly ? "Opens Secrets in a new tab. " : ""}
+                Connect a service account and choose which vaults agents can use.
+              </p>
               <OnePasswordCatalogLink
                 workspaceId={workspaceId}
                 connected={item.enabled}
@@ -1322,7 +1315,7 @@ export function ConnectionStatus({
         {attention
           ? `${personal ? "Personal" : "Workspace"} connection needs to be reconnected.`
           : personal
-            ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal automations can use this account.`
+            ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal schedules can use this account.`
             : `Workspace connection to ${health.connection.providerDomain}. Shared with agents and automations here.`}
       </p>
     </div>

@@ -2,11 +2,11 @@
 // resolve_accepted_connection_use like every other lane - canonical lifecycle
 // fences, live workspace-row validation, and idempotent audit facts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   buildConnectionTokenResolver,
   claimSessionWorkForAttempt,

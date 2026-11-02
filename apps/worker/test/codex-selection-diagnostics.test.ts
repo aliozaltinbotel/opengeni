@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { codexSelectionDiagnostics } from "@opengeni/db";
+import { codexSelectionDiagnostics } from "../src/activities/agent-turn/codex-selection-diagnostics";
 test("assignment, explicit switches and reuse are separate observations", () => {
   const input = {
     previousCredentialId: null,

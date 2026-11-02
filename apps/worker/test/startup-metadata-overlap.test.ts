@@ -62,7 +62,6 @@ function readPair(pair: (typeof pairs)[number]) {
     "deps",
     "afterReads",
     `return (async () => {
-      const toolFamilies = { skills: "read" };
       const { ${pair.readers.join(", ")} } = ports;
       ${reads.join("\n")}
       await afterReads();

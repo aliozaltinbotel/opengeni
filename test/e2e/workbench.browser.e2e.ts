@@ -7,9 +7,13 @@ import {
   type Page,
   type PageScreenshotOptions,
 } from "playwright";
-import { assertScreenshotPainted } from "@opengeni/testing/screenshot";
-import { freePort } from "@opengeni/testing/compose";
-import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
+import {
+  assertScreenshotPainted,
+  freePort,
+  runCommand,
+  startProcess,
+  type StartedProcess,
+} from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const dockStates = [

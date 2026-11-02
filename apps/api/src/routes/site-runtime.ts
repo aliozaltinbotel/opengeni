@@ -6,7 +6,6 @@ import {
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
   matchSiteOperation,
-  MessageTimeZone,
   MoveSessionQueueItemRequest,
   SaveComposerDraftRequest,
   SessionControlRequest,
@@ -36,6 +35,7 @@ import {
   withHostSessionUsageLimit,
   withSiteSessionOrigin,
   admissibleWorkspaceModel,
+  loadWorkspaceModelSelectionInput,
   resolveWorkspaceModelSelection,
   hasPermission,
   type ApiRouteDeps,
@@ -79,7 +79,6 @@ import {
 } from "../site-publishing/agent-session";
 import {
   isSubscriptionBilledModel,
-  loadSiteModelSelectionInput,
   resolveSiteOutsideModel,
   siteCreditModelIds,
   siteCreditModelSelections,
@@ -222,27 +221,19 @@ const CreateConversationRequest = z
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     latencyMode: LatencyMode.optional(),
-    // The viewer's IANA time zone, so the assistant sees the message's local time.
-    timeZone: MessageTimeZone.optional(),
   })
   .passthrough();
 const SendMessageRequest = z
   .object({
     type: z.literal("user.message"),
     clientEventId: ClientEventId,
-    payload: z
-      .object({
-        text: z.string().trim().min(1).max(MESSAGE_MAX_CHARS),
-        timeZone: MessageTimeZone.optional(),
-      })
-      .passthrough(),
+    payload: z.object({ text: z.string().trim().min(1).max(MESSAGE_MAX_CHARS) }).passthrough(),
   })
   .passthrough();
 const SteerRequest = z
   .object({
     text: z.string().trim().min(1).max(MESSAGE_MAX_CHARS),
     clientEventId: ClientEventId,
-    timeZone: MessageTimeZone.optional(),
   })
   .passthrough();
 
@@ -941,7 +932,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!viewer.subjectId)
         throw siteNotAvailableForViewer("agent_model", "Sign in to use your workspace's models");
       const selections = resolveWorkspaceModelSelection(
-        await loadSiteModelSelectionInput(deps, {
+        await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
           ...host.scope,
           subjectId: viewer.subjectId,
         }),
@@ -1569,7 +1560,6 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       pendingAdmission = { sessionId: requestedSessionId, admissionId };
       const body = {
         initialMessage: input.initialMessage,
-        ...(input.timeZone ? { timeZone: input.timeZone } : {}),
         requestedSessionId,
         ...(viewer.kind === "member" ? { visibility: "private" } : {}),
         startMode: "standard",
@@ -1964,7 +1954,6 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             clientEventId: submit.clientEventId,
             delivery: submit.delivery,
             ...(submit.controlEtag ? { controlEtag: submit.controlEtag } : {}),
-            ...(submit.timeZone ? { timeZone: submit.timeZone } : {}),
           },
         );
       }
@@ -1974,10 +1963,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await forwardView("POST", `${target}/events`, siteAcceptedEventView, {
           type: "user.message",
           ...(message.clientEventId ? { clientEventId: message.clientEventId } : {}),
-          payload: {
-            text: message.payload.text,
-            ...(message.payload.timeZone ? { timeZone: message.payload.timeZone } : {}),
-          },
+          payload: { text: message.payload.text },
         });
       }
       case "sessions.steer": {
@@ -1986,7 +1972,6 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await forwardView("POST", `${target}/steer`, siteAcceptedMessageView, {
           text: steer.text,
           ...(steer.clientEventId ? { clientEventId: steer.clientEventId } : {}),
-          ...(steer.timeZone ? { timeZone: steer.timeZone } : {}),
         });
       }
       case "sessions.control": {

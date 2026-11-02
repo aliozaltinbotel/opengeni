@@ -53,17 +53,4 @@ describe("windows the account list shows as Limit reached", () => {
     });
     expect(blockedSubscriptionWindows("claude", null, NOW)).toEqual({});
   });
-
-  test("a refusal without a reset remains blocked, while an elapsed reset does not", () => {
-    expect(
-      blockedSubscriptionWindows(
-        "claude",
-        usage([
-          { id: "five_hour", resetsAt: null, status: "exhausted" },
-          { id: "seven_day", resetsAt: at(-HOUR), status: "exhausted" },
-        ]),
-        NOW,
-      ),
-    ).toEqual({ five_hour: null });
-  });
 });

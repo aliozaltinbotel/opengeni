@@ -3,15 +3,8 @@
 import { ChevronRightIcon } from "lucide-react";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 import { containedPortal } from "../ui/portal-container";
-import {
-  createContext,
-  forwardRef,
-  useContext,
-  type ComponentPropsWithoutRef,
-  type ComponentRef,
-} from "react";
+import { createContext, useContext, type ComponentProps, type Ref } from "react";
 import { cn } from "../lib/cn";
-import { useMergedRefs } from "../lib/refs";
 import {
   MENU_CHEVRON_CLASS,
   MENU_ITEM_CLASS,
@@ -32,7 +25,12 @@ type DropdownMenuSourceContextValue = {
 
 const DropdownMenuSourceContext = createContext<DropdownMenuSourceContextValue | null>(null);
 
-function DropdownMenu(props: ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Root>) {
+function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
+  if (typeof ref === "function") ref(value);
+  else if (ref) ref.current = value;
+}
+
+function DropdownMenu(props: ComponentProps<typeof DropdownMenuPrimitive.Root>) {
   const source = usePortalTokenSource<HTMLElement>();
   return (
     <DropdownMenuSourceContext.Provider value={source}>
@@ -41,19 +39,29 @@ function DropdownMenu(props: ComponentPropsWithoutRef<typeof DropdownMenuPrimiti
   );
 }
 
-const DropdownMenuTrigger = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DropdownMenuPrimitive.Trigger>,
-  ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Trigger>
->(function DropdownMenuTrigger(props, forwardedRef) {
+function DropdownMenuTrigger({
+  ref,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Trigger>) {
   const sourceRef = useContext(DropdownMenuSourceContext);
-  const ref = useMergedRefs<HTMLButtonElement>(sourceRef?.ref, forwardedRef);
-  return <DropdownMenuPrimitive.Trigger data-slot="dropdown-menu-trigger" ref={ref} {...props} />;
-});
+  return (
+    <DropdownMenuPrimitive.Trigger
+      data-slot="dropdown-menu-trigger"
+      ref={(node) => {
+        sourceRef?.ref(node);
+        assignRef(ref, node);
+      }}
+      {...props}
+    />
+  );
+}
 
-const DropdownMenuContent = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DropdownMenuPrimitive.Content>,
-  ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(function DropdownMenuContent({ className, sideOffset = 4, style, ...props }, ref) {
+function DropdownMenuContent({
+  className,
+  sideOffset = 4,
+  style,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   const source = useContext(DropdownMenuSourceContext);
   const portalStyle = usePortalTokenStyle(source?.source ?? null);
   return (
@@ -68,72 +76,73 @@ const DropdownMenuContent = /* @__PURE__ */ forwardRef<
           className,
         )}
         style={{ ...portalStyle, ...style }}
-        ref={ref}
         {...props}
       />
     </DropdownMenuContainedPortal>
   );
-});
+}
 
-const DropdownMenuItem = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DropdownMenuPrimitive.Item>,
-  ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
-    inset?: boolean;
-    variant?: "default" | "destructive";
-  }
->(function DropdownMenuItem({ className, inset, variant = "default", ...props }, ref) {
+function DropdownMenuItem({
+  className,
+  inset,
+  variant = "default",
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Item> & {
+  inset?: boolean;
+  variant?: "default" | "destructive";
+}) {
   return (
     <DropdownMenuPrimitive.Item
       data-slot="dropdown-menu-item"
       data-inset={inset}
       data-variant={variant}
       className={cn(MENU_ITEM_CLASS, "data-[inset]:pl-9", className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-const DropdownMenuSeparator = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DropdownMenuPrimitive.Separator>,
-  ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Separator>
->(function DropdownMenuSeparator({ className, ...props }, ref) {
+function DropdownMenuSeparator({
+  className,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Separator>) {
   return (
     <DropdownMenuPrimitive.Separator
       data-slot="dropdown-menu-separator"
       className={cn(MENU_SEPARATOR_CLASS, className)}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
-function DropdownMenuSub(props: ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Sub>) {
+function DropdownMenuSub(props: ComponentProps<typeof DropdownMenuPrimitive.Sub>) {
   return <DropdownMenuPrimitive.Sub data-slot="dropdown-menu-sub" {...props} />;
 }
 
-const DropdownMenuSubTrigger = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DropdownMenuPrimitive.SubTrigger>,
-  ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubTrigger> & { inset?: boolean }
->(function DropdownMenuSubTrigger({ className, inset, children, ...props }, ref) {
+function DropdownMenuSubTrigger({
+  className,
+  inset,
+  children,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.SubTrigger> & { inset?: boolean }) {
   return (
     <DropdownMenuPrimitive.SubTrigger
       data-slot="dropdown-menu-sub-trigger"
       data-inset={inset}
       className={cn(MENU_ITEM_CLASS, "data-[inset]:pl-9", className)}
-      ref={ref}
       {...props}
     >
       {children}
       <ChevronRightIcon aria-hidden="true" className={cn(MENU_CHEVRON_CLASS, "ml-auto")} />
     </DropdownMenuPrimitive.SubTrigger>
   );
-});
+}
 
-const DropdownMenuSubContent = /* @__PURE__ */ forwardRef<
-  ComponentRef<typeof DropdownMenuPrimitive.SubContent>,
-  ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
->(function DropdownMenuSubContent({ className, style, ...props }, ref) {
+function DropdownMenuSubContent({
+  className,
+  style,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
   const source = useContext(DropdownMenuSourceContext);
   const portalStyle = usePortalTokenStyle(source?.source ?? null);
   return (
@@ -146,11 +155,10 @@ const DropdownMenuSubContent = /* @__PURE__ */ forwardRef<
         className,
       )}
       style={{ ...portalStyle, ...style }}
-      ref={ref}
       {...props}
     />
   );
-});
+}
 
 export {
   DropdownMenu,

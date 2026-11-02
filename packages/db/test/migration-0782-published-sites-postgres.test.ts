@@ -8,7 +8,7 @@ import {
   acquireOwnerMigratedTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   checkSiteHostnameClaim,

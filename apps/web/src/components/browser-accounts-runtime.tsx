@@ -33,7 +33,6 @@ import {
   clearOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
-import { afterHostSignOut } from "@/host-extension/lifecycle";
 
 export type BrowserAccountsRuntimeProps = {
   bootstrapLegacySession: boolean;
@@ -309,7 +308,6 @@ export function BrowserAccountsSignedOutPanel(props: {
 }
 
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
-  organizationRegistrationRoute?: string;
   client: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
@@ -357,12 +355,11 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     const replacement =
       projection.slots.find((slot) => slot.id !== selectedSlotId && slot.state === "active")?.id ??
       null;
-    await afterHostSignOut(() => accounts.logoutSlot(selectedSlotId, replacement));
+    await accounts.logoutSlot(selectedSlotId, replacement);
   }
 
   return (
     <OrganizationOnboardingPanel
-      organizationRegistrationRoute={props.organizationRegistrationRoute}
       client={props.client}
       billingMode={props.billingMode}
       codexEnabled={props.codexEnabled}

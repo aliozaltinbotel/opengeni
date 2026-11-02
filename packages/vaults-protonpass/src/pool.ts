@@ -7,7 +7,7 @@ import {
   protonPassCapabilities,
 } from "./provider";
 import { FILE_FIELD_PREFIX } from "./mapping";
-import { restrictToOperations } from "@opengeni/vaults";
+import { restrictToOperations } from "./operations";
 
 export const PROTON_PASS_POOL_MAX_SESSIONS = 32;
 export const PROTON_PASS_POOL_IDLE_MS = 15 * 60_000;
@@ -177,8 +177,6 @@ export function createProtonPassProviderPool(
       writeItem: (ctx, vaultId, item) => run((provider) => provider.writeItem(ctx, vaultId, item)),
       archiveItem: (ctx, vaultId, itemId) =>
         run((provider) => provider.archiveItem(ctx, vaultId, itemId)),
-      readPasskeys: (ctx, vaultId, itemId) =>
-        run((provider) => provider.readPasskeys(ctx, vaultId, itemId)),
     };
   }
 

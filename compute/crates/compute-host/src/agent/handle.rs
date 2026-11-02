@@ -36,7 +36,6 @@ impl Handle {
         stream_idle: Duration,
         lease: Option<LeaseGate>,
         observer: Observer,
-        preparer: Option<Arc<crate::rootfs::Preparer>>,
     ) -> Self {
         Self {
             commands,
@@ -46,7 +45,6 @@ impl Handle {
             lease,
             observer,
             trace: None,
-            preparer,
         }
     }
 
@@ -176,18 +174,12 @@ impl Handle {
         .await?
     }
 
-    /// Hands a sandbox held under `owner` off, even while it is awake with
-    /// `awake`, and returns once this host no longer has it; see
-    /// [`crate::protocol::Request::HandOff`].
-    pub async fn hand_off(&self, id: Id, owner: OwnerEpoch, awake: bool) -> Result<(), HostError> {
+    /// Hands a sandbox held under `owner` off, and returns once this host
+    /// no longer has it; see [`crate::protocol::Request::HandOff`].
+    pub async fn hand_off(&self, id: Id, owner: OwnerEpoch) -> Result<(), HostError> {
         self.fleet_only("hand off")?;
-        self.send_naming_owner(|reply| Command::HandOff {
-            id,
-            owner,
-            awake,
-            reply,
-        })
-        .await?
+        self.send_naming_owner(|reply| Command::HandOff { id, owner, reply })
+            .await?
     }
 
     /// Takes in the control service's rulings on the sandboxes the host
@@ -238,21 +230,6 @@ impl Handle {
     #[must_use]
     pub fn observer(&self) -> &Observer {
         &self.observer
-    }
-
-    /// How the sandbox image of the OCI image `image` stands on this host,
-    /// starting its build if nothing has (see
-    /// [`crate::protocol::Request::Prepare`]).
-    pub fn prepare(
-        &self,
-        image: &str,
-    ) -> Result<crate::rootfs::Progress, crate::rootfs::PrepareError> {
-        match &self.preparer {
-            Some(preparer) => preparer.prepare(image),
-            None => Err(crate::rootfs::PrepareError::Unavailable(
-                "it has no guest programs to build with, or no store to keep images in",
-            )),
-        }
     }
 
     /// Deletes a sandbox and everything it stores, waiting until it is gone.

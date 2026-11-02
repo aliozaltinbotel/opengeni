@@ -34,7 +34,6 @@ export const PUBLIC_ERROR_CAUSE_NAMES: ReadonlySet<string> = new Set([
   "ZodError",
   "PostgresError",
   "DrizzleQueryError",
-  "BrowserControlActionDeadlineError",
   "BrowserControlRequestError",
   "BrowserControlProtocolError",
   "BrowserControlTransportError",

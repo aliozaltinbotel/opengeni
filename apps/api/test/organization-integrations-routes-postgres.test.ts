@@ -12,8 +12,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import { registerOrganizationIntegrationRoutes } from "../src/routes/organization-integrations";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";

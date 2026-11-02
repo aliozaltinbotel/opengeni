@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { afterEach, expect, test } from "bun:test";
 import { copyKernelSourceFixture } from "./artifact-kernel-source-identity.fixture";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -39,8 +38,10 @@ afterEach(async () => {
 });
 const sourceSha = "a".repeat(40);
 
-test("historical workflow fixture: publication workflow is trusted main-CI completion only, bounded and never rebuilds", async () => {
-  const text = readRetiredWorkflow("publish-artifact-runtime.yml");
+test("publication workflow is trusted main-CI completion only, bounded and never rebuilds", async () => {
+  const text = await Bun.file(
+    join(import.meta.dir, "../.github/workflows/publish-artifact-runtime.yml"),
+  ).text();
   const workflow = parseYaml(text);
   expect(workflow.on).toEqual({
     workflow_run: { workflows: ["CI"], types: ["completed"], branches: ["main"] },

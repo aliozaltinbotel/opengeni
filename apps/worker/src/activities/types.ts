@@ -13,7 +13,6 @@ import type {
   SessionWorkflowWakeDeliveryResult,
   SessionAdmissionFence,
 } from "@opengeni/db";
-import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -78,16 +77,6 @@ export type StartVideoGenerationWorkflow = (input: {
 /** A separately owned display-metadata operation, never a conversation turn. */
 export type StartSessionTitleWorkflow = StartVideoGenerationWorkflow;
 
-/** Start-or-observe a recording's transcript or deletion workflow. */
-export type StartRecordingWorkflow = (input: {
-  kind: "transcript" | "deletion";
-  accountId: string;
-  workspaceId: string;
-  recordingId: string;
-  versionId: string | null;
-  ownerSubjectId: string;
-}) => Promise<"started" | "already_running">;
-
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -112,7 +101,6 @@ export type InspectSessionAttemptActivity = (input: {
 /** Services shared by both Temporal worker roles. Keep this graph free of the
  * agent runtime and document parser so each process can load only its role. */
 export type SharedActivityServices = {
-  sessionAuthorization?: import("@opengeni/contracts").SessionAuthorizationPort | undefined;
   settings: Settings;
   /**
    * Original environment/host settings retained across live database-catalog
@@ -138,7 +126,6 @@ export type SharedActivityServices = {
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
   startRealtimeUsageWorkflow?: StartRealtimeUsageWorkflow | null;
   startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
-  startRecordingWorkflow?: StartRecordingWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -194,13 +181,6 @@ export type TurnActivityServices = SharedActivityServices & {
   /** Trusted host admission of each committed AGENT/COMPACTION/TITLE source receipt.
    * A configured failure prevents provider dispatch; session metadata cannot select this hook. */
   authorizeModelCallSource?: AuthorizeModelCallSource;
-  /**
-   * The embedding host's organization governance, the same port the API takes.
-   * With `reasoningDisclosure: "withheld"`, a turn of an organization it
-   * governs asks the provider for no reasoning summary; the API withholds any
-   * reasoning text regardless. Unset: every turn keeps the stock request.
-   */
-  organizationGovernance?: OrganizationGovernancePort | null;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
 };
@@ -533,13 +513,6 @@ export type DispatchScheduledTaskRunInput = {
       credentialRestriction?: never;
     }
   | {
-      /** Events matched the automation's triggers; the run acts with its own authority. */
-      triggerType: Extract<ScheduledTaskTriggerType, "event">;
-      agentRunUsageIdempotencyKey?: never;
-      initiator?: never;
-      credentialRestriction?: never;
-    }
-  | {
       triggerType: Extract<
         ScheduledTaskTriggerType,
         "manual" | "initial" | "provider_event" | "retry" | "repair"
@@ -580,9 +553,7 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_model_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
-        | "attachments_disabled"
         | "atlassian_native_retired"
-        | "google_drive_native_retired"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";

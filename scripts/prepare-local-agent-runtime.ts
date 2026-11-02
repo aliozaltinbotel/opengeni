@@ -6,6 +6,7 @@ import { stageCuaRuntime } from "../packages/browserd/scripts/stage-cua-runtime"
 
 type ComponentDigests = {
   browserd: string;
+  agentBrowser: string;
   computerNative: string;
 };
 
@@ -85,8 +86,9 @@ async function sourceIdentity(): Promise<{ commit: string; digest: string }> {
 
 /**
  * Build one host-native, source-coherent Connected Machine runtime. The final
- * agent embeds browserd and computer-native, so starting this one file cannot
- * accidentally discover stale companions from another worktree or release.
+ * agent embeds browserd, the pinned agent-browser driver, and computer-native,
+ * so starting this one file cannot accidentally discover stale companions from
+ * another worktree or release.
  */
 export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
   const source = await sourceIdentity();
@@ -107,6 +109,7 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
     ? await stageCuaRuntime(process.arch)
     : null;
 
+  const agentBrowser = join(browserdRoot, "dist", `agent-browser${executableSuffix}`);
   const computerNative = join(
     agentRoot,
     "target",
@@ -115,12 +118,14 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
   );
   const digests: ComponentDigests = {
     browserd: await sha256File(browserd),
+    agentBrowser: await sha256File(agentBrowser),
     computerNative: await sha256File(computerNative),
   };
   const agentBuild = ["cargo", "build", "--release", "-p", "opengeni-agent"];
   if (process.platform === "darwin") agentBuild.push("--features", "macos-desktop");
   await run(agentBuild, agentRoot, {
     OPENGENI_EMBEDDED_BROWSERD: browserd,
+    OPENGENI_EMBEDDED_AGENT_BROWSER: agentBrowser,
     OPENGENI_EMBEDDED_COMPUTER_NATIVE: computerNative,
     OPENGENI_RUNTIME_BUILD_ID: buildId,
     ...(cuaManifest ? { OPENGENI_EMBEDDED_CUA_RUNTIME: cuaManifest } : {}),

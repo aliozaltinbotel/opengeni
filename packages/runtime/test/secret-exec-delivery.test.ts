@@ -6,15 +6,15 @@
  * and every provider-visible command text holds only `${OPENGENI_SECRET_n}`
  * names. Values: the stub resolver (F2's hosted resolver is a drop-in).
  */
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { Manifest, shell } from "@openai/agents/sandbox";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import { createSandboxClientForBackend } from "../src/index";
 import {
   cancellableShellCommand,
@@ -55,8 +55,6 @@ type LocalSession = {
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
 const sessions: LocalSession[] = [];
-const shellTempRoot = mkdtempSync(join(tmpdir(), "opengeni-secret-exec-test-"));
-afterAll(() => rmSync(shellTempRoot, { recursive: true, force: true }));
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map(async (session) => await session.close()));
   // Tests that never reach attempt-end cleanup leave the stub attempt's
@@ -77,13 +75,10 @@ async function harness(
   };
   // The SDK's default local PATH lists only FHS directories. Keep the host's,
   // so commands run under the in-sandbox process supervisor on every machine,
-  // as they do in production. The local sandbox needs an explicit TMPDIR too,
-  // so residue inspection reads the same owned root as the supervisor.
+  // as they do in production.
   const local = await client.create(
     backend === "local"
-      ? new Manifest({
-          environment: { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: shellTempRoot },
-        })
+      ? new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } })
       : {},
   );
   sessions.push(local);
@@ -167,7 +162,11 @@ function expectNoCanary(texts: readonly string[]): void {
  * commands, whose names or contents carry input sent to them. */
 function supervisorInputResidue(workspaceRootPath: string): { runs: number; residue: string[] } {
   const namespace = createHash("sha256").update(workspaceRootPath).digest("hex").slice(0, 16);
-  const root = join(shellTempRoot, `opengeni-exec-${process.getuid?.() ?? 0}`, namespace);
+  const root = join(
+    process.env.TMPDIR || tmpdir() || "/tmp",
+    `opengeni-exec-${process.getuid?.() ?? 0}`,
+    namespace,
+  );
   if (!existsSync(root)) return { runs: 0, residue: [] };
   const runs = readdirSync(root);
   const residue: string[] = [];

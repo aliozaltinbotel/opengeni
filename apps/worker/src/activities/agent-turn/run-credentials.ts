@@ -1,8 +1,3 @@
-import {
-  sessionToolFamilyGate,
-  type SessionToolFamilyGate,
-} from "@opengeni/contracts/organization-session-policy";
-import { codemodeDeliveryForTurn } from "./session-tool-families";
 import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
 import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import {
@@ -52,14 +47,8 @@ import {
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { type ResumedTurnSandbox } from "../../sandbox-resume";
 import { lazyProvisionEnabled } from "../../sandbox-routing";
-import {
-  recordTurnSandboxEstablishPolicy,
-  measureTurnStartupPhase,
-} from "../../observability-metrics";
-import {
-  withSandboxStartupPhases,
-  type sandboxStartupPhaseObserver,
-} from "./sandbox-startup-phase";
+import { recordTurnSandboxEstablishPolicy } from "../../observability-metrics";
+import { sandboxRunAs } from "@opengeni/runtime";
 
 import {
   assertGitHubResourcesRemainAuthorized,
@@ -86,8 +75,6 @@ import type {
 } from "./turn-context";
 
 export type PrepareRunCredentialsDeps = {
-  /** The organization's session policy; absent means nothing is denied. */
-  sessionToolFamilies?: SessionToolFamilyGate;
   localMcpServerIds?: readonly string[];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   input: RunAgentTurnInput;
@@ -127,21 +114,6 @@ export type PrepareRunCredentialsDeps = {
 };
 
 export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
-  return withSandboxStartupPhases(
-    {
-      observability: deps.observability,
-      provider: deps.turnExecutionPolicy.providerId,
-      backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
-      publish: deps.eventing.publish,
-    },
-    (measure) => prepareRunCredentialsObserved(deps, measure),
-  );
-}
-
-async function prepareRunCredentialsObserved(
-  deps: PrepareRunCredentialsDeps,
-  measure: ReturnType<typeof sandboxStartupPhaseObserver>,
-) {
   const {
     input,
     settings,
@@ -195,30 +167,21 @@ async function prepareRunCredentialsObserved(
     effectiveRunCredentialBackend === "none" || effectiveRunCredentialBackend === "selfhosted"
       ? null
       : await waitForTurnOperation(
-          measureTurnStartupPhase(
-            observability,
-            {
-              phase: "run_credential_binding",
-              provider: turnExecutionPolicy.providerId,
-              backend: effectiveRunCredentialBackend,
-            },
-            () =>
-              bindRunCredentialResolver({
-                db,
-                settings: accountRoutes.settings,
-                initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
-                connectionCredentials: connectionCredentials ?? null,
-                localMcpServerIds: deps.localMcpServerIds ?? [],
-                effectiveTools: accountRoutes.tools,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                session,
-                turn,
-                attemptId: input.attemptId,
-                effectiveSandboxBackend: effectiveRunCredentialBackend,
-                variableSet: null,
-              }),
-          ),
+          bindRunCredentialResolver({
+            db,
+            settings: accountRoutes.settings,
+            initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
+            connectionCredentials: connectionCredentials ?? null,
+            localMcpServerIds: deps.localMcpServerIds ?? [],
+            effectiveTools: accountRoutes.tools,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            session,
+            turn,
+            attemptId: input.attemptId,
+            effectiveSandboxBackend: effectiveRunCredentialBackend,
+            variableSet: null,
+          }),
           cancellationSignal,
           undefined,
         );
@@ -245,15 +208,13 @@ async function prepareRunCredentialsObserved(
   // discovery; a lazy sandbox materializes the latest resolved material only
   // inside its first-operation single-flight.
   const initialRunCredentialMaterial = runCredentialResolver
-    ? await measure("credential_resolution", () =>
-        waitForTurnOperation(
-          runCredentialResolver.resolve({
-            purpose: "provision",
-            forceRefresh: false,
-          }),
-          cancellationSignal,
-          undefined,
-        ),
+    ? await waitForTurnOperation(
+        runCredentialResolver.resolve({
+          purpose: "provision",
+          forceRefresh: false,
+        }),
+        cancellationSignal,
+        undefined,
       )
     : null;
   const runMcpCredentials = new RunMcpCredentials(
@@ -399,25 +360,20 @@ async function prepareRunCredentialsObserved(
     gitCredentialBindings: sandboxGitCredentialBindings,
     codemodeToken: sandboxCodemodeToken,
     codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
-  } = await measure("credential_mint", () =>
-    waitForTurnOperation(
-      sandboxEnvironmentForRun(sandboxEnvironmentSettings, platformGitResources, {
-        skipGitHubToken: activeSandboxBackend === "selfhosted",
-        codemodeDelivery: codemodeDeliveryForTurn(
-          activeSandboxBackend,
-          deps.sessionToolFamilies ?? sessionToolFamilyGate(null),
-        ),
-        deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-        scope: connectionScope,
-        ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-        gitCredentials: connectionCredentials?.gitCredentials,
-        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-        authorizeGitHubTokenMint,
-        codemodeAuthority,
-      }),
-      cancellationSignal,
-      undefined,
-    ),
+  } = await waitForTurnOperation(
+    sandboxEnvironmentForRun(sandboxEnvironmentSettings, platformGitResources, {
+      skipGitHubToken: activeSandboxBackend === "selfhosted",
+      codemodeDelivery: activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
+      deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+      scope: connectionScope,
+      ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+      gitCredentials: connectionCredentials?.gitCredentials,
+      personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+      authorizeGitHubTokenMint,
+      codemodeAuthority,
+    }),
+    cancellationSignal,
+    undefined,
   );
   // Reserved, image-owned paths win over workspace/session variables. The
   // exact same merged object feeds both box manifest and agent declaration,
@@ -461,22 +417,13 @@ async function prepareRunCredentialsObserved(
       return Promise.resolve(undefined);
     }
     runGitCredentialsMint ??= waitForTurnOperation(
-      measureTurnStartupPhase(
-        observability,
-        {
-          phase: "run_git_credential_mint",
-          provider: turnExecutionPolicy.providerId,
-          backend: effectiveRunCredentialBackend,
-        },
-        () =>
-          mintRunGitCredentials(runSettings, platformGitResources, {
-            scope: connectionScope,
-            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-            gitCredentials: connectionCredentials?.gitCredentials,
-            personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-            authorizeGitHubTokenMint,
-          }),
-      ),
+      mintRunGitCredentials(runSettings, platformGitResources, {
+        scope: connectionScope,
+        ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+        gitCredentials: connectionCredentials?.gitCredentials,
+        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+        authorizeGitHubTokenMint,
+      }),
       cancellationSignal,
       undefined,
     );
@@ -531,6 +478,7 @@ async function prepareRunCredentialsObserved(
           if (!pendingBinding) {
             throw new Error("credential renewal produced no binding token");
           }
+          const runAs = sandboxRunAs(runSettings);
           const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
           if (!targetSandbox) {
             throw new Error("Git credential renewal has no exact sandbox lease target");
@@ -540,6 +488,7 @@ async function prepareRunCredentialsObserved(
             "gitCredentialRenewal",
             async () =>
               await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding!], {
+                ...(runAs ? { runAs } : {}),
                 ...(eventing.toolCancellationFenceRef.current
                   ? {
                       commandRunner:
@@ -606,6 +555,7 @@ async function prepareRunCredentialsObserved(
     };
     const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
       if (tokenSession) {
+        const runAs = sandboxRunAs(runSettings);
         const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
         if (!targetSandbox) {
           throw new Error("Codemode token renewal has no exact sandbox lease target");
@@ -615,6 +565,7 @@ async function prepareRunCredentialsObserved(
           "codemodeTokenRenewal",
           async () =>
             await refreshCodemodeTokenFile(tokenSession, material.token, {
+              ...(runAs ? { runAs } : {}),
               ...(sandboxCodemodeTokenFile
                 ? {
                     tokenFile: sandboxCodemodeTokenFile,

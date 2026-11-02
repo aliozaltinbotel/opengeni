@@ -18,31 +18,22 @@ import {
   XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { forwardRef, useEffect, useState, type MouseEvent, type ReactElement } from "react";
+import { useEffect, useState, type MouseEvent, type ReactElement } from "react";
 import { cn } from "../lib/cn";
-import { useComposerFooterSignal } from "../lib/composer-footer-signals";
-import { useVoiceInput, type VoiceInputRecordingsClient } from "../hooks/use-voice-input";
-import type { RecorderPlatform } from "@opengeni/sdk/recordings";
+import { useVoiceInput } from "../hooks/use-voice-input";
 import type { VoiceRecordingStore } from "../voice-recording-store";
 import { useChatComposer } from "./composer";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
-import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
-// AnimatePresence's popLayout measures its children through a ref, so Tip
-// hands it on to the control it wraps.
-const Tip = /* @__PURE__ */ forwardRef<HTMLButtonElement, { tip: string; children: ReactElement }>(
-  function Tip({ tip, children }, ref) {
-    return (
-      <Tooltip>
-        <TooltipTrigger ref={ref} asChild>
-          {children}
-        </TooltipTrigger>
-        <TooltipContent side="top">{tip}</TooltipContent>
-      </Tooltip>
-    );
-  },
-);
+function Tip({ tip, children }: { tip: string; children: ReactElement }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="top">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 export type ComposerTranscriptionMessages = {
   start: string;
@@ -115,15 +106,7 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
 });
 
 export type ComposerTranscriptionControlProps = {
-  /** The SDK client. With `requestJson`, dictations are kept as recordings until heard. */
-  client?:
-    | (Pick<OpenGeniClient, "transcribeAudio"> & Partial<Pick<OpenGeniClient, "requestJson">>)
-    | null
-    | undefined;
-  /** A recordings client, such as a host proxy. Built from `client` otherwise. */
-  recordings?: Partial<VoiceInputRecordingsClient> | undefined;
-  /** How this device records; the browser's by default. */
-  platform?: RecorderPlatform | undefined;
+  client?: Pick<OpenGeniClient, "transcribeAudio"> | null | undefined;
   workspaceId?: string | undefined;
   capability?: ClientVoiceInputConfig | null | undefined;
   workspaceEnabled?: boolean | undefined;
@@ -137,9 +120,9 @@ export type ComposerTranscriptionControlProps = {
   onDiagnostic?: unknown;
   messages?: Partial<ComposerTranscriptionMessages> | undefined;
   className?: string | undefined;
-  /** @deprecated Dictations are kept by the shared recording store; ignored. */
+  /** Test/embed seam. Production defaults to origin-scoped IndexedDB. */
   createRecordingStore?: (() => VoiceRecordingStore) | undefined;
-  /** @deprecated Recordings are claimed with Web Locks; ignored. */
+  /** Test/embed seam. Production acquires a coordinated browser-document owner lease. */
   createOwnerId?: (() => string) | undefined;
   /** Hide while realtime voice owns the mic — collapses with a layout-friendly exit. */
   suppressed?: boolean | undefined;
@@ -159,8 +142,8 @@ export function ComposerTranscriptionControl({
   workspaceEnabled = false,
   messages: overrides,
   className,
-  recordings,
-  platform,
+  createRecordingStore,
+  createOwnerId,
   suppressed = false,
 }: ComposerTranscriptionControlProps) {
   const t = useOpenGeniText();
@@ -175,8 +158,8 @@ export function ComposerTranscriptionControl({
     setValue: composer.setValue,
     focusInput: composer.focusInput,
     disabled: composer.disabled,
-    recordings,
-    platform,
+    createRecordingStore,
+    createOwnerId,
   });
   const { status } = transcription;
   const retrying = status === "retrying";
@@ -249,10 +232,6 @@ export function ComposerTranscriptionControl({
     void transcription.start();
   }
 
-  const needsAttention = !capturing && (recoverable || (status === "error" && !!errorMessage));
-  useComposerFooterSignal("transcription-capturing", !suppressed && capturing);
-  useComposerFooterSignal("transcription-attention", !suppressed && needsAttention);
-
   return (
     <AnimatePresence initial={false}>
       {suppressed ? null : (
@@ -271,7 +250,9 @@ export function ComposerTranscriptionControl({
           )}
           data-transcription-status={status}
           data-transcription-capturing={capturing ? "" : undefined}
-          data-transcription-attention={needsAttention ? "" : undefined}
+          data-transcription-attention={
+            !capturing && (recoverable || (status === "error" && errorMessage)) ? "" : undefined
+          }
         >
           <span className="inline-flex min-w-0 items-center gap-1.5">
             <AnimatePresence mode="popLayout" initial={false}>
@@ -425,9 +406,9 @@ export function ComposerTranscriptionControl({
                       </Tip>
                     </>
                   ) : status === "transcribing" || status === "saving" ? (
-                    <ShimmerText className="px-1.5 text-og-xs font-medium whitespace-nowrap">
+                    <span className="og-shimmer-text px-1.5 text-og-xs font-medium whitespace-nowrap">
                       {status === "saving" ? messages.saving : messages.transcribing}
-                    </ShimmerText>
+                    </span>
                   ) : (
                     <span className="px-1.5 text-og-xs text-og-fg-muted whitespace-nowrap">
                       {messages.requestingPermission}

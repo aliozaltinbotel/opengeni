@@ -76,11 +76,7 @@ import {
   isInteractionControlUnavailable,
   isSourcePlacementChangedError,
 } from "../lib/interaction-errors";
-import { useClientConfigFlags } from "../hooks/use-client-config-flags";
-import {
-  type EmbeddedBrowserInteractionClientOverride,
-  useEmbeddedBrowserInteraction,
-} from "../session-context";
+import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { BrowserSelectControl } from "./browser-select-control";
@@ -191,9 +187,6 @@ export function BrowserViewer({
   const t = useOpenGeniText();
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled });
-  const { client: configClient } = useEmbeddedBrowserInteraction(override);
-  // The deployment's own branded extension when it ships one.
-  const browserExtensionName = useClientConfigFlags(configClient as never).browserExtension?.name;
   const onlineAttachedBridges = useMemo(
     () => attached.bridges.filter((bridge) => bridge.state === "online"),
     [attached.bridges],
@@ -864,7 +857,6 @@ export function BrowserViewer({
             onCreate={createBrowser}
             onRestore={(identity) => updateProfile(identity, { status: "active" })}
             setupUrl={browserExtensionSetupUrl}
-            extensionName={browserExtensionName}
             prominent
           />
           {registry.error ? (
@@ -909,7 +901,6 @@ export function BrowserViewer({
         }
         onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
         setupUrl={browserExtensionSetupUrl}
-        extensionName={browserExtensionName}
       />
       <InteractionInterventionBanner
         interventions={selectedInterventions}
@@ -1219,7 +1210,6 @@ function BrowserToolbar(props: {
   onOpenProfileVersion: (identityId: string, baseRevisionId: string) => void;
   onRefresh: () => void;
   setupUrl?: string | undefined;
-  extensionName?: string | undefined;
 }) {
   const t = useOpenGeniText();
   const detailsRef = useViewerMenuDismiss();
@@ -1303,7 +1293,6 @@ function BrowserToolbar(props: {
         onCreate={props.onCreate}
         onRestore={(identity) => props.onUpdateProfile(identity, { status: "active" })}
         setupUrl={props.setupUrl}
-        extensionName={props.extensionName}
       />
     </div>
   );
@@ -1438,7 +1427,6 @@ function BrowserLaunchMenu(props: {
   onCreate: (choice?: BrowserLaunchChoice) => void;
   onRestore: (identity: BrowserIdentity) => Promise<boolean>;
   setupUrl?: string | undefined;
-  extensionName?: string | undefined;
   prominent?: boolean;
 }) {
   const t = useOpenGeniText();
@@ -1538,9 +1526,7 @@ function BrowserLaunchMenu(props: {
                       {t("browserViewer.chromeConnectionReady")}
                     </span>
                     <span className="block text-og-xs leading-4 text-og-fg-subtle">
-                      {t("browserViewer.installTheOpengeniBrowserExtension", {
-                        extensionName: props.extensionName ?? "Opengeni Browser",
-                      })}
+                      {t("browserViewer.installTheOpengeniBrowserExtension")}
                     </span>
                   </span>
                 </div>

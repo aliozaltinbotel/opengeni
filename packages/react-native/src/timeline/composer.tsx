@@ -12,7 +12,6 @@ import {
   Pressable,
   Text,
   TextInput,
-  useWindowDimensions,
   View,
   type ViewStyle,
 } from "react-native";
@@ -199,14 +198,11 @@ export function SessionComposer(props: SessionComposerProps) {
   const c = theme.colors;
   const ios = Platform.OS === "ios";
   const pasteInputId = useComposerImagePaste(props.onPasteImages);
-  // One line of the field at the person's text size (the line height scales with it).
-  const { fontScale } = useWindowDimensions();
-  const line = Math.ceil(22 * fontScale);
-  const [height, setHeight] = useState(line);
+  const [height, setHeight] = useState(22);
   const empty = !props.value;
   useEffect(() => {
-    if (empty) setHeight(line);
-  }, [empty, line]);
+    if (empty) setHeight(22);
+  }, [empty]);
   // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
@@ -270,7 +266,7 @@ export function SessionComposer(props: SessionComposerProps) {
       autoFocus={props.autoFocus}
       selectionColor={c.accent}
       onContentSizeChange={(event) =>
-        setHeight(Math.min(150, Math.max(line, event.nativeEvent.contentSize.height)))
+        setHeight(Math.min(150, Math.max(22, event.nativeEvent.contentSize.height)))
       }
       style={{
         ...fontStyle(theme),
@@ -288,8 +284,8 @@ export function SessionComposer(props: SessionComposerProps) {
           ? inline
             ? props.value
               ? undefined
-              : Math.max(36, line + 14)
-            : (props.value ? height : line) + 16
+              : 36
+            : (props.value ? height : 22) + 16
           : undefined,
         maxHeight: 166,
         textAlignVertical: inline ? "center" : "top",
@@ -463,14 +459,13 @@ function formatDictationTime(seconds: number): string {
 }
 
 /**
- * A kept dictation. Its text is ready to insert, or couldn't be fetched yet
- * and Retry tries again; Discard is the only way to drop it.
+ * A recording whose text could not be fetched yet. It stays on the device:
+ * Retry sends the same audio again; Discard is the only way to drop it.
  */
 function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
-  const ready = voice.savedTranscript != null && voice.insertSaved !== undefined;
   return (
     <View style={{ gap: 6, paddingHorizontal: 16, paddingTop: 10 }}>
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
@@ -479,24 +474,12 @@ function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
           accessibilityLiveRegion="polite"
           style={{ ...fontStyle(theme), flex: 1, fontSize: 13, lineHeight: 18, color: c.fg }}
         >
-          {voice.error ?? (ready ? m.transcriptSaved : m.recordingSaved)}
+          {voice.error ?? m.recordingSaved}
         </Text>
       </View>
-      {ready ? (
-        <Text
-          numberOfLines={2}
-          style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-subtle"] }}
-        >
-          {voice.savedTranscript}
-        </Text>
-      ) : null}
       <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
         <Button label={m.discard} variant="ghost" onPress={voice.cancel} />
-        {ready ? (
-          <Button label={m.insertTranscript} variant="primary" onPress={voice.insertSaved!} />
-        ) : (
-          <Button label={m.retry} variant="primary" onPress={voice.retry} />
-        )}
+        <Button label={m.retry} variant="primary" onPress={voice.retry} />
       </View>
     </View>
   );
@@ -679,8 +662,7 @@ function AlternateSendAction(props: SessionComposerProps & { messages: ChatCompo
         onAlternateSend();
       }}
       style={({ pressed }) => ({
-        minHeight: 34,
-        paddingVertical: 6,
+        height: 34,
         paddingHorizontal: 14,
         borderRadius: 17,
         alignItems: "center",

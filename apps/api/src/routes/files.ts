@@ -1,9 +1,4 @@
-import {
-  observeWorkspaceToolGatewayMcpTransport,
-  excludeWorkspaceToolGatewayTiming,
-} from "../workspace-tool-gateway-observability";
 import { readSessionAttachmentFiles } from "@opengeni/core";
-import { createHash } from "node:crypto";
 import { ZodError } from "zod";
 import {
   CompleteFileUploadResponse,
@@ -13,7 +8,6 @@ import {
   FileListRequest,
   FileListResponse,
   FileDownloadUrlResponse,
-  MAX_INLINE_MODEL_ATTACHMENT_BYTES,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -80,8 +74,7 @@ import {
   buildWorkspaceToolGatewayMcpServer,
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
-import { parseRequestJson, parseRequestQuery } from "../http/request-body";
-import { requireWorkspaceAttachmentsAllowed } from "../http/organization-session-policy";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -142,7 +135,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
           deps,
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
-          { preset: oauthAccess.consentPreset },
         );
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
@@ -154,14 +146,12 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
         try {
           await server.connect(transport);
-          observeWorkspaceToolGatewayMcpTransport(deps.observability, transport);
           return await transport.handleRequest(c.req.raw);
         } finally {
           await Promise.allSettled([server.close(), prepared.close()]);
         }
       });
     }
-    excludeWorkspaceToolGatewayTiming();
     let access: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>;
     try {
       access = await requireAccessGrantAuthorization(c, deps, workspaceId, "files:read");
@@ -190,10 +180,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
-    // A person's upload is an attachment for the workspace's sessions; an
-    // agent's is its own output. The organization may turn attachments off.
-    if (!fileRequestAuthority.get(c.req.raw)?.agent)
-      await requireWorkspaceAttachmentsAllowed(deps, grant.accountId);
     const payload = await parseRequestJson(c, CreateFileUploadRequest);
     // An app-shot describes a screenshot; on anything else it would be text
     // the model reads about a file that shows something different.
@@ -329,9 +315,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
-    // An upload started before attachments were turned off does not finish.
-    if (!fileRequestAuthority.get(c.req.raw)?.agent)
-      await requireWorkspaceAttachmentsAllowed(deps, grant.accountId);
     const upload = await getFileUpload(db, workspaceId, c.req.param("uploadId"));
     if (!upload) {
       throw new HTTPException(404, { message: "file upload not found" });
@@ -349,10 +332,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         idempotencyKey: `file.uploaded:${workspaceId}:${file.id}`,
       });
     };
-    const completeAndRecordUsage = async (computedSha256?: string): Promise<typeof upload.file> => {
+    const completeAndRecordUsage = async (): Promise<typeof upload.file> => {
       let file: typeof upload.file;
       try {
-        file = await completeFileUpload(db, workspaceId, upload.id, { computedSha256 });
+        file = await completeFileUpload(db, workspaceId, upload.id);
       } catch (error) {
         // HEAD runs outside the DB transaction. If the expiry reaper claims the
         // row in that window, report the durable state instead of leaking an
@@ -487,25 +470,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
       );
     }
-    // Inline model delivery needs a digest that pins the bytes. When the client
-    // sent none, compute it from the stored object for every file small enough
-    // to be inlined, so a plain REST upload behaves like an SDK upload.
-    let computedSha256: string | undefined;
-    if (!upload.file.sha256 && upload.file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES) {
-      const bytes = await objectStorage.getFileBytes(upload.file);
-      if (bytes.byteLength !== upload.file.sizeBytes) {
-        const file = await rejectAndCleanObject(
-          422,
-          "uploaded object size does not match file metadata",
-          "failed",
-        );
-        return c.json(
-          CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
-        );
-      }
-      computedSha256 = createHash("sha256").update(bytes).digest("hex");
-    }
-    const file = await completeAndRecordUsage(computedSha256);
+    const file = await completeAndRecordUsage();
     return c.json(
       CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
     );
@@ -514,14 +479,11 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/files", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    const parsed = parseRequestQuery(
-      FileListRequest,
-      {
-        ...c.req.query(),
-        ...(c.req.query("limit") !== undefined ? { limit: Number(c.req.query("limit")) } : {}),
-      },
-      { status: 422, message: "Invalid file list request" },
-    );
+    const parsed = FileListRequest.safeParse({
+      ...c.req.query(),
+      ...(c.req.query("limit") !== undefined ? { limit: Number(c.req.query("limit")) } : {}),
+    });
+    if (!parsed.success) throw new HTTPException(422, { message: "Invalid file list request" });
     c.header("cache-control", "private, no-store");
     return c.json(
       FileListResponse.parse(
@@ -529,7 +491,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,
-          ...parsed,
+          ...parsed.data,
         }).catch((error: unknown) => {
           if (error instanceof ZodError)
             throw new HTTPException(422, { message: "Invalid file cursor" });

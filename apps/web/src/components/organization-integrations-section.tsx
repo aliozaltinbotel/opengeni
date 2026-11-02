@@ -54,8 +54,6 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   const [catalog, setCatalog] = useState<OrganizationIntegrationCatalog | null>(null);
   const [mode, setMode] = useState<OrganizationIntegrationPolicy["mode"]>("unrestricted");
   const [selected, setSelected] = useState<string[]>([]);
-  const [personalSetup, setPersonalSetup] =
-    useState<OrganizationIntegrationPolicy["personalIntegrationSetup"]>("members");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,7 +86,6 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
     setPolicy(value);
     setMode(value.mode);
     setSelected(value.allowedIntegrationKeys);
-    setPersonalSetup(value.personalIntegrationSetup);
   };
   async function load() {
     const accepted = claim("read");
@@ -128,7 +125,6 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
     const request = pending ?? {
       mode,
       allowedIntegrationKeys: mode === "restricted" ? [...selected].sort() : [],
-      personalIntegrationSetup: personalSetup,
       expectedRevision: policy.revision,
       operationId: crypto.randomUUID(),
     };
@@ -184,7 +180,6 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   const dirty =
     policy &&
     (mode !== policy.mode ||
-      personalSetup !== policy.personalIntegrationSetup ||
       (mode === "restricted" &&
         JSON.stringify([...selected].sort()) !==
           JSON.stringify([...policy.allowedIntegrationKeys].sort())));
@@ -209,7 +204,6 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
     if (!policy) return;
     setMode(policy.mode);
     setSelected(policy.allowedIntegrationKeys);
-    setPersonalSetup(policy.personalIntegrationSetup);
     setMessage("");
   };
   const toggle = (key: string, allowed: boolean) => {
@@ -275,25 +269,6 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
                     { value: "unrestricted", label: "All integrations" },
                     { value: "restricted", label: "Only selected" },
                   ]}
-                />
-              }
-            />
-            <SettingRow
-              label="Members can turn on integrations for their own accounts"
-              description={
-                personalSetup === "members"
-                  ? "When a member connects their own account to an allowed catalog integration, it turns on for everyone in that workspace to connect their own account. Custom connections still need an admin."
-                  : "Only admins can turn integrations on. Members can still connect their own accounts to integrations that are already on."
-              }
-              control={
-                <Switch
-                  checked={personalSetup === "members"}
-                  disabled={locked}
-                  aria-label="Members can turn on integrations for their own accounts"
-                  onCheckedChange={(next) => {
-                    setPersonalSetup(next ? "members" : "admins");
-                    setMessage("");
-                  }}
                 />
               }
             />

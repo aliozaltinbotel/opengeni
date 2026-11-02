@@ -11,8 +11,11 @@ import {
 } from "@opengeni/db";
 import { updateSessionMcpToolPermissions, type ApiRouteDeps } from "@opengeni/core";
 import { sessionMcpApprovalConnectionId } from "@opengeni/runtime";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { registerCapabilityRoutes } from "../src/routes/capabilities";

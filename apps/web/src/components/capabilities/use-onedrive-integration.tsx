@@ -1,4 +1,3 @@
-import oneDriveLogo from "@/assets/integration-logos/onedrive.svg";
 import {
   useIntegrationDefinitionRow,
   type IntegrationAdapter,
@@ -9,7 +8,8 @@ import type {
 } from "@opengeni/react/app/types";
 
 export const ONEDRIVE_DEFINITION_ID = "microsoft-onedrive";
-export const ONEDRIVE_LOGO_URL = oneDriveLogo;
+export const ONEDRIVE_LOGO_URL =
+  "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/onedrive_48x1.svg";
 
 /** Maps the OneDrive curated ApiIntegration onto the shared integration view-model. */
 export function useOneDriveIntegration({

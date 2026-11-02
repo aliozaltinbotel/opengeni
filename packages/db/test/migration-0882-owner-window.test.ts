@@ -5,7 +5,7 @@ import { sql } from "drizzle-orm";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import {
   createDb,
   createSession,

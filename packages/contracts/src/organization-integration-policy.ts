@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -16,23 +15,12 @@ const keys = /* @__PURE__ */ defineSchema(() =>
     .max(10000)
     .refine((values) => new Set(values).size === values.length, "Duplicate integration identities"),
 );
-/**
- * Who may turn on a reviewed OAuth integration for personal accounts (each
- * person then connects their own account): any member holding the personal
- * setup permission, or only integration admins. Admins are unaffected.
- */
-export const PersonalIntegrationSetupPolicy = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["members", "admins"]),
-);
-export type PersonalIntegrationSetupPolicy = z.infer<typeof PersonalIntegrationSetupPolicy>;
-
 export const OrganizationIntegrationPolicy = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       mode: z.enum(["unrestricted", "restricted"]).default("unrestricted"),
       allowedIntegrationKeys: keys.default([]),
-      personalIntegrationSetup: PersonalIntegrationSetupPolicy.default("members"),
-      revision: primitives.nonnegativeInteger.safe().default(0),
+      revision: z.number().int().nonnegative().safe().default(0),
     })
     .strict(),
 );
@@ -43,10 +31,12 @@ export const UpdateOrganizationIntegrationPolicyRequest = /* @__PURE__ */ define
     .object({
       mode: z.enum(["unrestricted", "restricted"]),
       allowedIntegrationKeys: keys,
-      /** Omitted keeps the current setting. */
-      personalIntegrationSetup: PersonalIntegrationSetupPolicy.optional(),
-      expectedRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER - 1),
-      operationId: primitives.uuid,
+      expectedRevision: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(Number.MAX_SAFE_INTEGER - 1),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );

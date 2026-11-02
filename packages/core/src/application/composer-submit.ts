@@ -42,7 +42,6 @@ export async function submitComposerDraftForRequest(
     text: input.text,
     annotations: input.annotations,
     modelContext: input.modelContext ?? null,
-    timeZone: input.timeZone ?? null,
     resources: [...input.resources, ...additionalResources],
     ...(additionalResources.length > 0 ? { composerDraftResources: input.resources } : {}),
     model: input.model,
@@ -73,7 +72,6 @@ export async function submitComposerDraftForRequest(
     receipt: result.receipt,
     routing: result.routing,
     interruptionCount: result.interruptionCount,
-    waitsForMachineOwner: result.waitsForMachineOwner,
     replay: result.replay,
   };
 }

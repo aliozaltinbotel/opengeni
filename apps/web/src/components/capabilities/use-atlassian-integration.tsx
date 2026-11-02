@@ -1,4 +1,3 @@
-import atlassianLogo from "@/assets/integration-logos/atlassian.png";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -25,7 +24,8 @@ import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callba
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
-export const ATLASSIAN_LOGO_URL = atlassianLogo;
+export const ATLASSIAN_LOGO_URL =
+  "https://wac-cdn.atlassian.com/assets/img/favicons/atlassian/favicon.png";
 
 /** Historical native sync accounts retain a removal surface; new connections use hosted MCP. */
 export function useAtlassianIntegration({

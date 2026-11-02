@@ -31,7 +31,6 @@ import { createHash } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import { requireSelectedAccount, withBillingUsageActor } from "./billing";
 import { createInFlightCoalescer } from "./insights";
-import { parseRequestQuery, requestValidationError } from "../http/request-body";
 import {
   createInsightsCredentialPartition,
   createInsightsResponseCache,
@@ -229,20 +228,14 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/insights/sites", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const query = parseRequestQuery(
-      InsightsSiteUsageQuery,
-      insightsQueryParameters(c.req.queries()),
-      {
-        status: 400,
-        message: "invalid Site Insights query",
-      },
-    );
+    const query = InsightsSiteUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
+    if (!query.success) throw new HTTPException(400, { message: "invalid Site Insights query" });
     const viewer = await siteViewerForGrant(deps.db, grant);
     const response = await insightsWithFriendlyTimeout(() =>
       getInsightsSiteUsage(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-        query,
+        query: query.data,
         viewerSubjectId: viewer.subjectId,
       }),
     );
@@ -257,11 +250,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, false, false))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = WorkspaceInsightsUsageQuery.safeParse(query);
-    if (!parsed.success)
-      throw requestValidationError(parsed.error, "query", {
-        status: 400,
-        message: "invalid Insights usage query",
-      });
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
     const scope = {
       accountId: grant.accountId,
       workspaceId,
@@ -292,11 +281,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, false, true))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = WorkspaceInsightsCallsQuery.safeParse(query);
-    if (!parsed.success)
-      throw requestValidationError(parsed.error, "query", {
-        status: 400,
-        message: "invalid Insights calls query",
-      });
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
     const scope = {
       accountId: grant.accountId,
       workspaceId,
@@ -330,11 +315,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, true, false))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = OrganizationInsightsUsageQuery.safeParse(query);
-    if (!parsed.success)
-      throw requestValidationError(parsed.error, "query", {
-        status: 400,
-        message: "invalid Insights usage query",
-      });
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
     const scope = organizationInsightsScope(context, accountId);
     const response = await withBillingUsageActor(deps, context, accountId, () =>
       cached(
@@ -360,11 +341,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!insightsRawQuerySupported(query, true, true))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
     const parsed = OrganizationInsightsCallsQuery.safeParse(query);
-    if (!parsed.success)
-      throw requestValidationError(parsed.error, "query", {
-        status: 400,
-        message: "invalid Insights calls query",
-      });
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
     const scope = organizationInsightsScope(context, accountId);
     // Call readers intersect these canonical grants with current actor visibility.
     const response = await withBillingUsageActor(deps, context, accountId, () =>

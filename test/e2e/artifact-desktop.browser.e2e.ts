@@ -2,8 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess } from "@opengeni/testing/process";
+import { freePort, startProcess } from "@opengeni/testing";
 
 test("expanded Sites keep desktop navigation clear of native controls", async () => {
   const port = await freePort();

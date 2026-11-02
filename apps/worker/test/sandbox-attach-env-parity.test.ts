@@ -20,7 +20,7 @@
 import { describe, expect, test } from "bun:test";
 import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import type { ConnectionCredentialsPort, ResourceRef } from "@opengeni/contracts";
 import { mintRunGitToken, sandboxEnvironmentForRun } from "../src/activities/environment";
 

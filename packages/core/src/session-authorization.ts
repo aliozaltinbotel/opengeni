@@ -2,13 +2,8 @@ import {
   canonicalSessionAuthorizationOperation,
   SessionAuthorizationActor,
   SessionAuthorizationDecision,
-  SessionCreateDecision,
   SessionAuthorizationListScope,
   type AccessGrant,
-  type AuthorizeSessionCreateInput,
-  type SessionCreateCreator,
-  type SessionCreateRequestCorrelation,
-  type SessionAuthorizationPort,
   type SessionAgentAccess,
   type SessionAgentAccessViewer,
   type SessionAuthorizationOperation,
@@ -21,8 +16,6 @@ import {
   currentSessionRlsActorIdentityKey,
   currentSiteViewerRlsContext,
   getSessionAuthorizationFacts,
-  getSessionAuthorizationFactsBatch,
-  isTransactionHandle,
   withSessionRlsActorContext,
   type Database,
   type SessionAuthorizationFacts,
@@ -118,9 +111,6 @@ export class SessionAuthorizationDeniedError extends Error {
   }
 }
 
-/** A target-free create refusal keeps its HTTP contract distinct from hidden target denial. */
-export class SessionCreateAuthorizationDeniedError extends SessionAuthorizationDeniedError {}
-
 export class SessionAuthorizationUnavailableError extends Error {
   readonly code = "SESSION_AUTHORIZATION_UNAVAILABLE";
 
@@ -195,9 +185,6 @@ export function agentAccessListScopeForViewer(
   }
   if (!hostScope || hostScope.kind === "all") {
     return { kind: "all", agentAccessViewer: viewer };
-  }
-  if (hostScope.kind === "owned" || hostScope.kind === "owned_or_shared") {
-    return { kind: hostScope.kind, subjectId: hostScope.subjectId, agentAccessViewer: viewer };
   }
   return {
     kind: "scoped",
@@ -296,65 +283,13 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const reads = claimSessionAuthorizationReads();
+  const port = deps.sessionAuthorization;
+  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   const claims = agentAttemptClaims(grant);
   // One scoped read returns the target's authority, its Slack ownership and,
   // for an agent attempt, the caller session and its live turn. Every check
   // below decides from these facts; none of them reads again.
   const facts = await readSessionAuthorizationFacts(deps.db, grant, input.sessionId, claims, reads);
-  return await authorizeSessionFromFacts(deps, grant, input, claims, facts);
-}
-
-/**
- * One fresh fact read for a response window, followed by the same per-target
- * checks and host callbacks as single-session authorization. No facts supplied
- * by callers and no reuse across windows or subsequent visibility checks.
- */
-export async function requireSessionAuthorizations(
-  deps: SessionAuthorizationDependencies,
-  grant: AccessGrant,
-  input: {
-    sessionIds: readonly string[];
-    operation: SessionAuthorizationOperation;
-    surface: SessionAuthorizationSurface;
-  },
-): Promise<PromiseSettledResult<ResolvedSessionAuthorization | null>[]> {
-  const claims = agentAttemptClaims(grant);
-  const facts = await getSessionAuthorizationFactsBatch(deps.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    sessionIds: input.sessionIds,
-    caller: claims ? { sessionId: claims.callerSessionId, attemptId: claims.attemptId } : undefined,
-  });
-  const authorize = (sessionId: string) =>
-    authorizeSessionFromFacts(deps, grant, { ...input, sessionId }, claims, facts.get(sessionId)!);
-  if (!isTransactionHandle(deps.db))
-    return await Promise.allSettled(input.sessionIds.map(authorize));
-  // Site and host callbacks can establish nested scopes. An already pinned
-  // transaction must not overlap their savepoints or scope restoration.
-  const decisions: PromiseSettledResult<ResolvedSessionAuthorization | null>[] = [];
-  for (const sessionId of input.sessionIds) {
-    try {
-      decisions.push({ status: "fulfilled", value: await authorize(sessionId) });
-    } catch (reason) {
-      decisions.push({ status: "rejected", reason });
-    }
-  }
-  return decisions;
-}
-
-async function authorizeSessionFromFacts(
-  deps: SessionAuthorizationDependencies,
-  grant: AccessGrant,
-  input: {
-    sessionId: string;
-    operation: SessionAuthorizationOperation;
-    surface: SessionAuthorizationSurface;
-  },
-  claims: AgentAttemptClaims | null,
-  facts: SessionAuthorizationFacts,
-): Promise<ResolvedSessionAuthorization | null> {
-  const port = deps.sessionAuthorization;
-  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   const authority = facts.target;
   const slackAccess = authority?.slackAccess ?? null;
 
@@ -421,8 +356,6 @@ async function authorizeSessionFromFacts(
   const target: SessionAuthorizationTarget = {
     sessionId: authority.sessionId,
     rootSessionId: authority.rootSessionId,
-    ownerSubjectId: authority.ownerSubjectId,
-    visibility: authority.visibility,
   };
   const agentRelatedSessionAccess =
     actor.kind === "agent_attempt"
@@ -515,94 +448,6 @@ async function authorizeSessionFromFacts(
   };
 }
 
-/** Bound host calls even when an in-process embedding port never settles. */
-export async function withSessionCreateHostDeadline<T>(call: () => Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      call(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new SessionAuthorizationUnavailableError()), 5_000);
-      }),
-    ]);
-  } catch {
-    // Create hooks may read private credentials; never retain host error payloads.
-    throw new SessionAuthorizationUnavailableError();
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-/**
- * The host's target-free check before every session create. Without a bound
- * port or its optional creation methods, nothing is asked. The actor is resolved as for
- * every other check; a refusal throws SessionAuthorizationDeniedError, a
- * throw or an unreadable answer SessionAuthorizationUnavailableError.
- */
-export async function requireSessionCreateAuthorization(
-  deps: SessionAuthorizationDependencies,
-  grant: AccessGrant,
-  surface: SessionAuthorizationSurface,
-  configuredServers: readonly { id: string }[] = [],
-  requestCreator?: SessionCreateCreator,
-  creationRequest?: SessionCreateRequestCorrelation,
-): Promise<
-  | {
-      actor: SessionAuthorizationActor;
-      creator: SessionCreateCreator;
-      decision: Extract<SessionCreateDecision, { allowed: true }>;
-    }
-  | undefined
-> {
-  const port = deps.sessionAuthorization;
-  if (!port?.authorizeSessionCreate && !port?.sessionCreated) return;
-  const principalKind = grant.principalKind ?? null;
-  if (
-    requestCreator &&
-    (requestCreator.principalKind !== principalKind ||
-      (requestCreator.readCredential && principalKind !== "human_session"))
-  )
-    throw new SessionAuthorizationUnavailableError();
-  const creator = requestCreator ?? { principalKind };
-  const reads = claimSessionAuthorizationReads();
-  const claims = agentAttemptClaims(grant);
-  const facts = claims
-    ? await readSessionAuthorizationFacts(deps.db, grant, claims.callerSessionId, claims, reads)
-    : null;
-  const { actor } = resolveSessionAuthorizationActor(grant, claims, facts);
-  const decision = await authorizeSessionCreateForActor(
-    port,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId, actor, surface, creator,
-      ...(creationRequest ? { creationRequest } : {}) },
-    configuredServers,
-  );
-  return { actor, decision, creator };
-}
-
-/** Native accepted-work writers already hold their authenticated service/attempt actor. */
-export async function authorizeSessionCreateForActor(
-  port: SessionAuthorizationPort,
-  input: AuthorizeSessionCreateInput,
-  configuredServers: readonly { id: string }[],
-): Promise<Extract<SessionCreateDecision, { allowed: true }>> {
-  const authorizeCreate = port.authorizeSessionCreate;
-  let rawDecision: unknown;
-  try {
-    rawDecision = authorizeCreate
-      ? await withSessionCreateHostDeadline(() => authorizeCreate.call(port, input))
-      : { allowed: true };
-  } catch (error) {
-    throw new SessionAuthorizationUnavailableError({ cause: error });
-  }
-  const parsed = SessionCreateDecision.safeParse(rawDecision);
-  if (!parsed.success) throw new SessionAuthorizationUnavailableError({ cause: parsed.error });
-  if (!parsed.data.allowed) throw new SessionCreateAuthorizationDeniedError(parsed.data.reason);
-  const configuredIds = new Set(configuredServers.map((server) => server.id));
-  if (parsed.data.requiredToolServers?.some((server) => !configuredIds.has(server.id)))
-    throw new SessionAuthorizationUnavailableError();
-  return parsed.data;
-}
-
 /** Resolve the host's complete current list scope for an in-database query. */
 export async function requireSessionAuthorizationListScope(
   deps: SessionAuthorizationDependencies,
@@ -651,13 +496,11 @@ export async function requireSessionAuthorizationListScope(
   const hostScope: SessionAuthorizationListScope =
     parsed.data.kind === "all"
       ? { kind: "all" }
-      : parsed.data.kind === "owned" || parsed.data.kind === "owned_or_shared"
-        ? { kind: parsed.data.kind, subjectId: parsed.data.subjectId }
-        : {
-            kind: "scoped",
-            rootSessionIds: [...new Set(parsed.data.rootSessionIds)],
-            sessionIds: [...new Set(parsed.data.sessionIds)],
-          };
+      : {
+          kind: "scoped",
+          rootSessionIds: [...new Set(parsed.data.rootSessionIds)],
+          sessionIds: [...new Set(parsed.data.sessionIds)],
+        };
   return viewer ? agentAccessListScopeForViewer(viewer, hostScope) : hostScope;
 }
 

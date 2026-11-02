@@ -42,8 +42,11 @@ import {
   availableSlackBotConnectionMetadata,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createApp } from "../src/app";
 import {
   createSlackFilesListCursor,

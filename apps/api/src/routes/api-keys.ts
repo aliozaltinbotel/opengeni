@@ -11,7 +11,6 @@ import {
   type ApiKey,
   type OrganizationApiKeyAccess,
 } from "@opengeni/contracts";
-import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import {
   createApiKey,
   createOrganizationApiKey as createOrganizationApiKeyRecord,
@@ -43,7 +42,6 @@ import {
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
-import { requireNativeOrganizationMutation } from "../http/organization-governance";
 
 export { organizationApiKeyAccess } from "@opengeni/core";
 
@@ -123,7 +121,6 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
       const permissions: Permission[] =
         body.permissions.length > 0 ? (body.permissions as Permission[]) : ["workspace:read"];
       ensureDelegablePermissions(authorization, permissions);
-      await requireNativeOrganizationMutation(deps, grant.accountId, "api_key.create");
       await requireLimit(deps, {
         accountId: grant.accountId,
         workspaceId,
@@ -148,8 +145,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/api-keys/:apiKeyId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireWorkspaceApiKeyControl(c, deps, workspaceId);
-    await requireNativeOrganizationMutation(deps, authorization.grant.accountId, "api_key.revoke");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
 
@@ -192,7 +188,6 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         !body.policy,
       );
-      await requireNativeOrganizationMutation(deps, organizationId, "api_key.create");
       try {
         const apiKey = await createOrganizationApiKeyRecord(deps.db, {
           accountId: organizationId,
@@ -241,7 +236,6 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
       requireOrganizationApiKeyControlPermission(context, organizationId);
       const body = c.req.valid("json");
       if (body.policy) ensureOrganizationPolicyDelegable(context, body.policy);
-      await requireNativeOrganizationMutation(deps, organizationId, "api_key.update");
       try {
         const apiKey = await updateOrganizationApiKey(
           deps.db,
@@ -264,7 +258,6 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     const context = await requireAccessContext(c, deps);
     requireOrganizationApiKeyControlPermission(context, organizationId);
-    await requireNativeOrganizationMutation(deps, organizationId, "api_key.revoke");
     const apiKey = await revokeOrganizationApiKey(deps.db, organizationId, c.req.param("apiKeyId"));
     if (!apiKey) {
       throw new HTTPException(404, { message: "API key not found" });
@@ -324,9 +317,7 @@ function ensureDelegablePermissions(
       message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
     });
   }
-  const missing = requested.filter(
-    (permission) => !permissionSetCovers(grantPermissions, permission),
-  );
+  const missing = requested.filter((permission) => !grantPermissions.includes(permission));
   if (missing.length > 0) {
     throw new HTTPException(403, {
       message: `cannot delegate missing permissions: ${missing.join(", ")}`,
@@ -346,9 +337,7 @@ function ensureOrganizationPolicyDelegable(
   const requested = legacy
     ? Permission.options.filter((permission) => hasPermission(policy.permissions, permission))
     : policy.permissions;
-  // A source policy stored before `connections:personal` existed covers it
-  // through `connections:write`.
-  if (requested.some((permission) => !permissionSetCovers(source.permissions, permission)))
+  if (requested.some((permission) => !source.permissions.includes(permission)))
     throw new HTTPException(403, {
       message: "cannot delegate permissions beyond organization key policy",
     });

@@ -1,9 +1,9 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { readFileSync } from "node:fs";
 import {
   candidateManifest,
   consumerManifest,
@@ -133,9 +133,10 @@ describe("registry dependency export smoke", () => {
     });
   });
 
-  test("historical workflow fixture: CI exercises regression; release checks registry closure only after publication reconciliation", () => {
+  test("CI exercises regression; release checks registry closure only after publication reconciliation", () => {
     type Workflow = { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> };
-    const ci = parse(readRetiredWorkflow("ci.yml")) as Workflow;
+    const workflows = join(import.meta.dir, "../.github/workflows");
+    const ci = parse(readFileSync(join(workflows, "ci.yml"), "utf8")) as Workflow;
     expect(
       ci.jobs["package-contracts"]!.steps.some(
         (step) =>
@@ -144,7 +145,7 @@ describe("registry dependency export smoke", () => {
       ),
     ).toBe(true);
     const publication = parse(
-      readRetiredWorkflow("publish-packages.yml"),
+      readFileSync(join(workflows, "publish-packages.yml"), "utf8"),
     ) as Workflow;
     const steps = publication.jobs.publish!.steps;
     const reconcile = steps.findIndex(

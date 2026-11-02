@@ -10,9 +10,12 @@ import {
   settleConnectedMachineSessionBackgroundCommand,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   CommandReadResult,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -326,7 +329,7 @@ async function createLiveAttempt(message: string) {
 }
 
 describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory event bus)", () => {
-  test("session_wait needs sessions:read; the command tools also need a session", () => {
+  test("registers only for session-scoped grants holding sessions:read", () => {
     const sessionScoped = buildOpenGeniMcpServer(fakeDeps(new MemoryEventBus()), grant);
     expect(registeredToolNames(sessionScoped)).toContain("session_wait");
     expect(registeredToolNames(sessionScoped)).toContain("command_wait");
@@ -341,8 +344,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       metadata: metadataWithoutSession,
     });
     expect(registeredToolNames(noSession)).toContain("session_events");
-    // A sessionless caller waits on named sessions only.
-    expect(registeredToolNames(noSession)).toContain("session_wait");
+    expect(registeredToolNames(noSession)).not.toContain("session_wait");
     expect(registeredToolNames(noSession)).not.toContain("command_wait");
     expect(registeredToolNames(noSession)).not.toContain("command_read");
 

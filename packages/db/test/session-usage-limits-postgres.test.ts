@@ -4,7 +4,7 @@ import {
   acquireRestrictedRuntimeTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+} from "@opengeni/testing";
 import { dbSearchPath } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {

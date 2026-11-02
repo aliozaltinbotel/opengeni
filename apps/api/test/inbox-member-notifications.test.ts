@@ -14,8 +14,11 @@ import {
   type DbClient,
   type InboxItemRow,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 
 import { registerNotificationTools } from "../src/mcp/notification-tools";
 import { itemsWithUnavailableSession, presentInboxItem } from "../src/routes/inbox";

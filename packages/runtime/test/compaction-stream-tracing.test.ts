@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { OpenAIResponsesModel, type ModelRequest } from "@openai/agents";
 import { configuredProviders } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import type OpenAI from "openai";
 import { requestRemoteCompactionV2 } from "../src/index";
 

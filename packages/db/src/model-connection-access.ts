@@ -33,9 +33,7 @@ export type ModelConnectionKind =
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper"
-  | "openai"
-  | "azure_openai";
+  | "opper";
 export type ModelConnectionTarget = {
   accountId: string;
   workspaceId: string | null;
@@ -75,10 +73,6 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
       condition: sql`account_id = ${target.accountId}::uuid AND provider_kind = ${target.kind} AND status = 'active'
         AND ${target.connectionId === "current" ? sql`true` : sql`id::text = ${target.connectionId}`}`,
     };
-  // Workspace OpenAI and Azure OpenAI keep their exact direct-connection rail;
-  // only the organization connection has an access policy of this kind.
-  if (target.kind === "openai" || target.kind === "azure_openai")
-    throw new Error("OpenAI access policies exist only for organization connections");
   return {
     table: sql.identifier("connections"),
     condition: sql`account_id = ${target.accountId}::uuid AND workspace_id = ${target.workspaceId}::uuid

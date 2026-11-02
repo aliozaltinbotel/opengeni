@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -25,8 +24,8 @@ type CiJob = Readonly<{
 }>;
 
 describe("artifact runtime workflow contract", () => {
-  test("historical workflow fixture: required package contracts prepare the real report runtime and fail closed on PostgreSQL", async () => {
-    const source = readRetiredWorkflow("ci.yml");
+  test("required package contracts prepare the real report runtime and fail closed on PostgreSQL", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
     const parsed = Bun.YAML.parse(source) as { jobs: Record<string, CiJob> };
     const job = parsed.jobs["package-contracts"]!;
     expect(job.if).toContain("needs.plan.outputs.build_count != '0'");
@@ -90,8 +89,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     );
   });
 
-  test("historical workflow fixture: retains canonical mismatch diagnostics without bypassing the required byte gate", async () => {
-    const source = readRetiredWorkflow("ci.yml");
+  test("retains canonical mismatch diagnostics without bypassing the required byte gate", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
     const parsed = Bun.YAML.parse(source) as { permissions: unknown; jobs: Record<string, CiJob> };
     const steps = parsed.jobs["package-contracts"]!.steps!;
     const rebuildIndex = steps.findIndex(
@@ -113,8 +112,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     expect(upload.with?.name).toContain("github.event.pull_request.head.sha");
   });
 
-  test("historical workflow fixture: aggregates only eight OS-smoked targets and proves both OCI architectures", async () => {
-    const source = readRetiredWorkflow("artifact-runtime.yml");
+  test("aggregates only eight OS-smoked targets and proves both OCI architectures", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/artifact-runtime.yml"), "utf8");
     const parsed = Bun.YAML.parse(source) as {
       permissions: Record<string, string>;
       jobs: Record<string, { needs?: string[]; strategy?: { failFast?: boolean } }>;
@@ -137,10 +136,10 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     expect(parsed.jobs.aggregate?.needs).toEqual(["native", "musl", "wasm"]);
   });
 
-  test("historical workflow fixture: CI and immutable candidate consume only the run-local verified bundle", async () => {
+  test("CI and immutable candidate consume only the run-local verified bundle", async () => {
     const [ci, candidate] = await Promise.all([
-      readRetiredWorkflow("ci.yml"),
-      readRetiredWorkflow("release-candidate.yml"),
+      readFile(resolve(root, ".github/workflows/ci.yml"), "utf8"),
+      readFile(resolve(root, ".github/workflows/release-candidate.yml"), "utf8"),
     ]);
     for (const source of [ci, candidate]) {
       expect(source).toContain("uses: ./.github/workflows/artifact-runtime.yml");
@@ -162,8 +161,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     }
   });
 
-  test("historical workflow fixture: pins PR runtime production and every runtime consumer to the exact head", async () => {
-    const source = readRetiredWorkflow("ci.yml");
+  test("pins PR runtime production and every runtime consumer to the exact head", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
     const parsed = Bun.YAML.parse(source) as { jobs: Record<string, CiJob> };
 
     expect(parsed.jobs["artifact-runtime"]?.with?.source_sha).toBe(exactCiSource);
@@ -221,8 +220,11 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     expect(desktopBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
   });
 
-  test("historical workflow fixture: desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {
-    const source = readRetiredWorkflow("publish-desktop-image.yml");
+  test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {
+    const source = await readFile(
+      resolve(root, ".github/workflows/publish-desktop-image.yml"),
+      "utf8",
+    );
     const parsed = Bun.YAML.parse(source) as {
       jobs: Record<
         string,

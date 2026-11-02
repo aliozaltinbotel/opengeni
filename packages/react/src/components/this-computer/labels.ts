@@ -214,10 +214,6 @@ export function defaultThisComputerLabels(
           return t("thisComputer.error.busy");
         case "connect_failed":
           return t("thisComputer.error.connectFailed");
-        case "removed":
-          return t("thisComputer.error.removed");
-        case "signed_out":
-          return t("thisComputer.error.signedOut");
         default:
           return detail ?? t("thisComputer.error.other");
       }

@@ -16,8 +16,6 @@ import {
 export type LearningRefusalActions = {
   /** Opens the place where the person can make the change themselves. */
   onOpen?: ((place: LearningRefusalPlace) => void) | undefined;
-  /** Whether the app offers that place; a place it does not offer gets no link. Default: all. */
-  canOpen?: ((place: LearningRefusalPlace) => boolean) | undefined;
 };
 
 const LearningRefusalActionsContext = createContext<LearningRefusalActions>({});
@@ -42,9 +40,8 @@ export function LearningRefusalActionsProvider({
 export function LearningRefusalRow({ refusal }: { refusal: LearningRefusal }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const { onOpen, canOpen } = useContext(LearningRefusalActionsContext);
-  const found = learningRefusalPlace(refusal);
-  const place = found && (canOpen?.(found) ?? true) ? found : null;
+  const { onOpen } = useContext(LearningRefusalActionsContext);
+  const place = learningRefusalPlace(refusal);
   return (
     <div
       className={cn(

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS,
   CODEX_PLAN_ENTITLEMENT_MAX_MODELS,

@@ -146,7 +146,7 @@ export async function getSubscriptionCoreClaudeWorkspaceProjection(
             projectSubscriptionCoreClaudeAccount(
               entry.row,
               entry.source,
-              entry.row.allocator_enabled,
+              entry.row.allocator_enabled && entry.poolAllocatorEnabled,
             ),
           ),
           ...view.personal.map((row) => {
@@ -174,13 +174,9 @@ export async function getSubscriptionCoreClaudeOrganizationProjection(
   const pool = await readSubscriptionCoreOrganizationPool(db, SUBSCRIPTION_CORE_CLAUDE, input);
   return {
     source: "organization",
-    accounts: (pool?.rows ?? []).map((row) => {
-      const reach = pool?.reach.get(row.id);
-      return {
-        ...projectSubscriptionCoreClaudeAccount(row, "organization"),
-        ...(reach ? { reach } : {}),
-      };
-    }),
+    accounts: (pool?.rows ?? []).map((row) =>
+      projectSubscriptionCoreClaudeAccount(row, "organization"),
+    ),
     activeCredentialId: pool?.primaryConnectionId ?? null,
     rotationEnabled: pool ? pool.rotationMode === "spread" : false,
   };

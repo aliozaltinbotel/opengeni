@@ -9,8 +9,7 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import { acquireOwnerMigratedTestDatabase, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import { registerWorkspaceArtifactRoutes } from "../src/routes/workspace-artifacts";
 

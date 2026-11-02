@@ -5,14 +5,15 @@ import type {
   ImportArchivedSessionResponse,
   Permission,
   SessionEvent,
-  SessionAuthorizationPort,
-  SessionCreateCreator,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { createDb, createOrganizationApiKey, createWorkspace, type DbClient } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import type { Hono } from "hono";
 import { createApp } from "../src/app";
 
@@ -30,10 +31,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(
-  permissions: Permission[] = ["workspace:admin", "members:manage"],
-  sessionAuthorization?: SessionAuthorizationPort,
-) {
+async function fixture(permissions: Permission[] = ["workspace:admin", "members:manage"]) {
   if (!shared) throw new Error("PostgreSQL unavailable");
   const [account] = await shared.admin`
     insert into managed_accounts (name) values ('History import API fixture') returning id`;
@@ -57,7 +55,6 @@ async function fixture(
   const deps = {
     db: client.db,
     bus,
-    ...(sessionAuthorization ? { sessionAuthorization } : {}),
     managedAuth: null,
     settings: testSettings({ productAccessMode: "managed", sandboxBackend: "none" }),
     workflowClient: new Proxy(
@@ -271,32 +268,4 @@ describe("archived import API with durable PostgreSQL history", () => {
       await shared.admin`select count(*)::int as count from session_turns where session_id=${imported.session.id}`;
     expect(turns!.count).toBe(0);
   }, 60_000);
-});
-
-test("integration import retains exact non-human creator provenance across both hooks", async () => {
-  let creator: SessionCreateCreator | undefined;
-  const phases: string[] = [];
-  const f = await fixture(["sessions:create"], {
-    authorizeSession: async () => ({ allowed: true }),
-    resolveListScope: async () => ({ kind: "all" }),
-    authorizeSessionCreate: async (input) => {
-      creator = input.creator;
-      expect(creator).toEqual({ principalKind: "api_key" });
-      phases.push("before");
-      return { allowed: true };
-    },
-    sessionCreated: async (input) => {
-      expect(input.creator).toBe(creator);
-      expect(input.creator?.readCredential).toBeUndefined();
-      phases.push("after");
-    },
-  });
-  const response = await post(f.app, f.base, f.headers, {
-    importId: crypto.randomUUID(),
-    title: "Imported history",
-    createdAt,
-    events: [initialEvent],
-  });
-  expect(response.status).toBe(201);
-  expect(phases).toEqual(["before", "after"]);
 });

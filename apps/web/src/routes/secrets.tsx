@@ -81,15 +81,7 @@ export type SecretsVaultView = "availability" | "new-item";
 export type SecretsItemView = "edit";
 export type SecretsConnectionView = "choose-vaults" | "replace-token";
 
-const CREATABLE_TYPES = [
-  "login",
-  "api_key",
-  "note",
-  "card",
-  "identity",
-  "ssh_key",
-  "file",
-] as const;
+const CREATABLE_TYPES = ["login", "api_key", "note", "file"] as const;
 type CreatableType = (typeof CREATABLE_TYPES)[number];
 
 export function parseCreatableType(value: unknown): CreatableType | undefined {
@@ -579,7 +571,6 @@ export function SecretsRoute({
     page = (
       <ItemRoute
         key={`${vault.id}/${itemId}`}
-        workspaceId={workspaceId}
         vault={vault}
         vaults={list}
         itemId={itemId}
@@ -859,7 +850,6 @@ function usePersonName(workspaceId: string, enabled = true): (subjectId: string)
 }
 
 function ItemRoute({
-  workspaceId,
   vault,
   vaults,
   itemId,
@@ -871,7 +861,6 @@ function ItemRoute({
   onOpenVault,
   onChanged,
 }: {
-  workspaceId: string;
   vault: VaultSummary;
   vaults: VaultSummary[];
   itemId: string;
@@ -966,7 +955,6 @@ function ItemRoute({
         canUse={canUse}
         personName={personName}
         transfer={transfer}
-        workspaceId={workspaceId}
         actions={{
           back: onBack,
           edit: () => onOpenItem(vault.id, item.id, { view: "edit" }),

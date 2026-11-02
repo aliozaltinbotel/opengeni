@@ -1,4 +1,3 @@
-import { isRetiredNativeGoogleDriveSource } from "@opengeni/contracts/google-drive-native-retirement";
 import { isRetiredNativeAtlassianSource } from "@opengeni/contracts/atlassian-native-retirement";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
@@ -26,7 +25,7 @@ export async function createKnowledgeSourceAttemptTools(input: {
   });
   const source = accepted?.task.agentConfig.knowledgeSource;
   if (!accepted || !source || accepted.task.action.kind !== "agent_turn") return [];
-  if (isRetiredNativeGoogleDriveSource(source) || isRetiredNativeAtlassianSource(source)) return [];
+  if (isRetiredNativeAtlassianSource(source)) return [];
   const actor = input.context.actor;
   const authorize = async () => {
     const current = await freezeAgentLearningPolicy(input.db, input.context);

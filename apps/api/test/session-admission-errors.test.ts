@@ -10,13 +10,8 @@ import {
   canonicalConfiguredModel,
   modelUnavailableHttpException,
 } from "../../../packages/core/src/domain/sessions";
-import { mcpAccountBindingsFromVisibleConnections } from "../../../packages/core/src/domain/mcp-account-bindings";
 import { createApp } from "../src/app";
-import {
-  ClientSessionEvent,
-  SteerSessionMessageRequest,
-} from "../../../packages/contracts/src/index";
-import { parseRequestBody } from "../src/http/request-body";
+import { parseSessionEventAdmission, parseSteerSessionAdmission } from "../src/routes/sessions";
 
 const workspaceId = "00000000-0000-4000-8000-000000000082";
 const sessionId = "00000000-0000-4000-8000-000000000084";
@@ -53,20 +48,10 @@ function app() {
 function parserApp() {
   const server = app();
   server.post("/v1/test/session-event-admission", async (c) =>
-    c.json(
-      parseRequestBody(ClientSessionEvent, await c.req.json().catch(() => null), {
-        status: 422,
-        message: "invalid session event",
-      }),
-    ),
+    c.json(parseSessionEventAdmission(await c.req.json().catch(() => null))),
   );
   server.post("/v1/test/session-steer-admission", async (c) =>
-    c.json(
-      parseRequestBody(SteerSessionMessageRequest, await c.req.json().catch(() => null), {
-        status: 422,
-        message: "invalid steer request",
-      }),
-    ),
+    c.json(parseSteerSessionAdmission(await c.req.json().catch(() => null))),
   );
   return server;
 }
@@ -204,13 +189,8 @@ describe("session admission error envelope", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        // The field is named; the private value is not echoed.
-        message: 'invalid session event: payload: Unrecognized key: "tools"',
+        message: "invalid session event",
         retryable: false,
-        details: {
-          code: "invalid_request_body",
-          issues: [{ path: "payload", message: 'Unrecognized key: "tools"' }],
-        },
       },
     });
     expectRequestId(invalid, invalidBody, headers[OPENGENI_CORRELATION_HEADER]);
@@ -227,7 +207,7 @@ describe("session admission error envelope", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        message: expect.stringMatching(/^invalid session event: request: /),
+        message: "invalid session event",
         retryable: false,
       },
     });
@@ -250,12 +230,8 @@ describe("session admission error envelope", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        message: 'invalid steer request: request: Unrecognized key: "tools"',
+        message: "invalid steer request",
         retryable: false,
-        details: {
-          code: "invalid_request_body",
-          issues: [{ path: "", message: 'Unrecognized key: "tools"' }],
-        },
       },
     });
     expectRequestId(response, body, correlationId);
@@ -275,11 +251,7 @@ describe("session admission error envelope", () => {
     expect(response.status).toBe(422);
     const body = await response.json();
     expect(body).toMatchObject({
-      error: {
-        code: "validation_failed",
-        message: 'invalid steer request: request: Unrecognized key: "tools"',
-        retryable: false,
-      },
+      error: { code: "validation_failed", message: "invalid steer request", retryable: false },
     });
     expectRequestId(response, body, correlationId);
   });
@@ -296,12 +268,12 @@ describe("session admission error envelope", () => {
             type: "user.message",
             payload: { text: "hello", tools: [{ kind: "mcp", id: privateValue }] },
           },
-          'invalid session event: payload: Unrecognized key: "tools"',
+          "invalid session event",
         ],
         [
           "/v1/test/session-steer-admission",
           { text: "steer", tools: [{ kind: "mcp", id: privateValue }] },
-          'invalid steer request: request: Unrecognized key: "tools"',
+          "invalid steer request",
         ],
       ] as const) {
         const response = await server.request(path, {
@@ -338,44 +310,5 @@ describe("session admission error envelope", () => {
       },
     );
     expect(response.status).toBe(401);
-  });
-});
-
-test("a removed connector selection reaches clients as a typed recovery refusal", async () => {
-  const server = app();
-  const removedId = "00000000-0000-4000-8000-000000000099";
-  server.post("/v1/test/stale-connector-account", () => {
-    mcpAccountBindingsFromVisibleConnections({
-      accountId: workspaceId,
-      workspaceId,
-      subjectId: "sender",
-      servers: [
-        {
-          id: "mail",
-          url: "https://mail.example.test/mcp",
-          cacheToolsList: false,
-          connectionRef: { providerDomain: "mail.example.test", kind: "oauth2" },
-        },
-      ],
-      connections: [],
-      selections: [{ serverId: "mail", connectionId: removedId }],
-    });
-    throw new Error("stale account unexpectedly accepted");
-  });
-  const response = await server.request("/v1/test/stale-connector-account", { method: "POST" });
-  expect(response.status).toBe(422);
-  expect(await response.json()).toMatchObject({
-    error: {
-      code: "validation_failed",
-      retryable: false,
-      message:
-        "A selected connector account is unavailable. Review your connected accounts before sending again.",
-      details: {
-        code: "connection_account_selection_unavailable",
-        version: 1,
-        reason: "selected_account_unavailable",
-        accounts: [{ serverId: "mail", connectionId: removedId, reason: "account_not_visible" }],
-      },
-    },
   });
 });

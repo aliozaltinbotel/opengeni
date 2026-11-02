@@ -4,7 +4,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   type ScheduledTask,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEventsForTurnAttempt,

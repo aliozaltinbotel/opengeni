@@ -10,7 +10,6 @@ import {
   flush,
   registerDom,
   renderHook,
-  withVirtualClock,
 } from "../../../../../packages/react/test/render-hook";
 import {
   clearSharedQueries,
@@ -24,8 +23,6 @@ const defaults: OrganizationModelDefaults = {
   allowedProviders: null,
   allowedModels: null,
   modelCompactionThresholds: {},
-  realtimeVoice: {},
-  realtimeDefaultModel: null,
   updatedAt: null,
 };
 const workspaceSettings = { workspaceId: "workspace-a", version: 1 };
@@ -44,12 +41,7 @@ function makeClient() {
     ),
     getBilling: mock(async (_options: { accountId: string }) => ({
       mode: "stripe",
-      balance: {
-        balanceMicros: 12_400_000,
-        currency: "usd",
-        plan: null,
-        promotionDecision: "held",
-      },
+      balance: { balanceMicros: 12_400_000, currency: "usd", plan: null },
     })),
   };
 }
@@ -67,7 +59,7 @@ mock.module("sonner", () => ({ toast: { error: mock(() => undefined) } }));
 const { useOrganizationModelDefaults } = await import("./use-organization-model-defaults");
 const { useModelAccountSettingsOverview, useWorkspaceModelAccountSettings } =
   await import("./model-account-settings");
-const { useOpenGeniCredits } = await import("@/lib/opengeni-credits");
+const { useOpenGeniCredits } = await import("./opengeni-credits-row");
 
 registerDom();
 let release: () => void;
@@ -101,7 +93,6 @@ function useReads({
 test("supporting Models reads survive revisits and all respond to the Models refresh prefix", async () => {
   const first = await renderHook(useReads, {});
   expect(first.result.current.credits.balanceLabel).toBe("$12.40 left");
-  expect(first.result.current.credits.promotionDecision).toBe("held");
   await first.unmount();
   const second = await renderHook(useReads, {});
   try {
@@ -153,7 +144,6 @@ test("disabled readers and lost billing permissions do not expose retained rows"
     expect(hook.result.current.overview.overview).toBeNull();
     expect(hook.result.current.workspace.settings).toBeNull();
     expect(hook.result.current.credits.balanceLabel).toBeNull();
-    expect(hook.result.current.credits.promotionDecision).toBeUndefined();
     expect(client.getBilling).toHaveBeenCalledTimes(1);
   } finally {
     await hook.unmount();
@@ -170,53 +160,6 @@ test("credit confirmations refresh only the matching organization's retained bal
   } finally {
     await hook.unmount();
   }
-});
-
-test("visible credit readers share one minute refresh and reconcile reviews after a hidden tab resumes", async () => {
-  await withVirtualClock(async () => {
-    let decision = "eligible";
-    client.getBilling.mockImplementation(async () => ({
-      mode: "stripe",
-      balance: {
-        balanceMicros: 12_400_000,
-        currency: "usd",
-        plan: null,
-        promotionDecision: decision,
-      },
-    }));
-    const visibility = (state: "visible" | "hidden") => {
-      Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
-      document.dispatchEvent(new Event("visibilitychange"));
-    };
-    visibility("visible");
-    const banner = await renderHook(() => useOpenGeniCredits("organization-a"), {});
-    const settings = await renderHook(() => useOpenGeniCredits("organization-a"), {});
-    try {
-      expect(client.getBilling).toHaveBeenCalledTimes(1);
-      expect(banner.result.current.promotionDecision).toBe("eligible");
-      decision = "held";
-      await flush(59_999);
-      expect(client.getBilling).toHaveBeenCalledTimes(1);
-      await flush(2);
-      expect(client.getBilling).toHaveBeenCalledTimes(2);
-      expect(banner.result.current.promotionDecision).toBe("held");
-      expect(settings.result.current.promotionDecision).toBe("held");
-
-      await actRun(() => visibility("hidden"));
-      await flush(2_001); // Existing shared-query visibility grace.
-      decision = "eligible";
-      await flush(120_000);
-      expect(client.getBilling).toHaveBeenCalledTimes(2);
-      await actRun(() => visibility("visible"));
-      expect(client.getBilling).toHaveBeenCalledTimes(3);
-      expect(banner.result.current.promotionDecision).toBe("eligible");
-      expect(settings.result.current.promotionDecision).toBe("eligible");
-    } finally {
-      await banner.unmount();
-      await settings.unmount();
-      visibility("visible");
-    }
-  });
 });
 
 test("access refusals remove retained defaults and are retried on revisit", async () => {

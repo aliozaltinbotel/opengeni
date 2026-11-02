@@ -20,7 +20,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   reconcilePendingSessionWorkflowWakes,
   type NotifyServices,

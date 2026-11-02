@@ -1,6 +1,5 @@
 import {
   permissionsRequiredByFirstPartyTools,
-  mergeToolRefs,
   resolveAgentConfig,
   type Permission,
   type SessionToolPolicy,
@@ -122,17 +121,12 @@ export async function normalizeSiteAgentSession(
         return { events: [] };
       // Never restore workspace defaults or add a newly declared connector to
       // an old conversation. Preserve only its still-authorized exact refs.
-      const hostRequiredIds = session.toolPolicy.hostRequiredMcpServerIds ?? [];
-      const allowed = new Set(["opengeni", ...retainedToolIds, ...hostRequiredIds]);
-      const tools: ToolRef[] = mergeToolRefs(
-        session.tools.filter((tool) => allowed.has(tool.id)),
-        hostRequiredIds.map((id) => ({ kind: "mcp" as const, id, eager: true })),
-      );
+      const allowed = new Set(["opengeni", ...retainedToolIds]);
+      const tools: ToolRef[] = session.tools.filter((tool) => allowed.has(tool.id));
       const toolPolicy: SessionToolPolicy = {
         mode: "explicit",
         firstPartyMode: "explicit",
         inheritedFromSessionId: null,
-        ...(hostRequiredIds.length ? { hostRequiredMcpServerIds: hostRequiredIds } : {}),
       };
       const version = session.toolPolicyVersion + 1;
       return {

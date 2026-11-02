@@ -31,11 +31,6 @@ import { ChildSessionLink } from "./child-session-link";
  * Inbox has no product dismiss API; pass `onDismissIncoming` when the host
  * wants a visible action (dev harness may use a local dummy).
  *
- * Everything shares one slim row: the agent's deliberate wait (`wait`) leads
- * with its reason and next check time, then queue and goal, with session
- * activity (incoming, agents, commands) on the right. Details and actions
- * (wait reason, goal pause/clear, queue rows) open in the panel on tap.
- *
  * Queue opens by default when chrome is idle and at least one authoritative
  * prompt is queued. Closing the queue dismisses that session's offer until
  * occupancy drains; a different session on the same chrome instance may
@@ -60,7 +55,6 @@ import {
   ArrowUpIcon,
   BotIcon,
   CheckIcon,
-  Clock3Icon,
   InboxIcon,
   ListOrderedIcon,
   Loader2Icon,
@@ -80,9 +74,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-composer";
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
-import type { ComposerQueuedRecall } from "../hooks/use-queued-prompt-recall";
 import { cn } from "../lib/cn";
-import { inertProps } from "../lib/inert";
 import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
 import {
@@ -97,10 +89,8 @@ import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-c
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useCalmServiceFailure } from "../lib/use-calm-service-failure";
 
 export type SessionChromeSignalId =
-  | "wait"
   | "incoming"
   | "steering"
   | "queue"
@@ -109,12 +99,6 @@ export type SessionChromeSignalId =
   | "commands";
 
 export type SessionChromeSignalTone = "neutral" | "accent" | "waiting" | "running";
-
-/** The agent's deliberate wait: its own reason and the deadline of its next check. */
-export type SessionChromeWait = {
-  reason: string;
-  deadlineAt: string;
-};
 
 export type SessionChromeAgentsSignal = {
   count: number;
@@ -125,11 +109,6 @@ export type SessionChromeAgentsSignal = {
 export type SessionChromeProps = {
   /** Authoritative execution status; omitted by older embedding hosts. */
   sessionStatus?: SessionStatus | undefined;
-  /**
-   * The agent's wait (`session.inputWait` while the session is idle). It leads
-   * the row; its panel carries the full reason and the next check time.
-   */
-  wait?: SessionChromeWait | null | undefined;
   queue: UseTurnQueueResult;
   /** Open and focus an existing queued prompt without changing its delivery. */
   queueFocusTarget?: { turnId: string; requestId: number } | undefined;
@@ -140,8 +119,6 @@ export type SessionChromeProps = {
    * Never called for failed checkout or while replacement awaits confirmation.
    */
   onComposerFocus?: (() => void) | undefined;
-  /** The composer's Up-arrow recall; its target row's Edit tip mentions ↑. */
-  queuedRecall?: Pick<ComposerQueuedRecall, "turnId"> | undefined;
   goal?: UseGoalResult | null | undefined;
   /** Expanded agents body (host supplies tree / list). */
   agentsPanel?: ReactNode;
@@ -290,79 +267,6 @@ export function sessionChromeGoalPillExplanation(
 
 export { countAuthoritativeQueuedTurns };
 
-export type SessionChromeWaitPresentation = {
-  /** The agent's own short reason, or a neutral fallback for verbose notes. */
-  headline: string;
-  /** Next check as a clock time ("3:04 PM", with the date when not today). */
-  clock: string;
-  /** The deadline has passed; the wait resumes on the next check. */
-  due: boolean;
-  /** One sentence for the panel and the chip's hover text. */
-  detail: string;
-  /** Reason and detail as one sentence: the chip's accessible name and announcement. */
-  label: string;
-  /** Older agents put long internal notes here; shown only in the panel. */
-  verboseReason: string | null;
-};
-
-/** Copy for the wait signal. Pure so the chip, panel and tests agree. */
-export function sessionChromeWaitPresentation(
-  t: OpenGeniText,
-  wait: SessionChromeWait,
-  now: number,
-): SessionChromeWaitPresentation {
-  const deadline = new Date(wait.deadlineAt);
-  const valid = !Number.isNaN(deadline.getTime());
-  const clock = valid
-    ? deadline.toLocaleString(t.locale, {
-        ...(deadline.toDateString() === new Date(now).toDateString()
-          ? {}
-          : { month: "short", day: "numeric" }),
-        hour: "numeric",
-        minute: "2-digit",
-      })
-    : "";
-  const due = !valid || deadline.getTime() <= now;
-  const reason = wait.reason.trim();
-  // Older agents used this field for verbose internal notes. Keep those out of
-  // the one-line status and show them only in the panel.
-  const compact = reason.length <= 180 && !/[\n]|[0-9a-f]{8}-[0-9a-f-]{27,}/i.test(reason);
-  const headline = compact && reason ? reason : t("sessionChrome.waitFallback");
-  const detail = due
-    ? t("sessionChrome.waitRecheckDue")
-    : t("sessionChrome.waitChecksAgain", { clockTime: clock });
-  return {
-    headline,
-    clock,
-    due,
-    detail,
-    label: t("sessionChrome.waitLabel", { reason: headline.replace(/[.\s]+$/, ""), detail }),
-    verboseReason: compact ? null : reason || null,
-  };
-}
-
-/** Re-renders only when the wait's copy can change: at its deadline and at midnight. */
-function useWaitClock(deadlineAt: string | undefined): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (deadlineAt) setNow(Date.now());
-  }, [deadlineAt]);
-  useEffect(() => {
-    if (!deadlineAt) return;
-    const current = Date.now();
-    const midnight = new Date(current);
-    midnight.setHours(24, 0, 0, 0);
-    const deadline = Date.parse(deadlineAt);
-    const next =
-      Number.isFinite(deadline) && deadline > current
-        ? Math.min(deadline, midnight.getTime())
-        : midnight.getTime();
-    const timer = setTimeout(() => setNow(Date.now()), Math.min(next - current + 50, 2 ** 31 - 1));
-    return () => clearTimeout(timer);
-  }, [deadlineAt, now]);
-  return now;
-}
-
 function isOptimisticQueuedMessage(
   message: ComposerOptimisticMessage,
   queuedTurnIds: ReadonlySet<string>,
@@ -390,85 +294,6 @@ export function countOptimisticQueuedMessages(
   return (messages ?? []).filter((message) =>
     isOptimisticQueuedMessage(message, queuedTurnIds, snapshot),
   ).length;
-}
-
-/**
- * Steer on a just-sent message the chip shows before the server has confirmed
- * it. Steer needs the queued turn's id and version, which arrive with the next
- * queue read, so the click is taken at once and carried out when that exact
- * message lands in the queue. It is dropped, never retargeted, when the send
- * fails, is withdrawn or dismissed, the agent starts the message first, or
- * something else (an edit, Up recall or another Steer) already acts on it.
- * Each just-sent message keeps its own request, so steering a newer one never
- * cancels an earlier one.
- */
-function useDeferredQueuedSteer({
-  messages,
-  optimisticQueued,
-  queuedTurnIds,
-  steerTurn,
-  mutationFor,
-  mutating,
-  enabled,
-}: {
-  messages: readonly ComposerOptimisticMessage[] | undefined;
-  optimisticQueued: readonly ComposerOptimisticMessage[];
-  queuedTurnIds: ReadonlySet<string>;
-  steerTurn: UseTurnQueueResult["steerTurn"];
-  mutationFor: UseTurnQueueResult["mutationFor"];
-  mutating: boolean;
-  enabled: boolean;
-}) {
-  // clientEventId -> the message's turn id once known.
-  const [pending, setPending] = useState<ReadonlyMap<string, string | null>>(() => new Map());
-  const steerRef = useRef(steerTurn);
-  steerRef.current = steerTurn;
-  useEffect(() => {
-    if (pending.size === 0) return;
-    const next = new Map<string, string | null>();
-    const fire: string[] = [];
-    for (const [clientEventId, knownTurnId] of pending) {
-      const message = (messages ?? []).find(
-        (candidate) => candidate.clientEventId === clientEventId,
-      );
-      // Gone means the turn started or was withdrawn; failed means nothing waits.
-      if (!enabled || !message || message.state === "failed") continue;
-      const turnId = message.turnId ?? knownTurnId;
-      if (turnId && queuedTurnIds.has(turnId)) {
-        // An edit, Up recall or Steer already acting on it wins.
-        if (mutationFor(turnId) !== null) continue;
-        // Another queue change is applying: steer right after it.
-        if (mutating) {
-          next.set(clientEventId, turnId);
-          continue;
-        }
-        fire.push(turnId);
-        continue;
-      }
-      const stillPlacing = optimisticQueued.some(
-        (candidate) => candidate.clientEventId === clientEventId,
-      );
-      // The queue read caught up without it waiting there: already started.
-      if (!stillPlacing) continue;
-      next.set(clientEventId, turnId);
-    }
-    const changed =
-      next.size !== pending.size ||
-      [...next].some(([clientEventId, turnId]) => pending.get(clientEventId) !== turnId);
-    if (changed) setPending(next);
-    for (const turnId of fire) void steerRef.current(turnId);
-  }, [enabled, messages, mutating, mutationFor, optimisticQueued, pending, queuedTurnIds]);
-  return {
-    request: (clientEventId: string) =>
-      setPending((current) => {
-        if (current.has(clientEventId)) return current;
-        const next = new Map(current);
-        next.set(clientEventId, null);
-        return next;
-      }),
-    isPending: (clientEventId: string) => pending.has(clientEventId),
-    isPendingTurn: (turnId: string) => [...pending.values()].includes(turnId),
-  };
 }
 
 /**
@@ -586,7 +411,7 @@ function pendingKindLabel(t: OpenGeniText, kind: SessionPendingInputPreview["kin
     case "agent_steer_instruction":
       return t("sessionChrome.steer");
     case "scheduled_occurrence":
-      return t("sessionChrome.automation");
+      return t("sessionChrome.schedule");
     case "goal_continuation":
       return t("sessionChrome.goalWake");
     case "agent_message":
@@ -597,10 +422,6 @@ function pendingKindLabel(t: OpenGeniText, kind: SessionPendingInputPreview["kin
       return t("sessionChrome.waitEnded");
     case "media_generation_result":
       return t("sessionChrome.videoResult");
-    case "secret_use_approval_decided":
-      return t("sessionChrome.secretUseAnswer");
-    case "capability_setup_completed":
-      return t("sessionChrome.setupFinished");
     default:
       return t("sessionChrome.incoming");
   }
@@ -633,12 +454,10 @@ export function SessionChrome(props: SessionChromeProps) {
 
 function SessionChromeView({
   sessionStatus,
-  wait,
   queue,
   queueFocusTarget,
   composer,
   onComposerFocus,
-  queuedRecall,
   goal,
   agentsPanel,
   commandsPanel,
@@ -654,11 +473,6 @@ function SessionChromeView({
 }: SessionChromeProps) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
-  // A queue read failing while Opengeni updates is not a queue problem: the
-  // hook keeps retrying and the last queue stays on screen. Only a failure
-  // that outlasts a normal update (or a definitive one) needs attention.
-  const queueLoadCalm = useCalmServiceFailure(queue.error);
-  const queueLoadError = queueLoadCalm ? null : queue.error;
   const [activityRequested, setActivityOpen] = useState(
     Boolean(defaultActive && ["incoming", "agents", "commands"].includes(defaultActive)),
   );
@@ -692,39 +506,11 @@ function SessionChromeView({
   const canMutateQueue = !readOnly && composer !== undefined;
   // One Send: nothing to choose, so waiting messages offer no Steer.
   const canSteerQueued = canMutateQueue && composer?.singleSend !== true;
-  const deferredSteer = useDeferredQueuedSteer({
-    messages: composer?.optimisticMessages,
-    optimisticQueued,
-    queuedTurnIds,
-    steerTurn: queue.steerTurn,
-    mutationFor: queue.mutationFor,
-    mutating: queue.mutating,
-    enabled: canSteerQueued,
-  });
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
   const goalState = record
     ? sessionChromeGoalPillState(record.status, record.continuation, sessionStatus)
     : null;
-  const waitNow = useWaitClock(wait?.deadlineAt);
-  const waitReason = wait?.reason;
-  const waitDeadline = wait?.deadlineAt;
-  const waitView = useMemo(
-    () =>
-      waitReason !== undefined && waitDeadline !== undefined
-        ? sessionChromeWaitPresentation(
-            t,
-            { reason: waitReason, deadlineAt: waitDeadline },
-            waitNow,
-          )
-        : null,
-    [t, waitReason, waitDeadline, waitNow],
-  );
-  // Screen readers skip a live region that mounts already filled, and the
-  // chrome mounts with the wait when it is the only signal. Fill it after mount.
-  const waitLabel = waitView?.label ?? "";
-  const [waitAnnouncement, setWaitAnnouncement] = useState("");
-  useEffect(() => setWaitAnnouncement(waitLabel), [waitLabel]);
 
   const initialAuthoritativeQueuedCount = countAuthoritativeQueuedTurns(
     queue.queue,
@@ -809,16 +595,6 @@ function SessionChromeView({
       tone: SessionChromeSignalTone;
       icon: ReactNode;
     }> = [];
-    if (waitView) {
-      rows.push({
-        id: "wait",
-        label: waitView.headline,
-        detail: waitView.due ? t("sessionChrome.waitDue") : waitView.clock,
-        title: waitView.label,
-        tone: "neutral",
-        icon: <Clock3Icon className="size-3" />,
-      });
-    }
     if (incoming.length > 0) {
       const detail = incoming[0]?.summary;
       rows.push({
@@ -834,7 +610,7 @@ function SessionChromeView({
       });
     }
     const queuedCount = queuedTurns.length + optimisticQueued.length;
-    const queueProblem = queue.mutationError ?? queueLoadError;
+    const queueProblem = queue.mutationError ?? queue.error;
     if (queuedCount > 0 || queueProblem) {
       const presentations = queuedTurns.map((turn) => queuedTurnPresentation(t, turn));
       const first = presentations[0];
@@ -928,12 +704,11 @@ function SessionChromeView({
     goalState,
     incoming,
     optimisticQueued,
-    queueLoadError,
+    queue.error,
     queue.mutationError,
     queuedTurns,
     record,
     t,
-    waitView,
   ]);
 
   const optimisticQueueKeys = optimisticQueued.map((message) => message.clientEventId).join(",");
@@ -1052,38 +827,21 @@ function SessionChromeView({
 
   const open = active !== null;
   // Collapsed queue chip shows the latest queued message so a Send that lands
-  // in the queue is visible without opening the list. Steer on a message the
-  // server has not confirmed yet is taken at once and carried out when it lands.
+  // in the queue is visible without opening the list; Steer acts on that
+  // message once the server has confirmed it.
   const latestOptimisticQueued = optimisticQueued[optimisticQueued.length - 1];
   const latestQueuedTurn = queuedTurns[queuedTurns.length - 1];
-  const queuePeek: {
-    text: string | null;
-    turnId: string | null;
-    /** Unconfirmed send shown in the chip; Steer on it is deferred. */
-    pending: ComposerOptimisticMessage | null;
-  } | null =
-    queueLoadError || queue.mutationError
+  const queuePeek: { text: string | null; turnId: string | null } | null =
+    queue.error || queue.mutationError
       ? null
       : latestOptimisticQueued
-        ? {
-            text: latestOptimisticQueued.text.trim() || null,
-            turnId: null,
-            pending: latestOptimisticQueued,
-          }
+        ? { text: latestOptimisticQueued.text.trim() || null, turnId: null }
         : latestQueuedTurn
           ? {
               text: queuedTurnPresentation(t, latestQueuedTurn).text.trim() || null,
               turnId: latestQueuedTurn.id,
-              pending: null,
             }
           : null;
-  const queuePeekSteering = queuePeek
-    ? queuePeek.pending
-      ? deferredSteer.isPending(queuePeek.pending.clientEventId)
-      : queuePeek.turnId !== null &&
-        (queue.mutationFor(queuePeek.turnId) === "steer" ||
-          deferredSteer.isPendingTurn(queuePeek.turnId))
-    : false;
 
   if (signals.length === 0 && !stopping) return null;
 
@@ -1102,7 +860,7 @@ function SessionChromeView({
       <QueuePanel
         turns={queuedTurns}
         optimistic={optimisticQueued}
-        loadError={queueLoadError}
+        loadError={queue.error}
         mutationError={queue.mutationError}
         onRefresh={queue.refresh}
         onClearMutationError={queue.clearMutationError}
@@ -1111,7 +869,6 @@ function SessionChromeView({
         onRemoveOptimistic={composer?.removeOptimisticMessage}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
-        upRecallTurnId={queuedRecall?.turnId ?? null}
         replaceDraftFor={replaceDraftFor}
         onCancelReplace={() => setReplaceDraftFor(null)}
         onConfirmReplace={
@@ -1176,8 +933,6 @@ function SessionChromeView({
             : undefined
         }
       />
-    ) : active === "wait" && waitView ? (
-      <WaitPanel view={waitView} />
     ) : active === "goal" && record && goalState && goal ? (
       <GoalPanel goal={goal} state={goalState} elapsed={elapsed} readOnly={readOnly} />
     ) : active === "commands" ? (
@@ -1199,10 +954,6 @@ function SessionChromeView({
         data-og-session-chrome=""
         data-og-session-chrome-open={open ? "true" : "false"}
       >
-        {/* The wait chip is a button; announce when the agent starts waiting or its check is due. */}
-        <span className="sr-only" role="status" aria-live="polite">
-          {waitAnnouncement}
-        </span>
         <div
           className={cn(
             "relative overflow-hidden border",
@@ -1218,10 +969,10 @@ function SessionChromeView({
           }}
         >
           <div
-            // The frame clips its children. On coarse pointers the rail leaves
-            // room for the chips' invisible hit areas so each stays a 44px target.
-            className="relative py-[var(--og-session-chrome-rail-pad)] pointer-coarse:py-1.5"
+            className="relative"
             style={{
+              paddingTop: "var(--og-session-chrome-rail-pad)",
+              paddingBottom: "var(--og-session-chrome-rail-pad)",
               paddingLeft: "var(--og-session-chrome-rail-pad)",
               paddingRight: "var(--og-session-chrome-rail-pad)",
             }}
@@ -1230,7 +981,7 @@ function SessionChromeView({
               ref={railRef}
               className="relative flex flex-nowrap items-center"
               style={{
-                gap: "6px",
+                gap: "10px",
               }}
             >
               <motion.div
@@ -1263,14 +1014,11 @@ function SessionChromeView({
                           ? t("sessionChrome.queuedMessagesAndActions")
                           : signal.id === "goal"
                             ? t("sessionChrome.goalAndActions")
-                            : signal.id === "wait"
-                              ? t("sessionChrome.waitStatus")
-                              : signal.label
+                            : signal.label
                       }
                       className={cn(
                         "group/signal relative z-[1] inline-flex min-w-0 max-w-full items-center rounded-og-md",
-                        // The wait reason gives way first; short chips keep their size.
-                        signal.id === "goal" ? "shrink-0" : "shrink",
+                        "bg-og-surface-2/60 px-0.5",
                         selected && "bg-og-surface-3",
                       )}
                     >
@@ -1291,9 +1039,7 @@ function SessionChromeView({
                               })
                             : selected
                               ? t("sessionChrome.closeLabel", { label: signal.label })
-                              : signal.id === "wait" && waitView
-                                ? waitView.label
-                                : undefined
+                              : undefined
                         }
                         data-testid={`session-chrome-${signal.id}`}
                         data-og-session-chrome-signal={signal.id}
@@ -1303,12 +1049,11 @@ function SessionChromeView({
                           setActive(selected ? null : signal.id);
                         }}
                         className={cn(
-                          "group relative z-[1] inline-flex min-w-0 min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1.5 rounded-og-md py-1 text-left text-og-xs outline-hidden",
-                          // Coarse pointers keep a 44px target (session-pins acceptance)
-                          // through an invisible hit area, so the row itself stays slim.
-                          "pointer-coarse:min-h-8 pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-1.5 pointer-coarse:before:content-['']",
+                          "group relative z-[1] inline-flex min-w-0 min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-hidden",
+                          // Coarse pointers keep a 44px target (session-pins acceptance).
+                          "pointer-coarse:min-h-11",
                           "transition-colors duration-150 motion-reduce:transition-none",
-                          "hover:bg-og-surface-2/70 hover:text-og-fg focus-visible:bg-og-surface-3/50",
+                          "hover:text-og-fg focus-visible:bg-og-surface-3/50",
                           selected ? "text-og-fg" : "text-og-fg-muted",
                         )}
                         style={{
@@ -1331,35 +1076,25 @@ function SessionChromeView({
                         </span>
                         <span
                           className={cn(
-                            signal.id === "wait" ? "text-og-fg" : "font-medium text-og-fg",
+                            "font-medium text-og-fg",
                             signal.id === "queue" && queuePeek?.text && !selected
                               ? "shrink-0"
                               : "min-w-0 truncate",
                           )}
                         >
+                          {signal.id === "goal" ? `${t("sessionChrome.goalPrefix")} ` : null}
                           {signal.id === "goal"
-                            ? // Held for the agent's own wait: the wait signal already
-                              // says why, so the goal chip only names itself.
-                              waitView && goalState === "held"
-                              ? t("sessionChrome.goal")
-                              : `${t("sessionChrome.goalPrefix")} ${
-                                  goalState === "pursuing"
-                                    ? t("sessionChrome.running")
-                                    : signal.label
-                                }`
+                            ? goalState === "pursuing"
+                              ? t("sessionChrome.running")
+                              : signal.label
                             : signal.id === "queue"
-                              ? queueLoadError || queue.mutationError
+                              ? queue.error || queue.mutationError
                                 ? signal.label
                                 : t("sessionChrome.queuedCount", {
                                     count: queuedTurns.length + optimisticQueued.length,
                                   })
                               : signal.label}
                         </span>
-                        {signal.id === "wait" && signal.detail ? (
-                          <span className="shrink-0 tabular-nums text-og-fg-subtle">
-                            {signal.detail}
-                          </span>
-                        ) : null}
                         {signal.id === "queue" && queuePeek?.text && !selected ? (
                           <AnimatePresence initial={false} mode="popLayout">
                             <motion.span
@@ -1376,7 +1111,47 @@ function SessionChromeView({
                           </AnimatePresence>
                         ) : null}
                       </button>
-                      {signal.id === "queue" && canSteerQueued && queuePeek && !selected ? (
+                      {signal.id === "goal" && goal && record && !readOnly ? (
+                        <div className="flex shrink-0 items-center pr-1 pl-0.5">
+                          {record.status === "active" || record.status === "paused" ? (
+                            <IconAction
+                              label={
+                                record.status === "paused"
+                                  ? t("sessionChrome.resumeGoal")
+                                  : t("sessionChrome.pauseGoal")
+                              }
+                              tip={
+                                record.status === "paused"
+                                  ? t("sessionChrome.resumeGoal")
+                                  : t("sessionChrome.pauseGoal")
+                              }
+                              disabled={goal.updating}
+                              onClick={() =>
+                                void (record.status === "paused"
+                                  ? goal.resume()
+                                  : goal.pause("Paused from session chrome"))
+                              }
+                            >
+                              {goal.updating ? (
+                                <Loader2Icon className="size-3 animate-og-spin" />
+                              ) : record.status === "paused" ? (
+                                <PlayIcon className="size-3" />
+                              ) : (
+                                <PauseIcon className="size-3" />
+                              )}
+                            </IconAction>
+                          ) : null}
+                          <IconAction
+                            label={t("sessionChrome.clearGoal")}
+                            tip={t("sessionChrome.clearGoal")}
+                            danger
+                            disabled={goal.updating}
+                            onClick={() => void goal.deleteGoal()}
+                          >
+                            <Trash2Icon className="size-3" />
+                          </IconAction>
+                        </div>
+                      ) : signal.id === "queue" && canSteerQueued && queuePeek && !selected ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
                             label={t("sessionChrome.steerLatestQueuedMessage")}
@@ -1384,21 +1159,15 @@ function SessionChromeView({
                             text={t("sessionChrome.steer")}
                             tip={<QueueSteerTip />}
                             disabled={
-                              queuePeek.pending
-                                ? queuePeek.pending.state === "failed" || queuePeekSteering
-                                : !queuePeek.turnId ||
-                                  queue.mutating ||
-                                  Boolean(queue.mutationFor(queuePeek.turnId))
+                              !queuePeek.turnId ||
+                              queue.mutating ||
+                              Boolean(queue.mutationFor(queuePeek.turnId))
                             }
                             onClick={() => {
-                              if (queuePeek.pending) {
-                                deferredSteer.request(queuePeek.pending.clientEventId);
-                              } else if (queuePeek.turnId) {
-                                void queue.steerTurn(queuePeek.turnId);
-                              }
+                              if (queuePeek.turnId) void queue.steerTurn(queuePeek.turnId);
                             }}
                           >
-                            {queuePeekSteering ? (
+                            {queuePeek.turnId && queue.mutationFor(queuePeek.turnId) === "steer" ? (
                               <Loader2Icon className="size-3 animate-og-spin" />
                             ) : (
                               <CornerDownRightIcon className="size-3" />
@@ -1434,9 +1203,7 @@ function SessionChromeView({
                     );
                   }}
                   className={cn(
-                    "relative ml-auto inline-flex min-h-[var(--og-session-chrome-chip-min-height)] shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
-                    // 44px coarse target without a taller row (see the signal chips).
-                    "pointer-coarse:min-h-8 pointer-coarse:min-w-11 pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-1.5 pointer-coarse:before:content-['']",
+                    "ml-auto inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                     activityOpen
                       ? "bg-og-surface-3 text-og-fg"
                       : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",
@@ -1528,7 +1295,7 @@ function SessionChromeView({
             id={panelId}
             data-og-session-chrome-panel-shell=""
             aria-hidden={!open}
-            {...inertProps(!open)}
+            inert={!open ? true : undefined}
             className="grid overflow-hidden motion-reduce:transition-none"
             style={{
               gridTemplateRows: open ? "1fr" : "0fr",
@@ -1737,7 +1504,6 @@ function QueuePanel({
   onRemoveOptimistic,
   readOnly,
   mutationFor,
-  upRecallTurnId = null,
   replaceDraftFor,
   onCancelReplace,
   onConfirmReplace,
@@ -1757,8 +1523,6 @@ function QueuePanel({
   onRemoveOptimistic?: ((clientEventId: string) => void) | undefined;
   readOnly: boolean;
   mutationFor: UseTurnQueueResult["mutationFor"];
-  /** The row Up in an empty composer would pull back. */
-  upRecallTurnId?: string | null | undefined;
   replaceDraftFor?: string | null | undefined;
   onCancelReplace?: (() => void) | undefined;
   onConfirmReplace?: (() => void) | undefined;
@@ -1853,7 +1617,7 @@ function QueuePanel({
                     {onEdit ? (
                       <IconAction
                         label={t("sessionChrome.editQueuedPromptIndex", { index: index + 1 })}
-                        tip={upRecallTurnId === turn.id ? <QueueEditUpTip /> : QUEUE_EDIT_TIP(t)}
+                        tip={QUEUE_EDIT_TIP(t)}
                         disabled={settling || pending !== null}
                         onClick={() => onEdit(turn)}
                       >
@@ -2059,24 +1823,6 @@ function CompactQueueItemContent({
   );
 }
 
-function WaitPanel({ view }: { view: SessionChromeWaitPresentation }) {
-  const t = useOpenGeniText();
-  return (
-    <div className="space-y-1" data-og-session-chrome-panel="wait">
-      <p className="text-og-sm leading-5 text-og-fg">{view.headline}</p>
-      <p className="text-og-xs leading-4 text-og-fg-muted">{view.detail}</p>
-      {view.verboseReason ? (
-        <details className="text-og-xs text-og-fg-muted">
-          <summary className="cursor-pointer">{t("sessionChrome.waitDetails")}</summary>
-          <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
-            {view.verboseReason}
-          </p>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
 function GoalPanel({
   goal,
   state,
@@ -2145,17 +1891,12 @@ function GoalPanel({
               <button
                 type="button"
                 disabled={goal.updating}
-                aria-label={
-                  record.status === "paused"
-                    ? t("sessionChrome.resumeGoal")
-                    : t("sessionChrome.pauseGoal")
-                }
                 onClick={() =>
                   void (record.status === "paused"
                     ? goal.resume()
                     : goal.pause("Paused from session chrome"))
                 }
-                className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden pointer-coarse:h-9 transition-colors hover:bg-og-surface-3/70 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+                className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden transition-colors hover:bg-og-surface-3/70 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
               >
                 {goal.updating ? (
                   <Loader2Icon className="size-3 animate-og-spin" />
@@ -2170,9 +1911,8 @@ function GoalPanel({
             <button
               type="button"
               disabled={goal.updating}
-              aria-label={t("sessionChrome.clearGoal")}
               onClick={() => void goal.deleteGoal()}
-              className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-subtle outline-hidden pointer-coarse:h-9 transition-colors hover:bg-og-surface-3/70 hover:text-og-danger focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+              className="inline-flex h-6 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-subtle outline-hidden transition-colors hover:bg-og-surface-3/70 hover:text-og-danger focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
             >
               <Trash2Icon className="size-3" />
               {t("sessionChrome.clear")}
@@ -2194,18 +1934,6 @@ function QueueSteerTip() {
   );
 }
 const QUEUE_EDIT_TIP = (t: OpenGeniText) => t("sessionChrome.editInComposer");
-/** The row Up would recall: same tip plus the key, muted. */
-function QueueEditUpTip() {
-  const t = useOpenGeniText();
-  return (
-    <span className="inline-flex items-center gap-1.5" data-testid="session-chrome-queue-up-hint">
-      {QUEUE_EDIT_TIP(t)}
-      <kbd aria-label={t("sessionChrome.upArrowKey")} className="font-sans opacity-60">
-        ↑
-      </kbd>
-    </span>
-  );
-}
 const QUEUE_DELETE_TIP = (t: OpenGeniText) => t("sessionChrome.deleteThisQueuedPrompt");
 
 function IconAction({

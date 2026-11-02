@@ -1,5 +1,3 @@
-import { isMachineComputeSelectable } from "../../session-admission-model";
-
 // Compute-selectability for an enrolled machine in the session "Run on" pickers.
 //
 // The backend create-time attach gate checks LIVENESS only — compute-only
@@ -11,7 +9,9 @@ import { isMachineComputeSelectable } from "../../session-admission-model";
 // un-selectable on that basis). Only `offline` / `reconnecting` / `enrolling`
 // genuinely can't attach. (Since the machines deriver no longer folds consent
 // into the state, `consent_required` is a defensive inclusion.)
-export { isMachineComputeSelectable };
+export function isMachineComputeSelectable(state: string): boolean {
+  return state === "online" || state === "display_unavailable" || state === "consent_required";
+}
 
 export function resolveSelectableMachineSandboxId(
   machines: readonly { sandboxId: string; state: string }[],

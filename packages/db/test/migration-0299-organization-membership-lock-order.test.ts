@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import type postgres from "postgres";
 import {
   acceptOrganizationInvitation,
@@ -456,9 +456,7 @@ describe("migration 0299 organization membership lock order", () => {
         membershipId: org.member.id,
         transition: {
           kind: "change_role",
-          // Two real changes: a role the member already holds is a no-op
-          // that leaves the revision alone (0995).
-          role: "owner",
+          role: "member",
           expectedAuthorizationRevision: org.member.authorizationRevision,
           operationId: crypto.randomUUID(),
         },

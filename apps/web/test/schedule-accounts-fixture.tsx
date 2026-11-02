@@ -73,7 +73,7 @@ function Fixture() {
         <DetailSection title="Setup">
           <DetailFacts>
             <DetailFact label="Each run">
-              {chat ? "Continues an existing chat" : "Starts a new chat"}
+              {chat ? "Posts into an existing chat" : "New chat each run"}
             </DetailFact>
           </DetailFacts>
         </DetailSection>

@@ -3,11 +3,13 @@ import { tool } from "@openai/agents";
 import * as opengeniDb from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  ScriptedModel,
+  functionCall,
+  assistantMessage,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
-import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing/scripted-model";
+} from "@opengeni/testing";
 import {
   acceptSessionApprovalDecision,
   bootstrapWorkspace,

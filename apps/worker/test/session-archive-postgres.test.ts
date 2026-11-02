@@ -11,8 +11,11 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createSessionArchiveActivities } from "../src/activities/session-archive";
 import type { ActivityServices } from "../src/activities/types";
 

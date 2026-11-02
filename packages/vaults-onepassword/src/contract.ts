@@ -22,5 +22,4 @@ export {
   type TotpParams,
   type VaultFieldKind,
   type VaultItemType,
-  type VaultProviderOperations,
 } from "@opengeni/contracts";

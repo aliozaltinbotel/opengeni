@@ -1,4 +1,3 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -45,9 +44,9 @@ describe("pull-request delivery process contract", () => {
     expect(deployment).not.toContain("--base <exact-current-main-sha>");
   });
 
-  test("historical workflow fixture: keeps the agent guidance aligned with executable stale-base admission", async () => {
+  test("keeps the agent guidance aligned with executable stale-base admission", async () => {
     const [workflow, verifier, verifierTests] = await Promise.all([
-      readRetiredWorkflow("source-admission.yml"),
+      source(".github/workflows/source-admission.yml"),
       source("scripts/check-source-admission.mjs"),
       source("scripts/check-source-admission.test.ts"),
     ]);

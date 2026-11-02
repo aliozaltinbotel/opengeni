@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ResourceRef } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   dropUnavailableOptionalRepositories,
   type DropUnavailableOptionalRepositoriesInput,

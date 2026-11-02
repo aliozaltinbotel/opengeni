@@ -2,7 +2,7 @@
 // provider_vault_sync_target as the application role, plus the mirror and
 // sync-status routines they feed.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   createConnection,
   createDb,

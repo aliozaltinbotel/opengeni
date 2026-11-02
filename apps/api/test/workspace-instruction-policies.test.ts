@@ -19,8 +19,11 @@ import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import * as dbSchema from "@opengeni/db/schema";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import postgres from "postgres";

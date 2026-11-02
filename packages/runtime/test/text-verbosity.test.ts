@@ -8,7 +8,7 @@ import {
   codexSubscriptionFetch,
   type CodexRequestContext,
 } from "@opengeni/codex";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   buildModelInstance,
   buildOpenGeniAgent,
@@ -55,10 +55,7 @@ function codexContext(): CodexRequestContext {
 }
 
 /** Run one real agent turn over the Codex subscription wire and return each request body. */
-async function codexWireBodies(
-  textVerbosity?: "low",
-  reasoningSummary?: "none",
-): Promise<Array<Record<string, unknown>>> {
+async function codexWireBodies(textVerbosity?: "low"): Promise<Array<Record<string, unknown>>> {
   const settings = codexSettings();
   const resolved = resolveTurnModel(settings, CODEX_TURN_MODEL);
   if (!resolved) throw new Error("codex model did not resolve");
@@ -97,7 +94,6 @@ async function codexWireBodies(
     hostedWebSearch: false,
     reasoningEffort: "medium",
     ...(textVerbosity ? { textVerbosity } : {}),
-    ...(reasoningSummary ? { reasoningSummary } : {}),
   });
   await codexRequestStorage.run(codexContext(), async () => {
     const result = await runAgentStream(agent, "What day is it?", settings);
@@ -200,11 +196,6 @@ describe("Responses text verbosity", () => {
     expect(body).toBeDefined();
     expect(body).not.toHaveProperty("text");
     expect(body?.reasoning).toEqual({ effort: "medium", summary: "detailed" });
-  });
-
-  test("a withheld-reasoning turn requests no reasoning summary, only its effort", async () => {
-    const [body] = await codexWireBodies(undefined, "none");
-    expect(body?.reasoning).toEqual({ effort: "medium" });
   });
 
   test("reaches the Azure OpenAI Responses wire through the Azure request policy", async () => {

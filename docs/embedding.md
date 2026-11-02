@@ -82,35 +82,6 @@ Stop, tool approvals, attachments, human-input forms, live voice, optimistic del
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
-**Automations in the host.** `AutomationsPanel` from
-`@opengeni/react/automations` lists, creates and edits automations inside the
-host's own dialog or page, so people can have the agent pick a chat up again
-on a schedule or when something happens without leaving the product. Scoped to
-a chat, new automations continue that chat with its settings; without a chat,
-each run starts a new chat with the workspace's defaults and the owner's
-access. Event triggers show when the deployment runs them.
-
-```tsx
-import { AutomationsPanel } from "@opengeni/react/automations";
-
-<AutomationsPanel
-  client={client}
-  workspaceId={workspaceId}
-  sessionId={chatId}
-  // The host's own MCP server, offered before the person has a source for it.
-  eventServers={[{ serverId: "acme-mcp", name: "Acme" }]}
-  // Subscription arguments new triggers start with, such as the open project.
-  argumentDefaults={{ projectId }}
-  onOpenSession={(id) => openChat(id)}
-/>;
-```
-
-Its words come from the `automations.*` keys of the message catalog, so
-`OpenGeniMessagesProvider` translates it. `AutomationForm`,
-`AutomationWhenField` and the pure helpers behind them (`automationCreateRequest`,
-`automationWhenSentence` and the rest) are exported for hosts that build their
-own layout.
-
 `NewConversation` exposes the same new-chat flow that `OpenGeniChat` uses.
 For a persistent shell, `useNewConversation`/`NewConversationView` and
 `useSessionConversation`/`SessionConversationView` separate ownership from
@@ -153,10 +124,7 @@ import "@opengeni/react/compiled.css";
 `consoleUrl` is the Opengeni web app's origin, which the embed links to for
 pages it does not show. `sessionId` and `onSessionChange` let the page own
 which chat is open; `onSessionChange` runs only when the person opens another
-chat. `onSessionState` follows the open chat: it receives the chat's status
-and the events the chat holds each time they change, read from the chat's own
-stream, so the page can show that the agent is working or refresh what a turn
-changed without a second connection. `openUrl` receives everything that leaves the embed (app pages, provider
+chat. `openUrl` receives everything that leaves the embed (app pages, provider
 sign-in, checkout, files opened in full); a host that cannot open browser tabs,
 such as an Office add-in, passes its own. `onUnauthorized` runs on any 401,
 from the client or a raw app request. `compiled.css` is the only stylesheet
@@ -167,12 +135,11 @@ A preset decides which features show and single keys switch them:
 
 | Feature | `app` (web, desktop) | `companion` (first-party side panes) | `embed` (default; customer page) |
 | --- | --- | --- | --- |
-| `chatList`: search, filters, projects, pins, archive, subagent rows; on the new-chat page, the project picker and recent chats | on | on | on |
+| `chatList`: search, filters, projects, pins, archive, subagent rows | on | on | on |
 | `dock`: files, terminal, desktop, browser, artifacts, inspector | on | on | off |
 | `adminAccess`: workspace-admin access indicator and grant | on | off | off |
-| `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
-| `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
-| `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
+| `newChatShortcut`: ⌘/Ctrl+⇧O | on | off | off |
+| `brand`: the Opengeni row at the top of the chat list | on | on | off |
 
 Everything else (model and effort, capabilities, repositories, runs on,
 secrets, usage limit, approvals and questions, goals, attachments, voice, find
@@ -189,14 +156,6 @@ their messages; a new label brings it back. Pass a new value whenever the
 context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
 With the dock off, entries that only open a dock panel hide with it.
-
-Links in agent messages to Opengeni objects (files, Sites, editable
-artifacts) open in the dock when it is on, and otherwise open the object's
-page in the web app through `openUrl`. `resolveLink` lets the host open them
-its own way, for example on its own page for that object: return
-`{ open }` (an action) or `{ href }` (a link) for the links it handles, and
-null for the rest. `renderLink` draws the host's own links (its scheme, its
-in-app paths). Both take the same functions as `OpenGeniLinkProvider`.
 
 The dock's heavier pieces are opt-in so a page that does not show them never
 downloads them. Call `enableWorkbench()` from `@opengeni/react/workbench` once
@@ -269,87 +228,21 @@ permissions and sign-in/consent are not bypassed. Without host configuration the
 default offer explains that computer setup is unavailable. It never substitutes
 an Opengeni download, setup token, shell command, or model-supplied setup URL.
 
-### Capability connection offers
-
-When the agent asks the person to connect a catalog OAuth integration (its
-`capability_authorization_request` card), `SessionConversation` and
-`OpenGeniChat` render the same connect card as the Opengeni web app, with no
-host code: the person picks who can use the connection, signs in through a
-popup, the card adds the integration to the chat, and the agent continues on
-its own. The popup's sign-in returns to the host page; the card follows the
-attempt's state through the API, so the page needs no return handler, and the
-person closes the popup.
-
-The card appears only when the person's own grant can finish every step: chat
-control (`sessions:control`) plus one of these:
-
-- `connections:personal`: connect their own account (personal ownership only)
-  and, if the integration is not on yet, turn it on for personal accounts. This
-  works only for a reviewed catalog integration that signs each person in with
-  OAuth and that the organization's integration policy allows. It never covers
-  custom MCP servers, shared or workspace connections, other people's
-  connections, or removing or reconfiguring an integration, and an
-  organization can reserve turning integrations on for admins.
-- `connections:write` with `connections:read` and `capabilities:manage` (or an
-  integration that is already on): any account, shared or personal.
-- `connections:read` alone, when the integration is already on and bound to a
-  shared workspace account.
-
-Otherwise the card says the integration can't be connected from here.
-
-Turning an integration on is a workspace change: once someone turns it on for
-personal accounts, the other members of that workspace see it as an optional
-integration that each of them must connect with their own account before
-their chats can use it. Nobody gets access to anyone else's account.
-
-Who gets `connections:personal` by default depends on whether each product
-user is their own Opengeni user, set with `identities` on the facade or on
-`createWorkspaceIdResolver`, because a personal connection belongs to the
-Opengeni user:
-
-| Setup | Default |
-| --- | --- |
-| One workspace per user (`resolve` returns `{ user }`, or `chats: "isolated"`) | On |
-| `identities: "per_user"` (each `user` is one real person) | On, also in tenant workspaces: the SDK adds each signed-in tenant user with the defaults plus `connections:personal` |
-| Tenant workspaces with `identities` unset | Off (users are left to the API's first-use grant) |
-| `identities: "shared"` (one `user` stands for many people, for example a team) | Off everywhere, so one person's Gmail is never usable by everyone behind that identity |
-
-`memberPermissions` overrides these defaults either way. The SDK never changes
-an existing member's permissions; use `updateExternalWorkspaceMember` for
-people added earlier. If the organization key's custom policy covers neither
-`connections:personal` nor `connections:write`, defaulted onboarding falls back
-to the conversation defaults instead of failing. A proxy with a
-`createSession` hook owns each chat's tools, so it reports
-`chatConnections: false` in client config and the stock conversation leaves
-these cards to the host. `timelineProps.renderAuthNeeded` still takes
-precedence, and host-managed connections (`authoritySource: "host"`) keep their
-own row.
-
-The agent's cards for the deployment's reviewed Microsoft integrations
-(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
-with `SessionIntegrationCapabilityCard`. Each person connects their own
-Microsoft account, which installs the integration's reviewed tools for that
-account alone, so these cards need `sessions:control` plus
-`connections:personal` (or `connections:write`), not `connections:read` or
-`capabilities:manage`. The per-user defaults above already include both, so
-the host does not pre-install anything; a shared identity without
-`connections:personal` sees the card as unavailable. The session proxy
-forwards the Connect, integration, tool-policy and continuation routes the
-card uses as the signed-in end user.
-
 ### Embedded defaults
 
 | Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |
 | --- | --- |
-| Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`). A product that never offers voice can also `refuse` the realtime routes in the proxy. |
+| Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`), or `createSessionProxyHandler({ realtimeVoice: true })`, which reports `realtimeVoice: true` in the client config. Proxy `realtimeVoice: false` still refuses voice. |
 | The working indicator says "Thinking…" with a "Show details" action, not the console's playful copy. | `genieLoading` (`phrases`, `messages`, `orb`, or `render`); omitted fields keep the neutral defaults. `MessageTimeline` keeps the console copy. |
-| Anonymous visitors (`resolve` returns `visitor: true`) get no attach button; the proxy reports `fileUploads.enabled: false` and refuses the upload routes. | Proxy `visitorUploads: true`. Signed-in users follow their `files:write` permission, and `attachments={false}` hides the control. Agent-produced media still loads for visitors. |
+| Anonymous visitors (`resolve` returns `visitor: true`) get no attach button; the proxy reports `fileUploads.enabled: false` and refuses the upload routes. | Proxy `visitorUploads: true`. Signed-in users follow `files` (and `files: false` now also reports uploads off). Agent-produced media still loads for visitors. |
 
 Live voice is the same realtime protocol the console uses, not a second
 transport. The proxy forwards the workspace realtime model catalog and the
 session `realtime` routes (begin, provider connect, heartbeat, connection
-activate, ledger sync, end) as the resolved user, after `authorizeSession`,
-like every other Opengeni route. Owner/connection/epoch proof, Steer-based delegation, transcript
+activate, ledger sync, end) as the resolved user, after `authorizeSession`;
+`realtimeVoice: false` refuses them and reports `realtimeVoice: false` in the
+client config, while explicit `realtimeVoice: true` reports `true`, which also
+shows the stock voice button. Owner/connection/epoch proof, Steer-based delegation, transcript
 truth, credit admission, and per-minute metering stay in the API exactly as for
 the console. `beforeForwardMessage` receives `delivery: "realtime"` once when a
 call starts (refusal, MCP credential rotation through the standalone rotate
@@ -358,7 +251,8 @@ delegation or finalized transcript entries (refusal, `modelContext` placed
 before the browser's on those entries; it must be stable across a retry,
 because ledger replay requires an identical entry). When voice is opted in
 (see the defaults table above), `SessionConversation` fetches the catalog and
-mounts the lazily loaded voice button only when a model is available.
+mounts the lazily loaded voice button only when a model is available;
+`realtimeVoice={false}` turns it off even when the proxy offers it.
 
 The host owns available space; `SessionConversation` fills its container by
 default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
@@ -372,31 +266,32 @@ displays generated images and video, published files, and screenshots through
 the same session scope (`createWorkspaceRetainedArtifactLoader`,
 `createSessionRetainedScreenshotLoader`, and
 `createWorkspaceRetainedVideoLoader` are its defaults and the web app's
-loaders); behind the proxy these follow the user's `files:read` and
-`artifacts:read`, and the conversation names its session in
-`x-opengeni-session-id` so `authorizeSession` checks those reads too. Sandbox
-paths follow `files:read` and Opengeni's own session and Connected Machine
-checks.
+loaders); behind the proxy these need `files` (on by default) and an exact
+session association the API proves for every workspace-level artifact read.
+Sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+session working directory without following symlinks.
 The session goal shows in the conversation chrome with Pause, Resume, and
-Clear (the goal read uses its `?absent=null` opt-in, so a goal-less chat reads a
-200 `null` instead of logging a failed 404). Rows for spawning,
+Clear; the proxy forwards only the goal read (with its `?absent=null` opt-in, so
+a goal-less chat reads a 200 `null` instead of logging a failed 404),
+`{ status: "paused" | "active" }` updates, and the clear, its only `DELETE`. Rows for spawning,
 messaging, and hearing from another agent call `onOpenSession`; `OpenGeniChat` opens the child
 chat in place. Those rows name the agent with the title it was spawned with; pass
 `resolveSessionTitle` to show current titles (the web app reads them from session lineage).
-The host hides actions it does not offer with props (`newChat`, `listProps`,
-`attachments`, `voiceInput`, `realtimeVoice`); the composer microphone follows
-`voiceInput.available`. Older proxies that still report `sessionCreation`,
-`archive` or `realtimeVoice` as `false` keep hiding those actions.
+The proxy's client config reports `sessionCreation`, `archive`, and
+`artifacts` (`false` when off), so the stock chat hides actions the proxy
+cannot serve; the composer microphone follows `voiceInput.available`
+(`voiceInput={false}` opts a conversation out).
 `opengeni-site` fences render the console's inline Site preview (a static
-"Site preview unavailable" card when the client config reports
-`artifacts: false`), and `onOpenArtifact` plus `SessionArtifactViewer`
-(`@opengeni/react/artifacts`) open editable artifacts and Sites in a host
-container through the proxy. The proxy's client config refreshes effective
-workspace grants for the browser cache partition. Live source authority is
-rechecked in the mutation commit transaction; lease expiry runs independently
-of pending authorization. Older APIs omit only artifact capability, leaving
-conversation bootstrap available. Site HTML keeps Opengeni's sandbox and
-download headers through the proxy.
+"Site preview unavailable" card when the proxy reports `artifacts: false`), and
+`onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
+open editable artifacts and Sites in a host container through the proxy's
+opt-in `artifacts: true`. The proxy checks exact session associations on every
+request and refreshes effective workspace grants for the browser cache
+partition. Live source authority is rechecked in the mutation commit transaction;
+lease expiry runs independently of pending authorization. Older APIs omit only
+artifact capability, leaving conversation bootstrap available.
+Its Site HTML delivery streams with cancellation and a 25 MiB
+actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
 The proxy's `toolServer` option attaches a product MCP endpoint to every session
 it creates with a short-lived per-user token and rotates it on every message,
 approval, and answer; the endpoint checks it with `verifyToolRequest` from
@@ -564,10 +459,8 @@ substituted in. Exact-message application context does not enter this prefix.
   `input_text` part in that same canonical user-role history item, and preserves
   it through queueing, steering, retry, approval resume, worker recovery, and
   realtime handoff. Standard timeline rendering displays only the visible
-  message text. Public session, turn, queue, event and acceptance projections
-  omit host-only `modelContext`/`initialModelContext`, including HTTP forensic
-  reads, SSE and MCP. Canonical storage, model history and trusted worker
-  claims retain the context. It is not privileged or system-level authority. For realtime voice,
+  message text; full event/audit reads retain `modelContext`. It is **not**
+  secret, private, privileged, or system-level authority. For realtime voice,
   SDK/React hosts may provide `getModelContext`; Opengeni captures its current
   bounded value once when each durable delegation or finalized transcript entry
   is created, without restarting the controller when the callback changes. A
@@ -579,12 +472,8 @@ Use workspace `agentInstructions` for stable tenant-wide behavior and session
 `instructions` for a durable session persona. Use `modelContext` for concise
 submit-time route, selection, viewport, or entity context that belongs to the
 user's current message but should not clutter the ordinary chat presentation.
-Do not put secrets in it: the model receives the exact value, and the model
-request diagnostic snapshot can contain it inside the captured provider body.
-The authenticated `/model-context` diagnostic is an explicit exception to the
-public field projection: viewers authorized to read that session can inspect
-its raw provider request, including rendered host context. There is no separate
-diagnostic permission. When current product state must be read or mutated, prefer a
+Do not put secrets in it: authorized full event/audit surfaces may return the
+exact value. When current product state must be read or mutated, prefer a
 tenant-scoped tool over a large context snapshot.
 
 Because `modelContext` is appended in the newest user history item rather than
@@ -718,44 +607,6 @@ server-verifiable one-shot approval exchange, it omits tools classified for
 human approval and rejects direct calls to their projected names. OAuth consent
 does not satisfy that separate per-call approval requirement.
 
-A `tools/call` for a name the workspace MCP cannot call answers a named
-JSON-RPC error, `-32602` (MCP's answer to an unknown tool), never the generic
-`-32603`. Its `error.data` is `{ code, name }` with `code` one of
-`WORKSPACE_MCP_TOOL_REFUSAL_CODES` (`@opengeni/contracts`):
-`TOOL_APPROVAL_REQUIRED` for a tool classified for human approval;
-`TOOL_NOT_CONSENTED` on an MCP OAuth connection for any other name outside the
-tools frozen at its consent (the catalog holds only those, so the answer tells
-nothing about tools outside the consent); `TOOL_NOT_FOUND` for any other
-caller.
-
-An embedding host's in-process tool servers (`workspaceToolServers`) may
-publish MCP Apps views. The workspace MCP forwards a host tool's MCP Apps
-`_meta.ui` on `tools/list`: `resourceUri` (from `ui.resourceUri`, or the
-deprecated flat `ui/resourceUri` key) and `visibility` (`["model"]`,
-`["app"]` or both; omitted means both). A tool may name no view and only a
-`visibility`; its `ui` is forwarded as `{ visibility }` and serves no view.
-A malformed `ui://…html` view drops the whole `ui`. A malformed `visibility`
-alone is dropped (the default then applies) and logged as a host
-registration warning naming the server and tool.
-`resources/read` contents carry the view's resource `_meta.ui` (`csp`,
-`permissions`, `domain`, `prefersBorder`) when the host's `readResource`
-returns a well-formed one. Other `_meta` keys a host sets are not forwarded,
-and first-party and remote tools never carry a view.
-
-A host tool server may also publish the version of its tool set
-(`LocalMcpServerRegistration.toolSetVersion`, 1–256 characters of the host's
-choosing, for example a digest of its published tool inventory). An MCP OAuth
-consent records each used host server's version (migration 1022), and the
-workspace MCP's `tools/list` result carries
-`_meta["opengeni/toolSets"]`: `{ [serverId]: { version, consentedVersion } }`,
-where `version` is the server's current one and `consentedVersion` the one
-recorded at consent (`null` for a consent that recorded none). A client asks
-the person to consent again when they differ. Callers that are not an MCP
-OAuth connection see `version` alone, and without any published version the
-key is absent. The tool identities frozen at consent still decide what the
-connection lists and calls, so a changed set never widens a connection before
-the person consents again.
-
 Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the
 runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact
@@ -828,40 +679,22 @@ Canonical sources: `SessionAuthorizationPort` in
 surfaces in `apps/api/src/`.
 
 Workspace permissions answer whether a principal may use a capability at all.
-An embedding host may additionally narrow native per-session access by binding `AppDependencies.sessionAuthorization`:
-
-Hosts using `startApi` can bind `onCanonicalHumanIdentityReader` to borrow the
-API-owned canonical identity reader. Startup awaits this callback before listening;
-a callback failure follows normal dependency cleanup. Each invocation performs the
-existing current projection read on the API's database pool, returning `null` only
-for a missing identity. The API owns pool shutdown; hosts must stop using the reader
-when they close the API. No identity result or business authority is cached.
+An embedding host may additionally own per-session ownership, sharing, and
+revocation by binding `AppDependencies.sessionAuthorization`:
 
 ```ts
 type SessionAuthorizationPort = {
   capabilities?: { modelAccountOperation?: boolean };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
-  authorizeSessionCreate?(input: AuthorizeSessionCreateInput): Promise<SessionAuthorizationDecision>;
   resolveListScope(
     input: ResolveSessionAuthorizationListScopeInput,
   ): Promise<SessionAuthorizationListScope>;
 };
 ```
 
-`authorizeSessionCreate` is optional and target-free (`{ accountId,
-workspaceId, actor, surface }`, no session yet). When the host provides it,
-`POST /v1/workspaces/:workspaceId/sessions` whose body carries an
-`initialMessage` (a first turn the default start mode admits without any other
-check) asks it before anything is created: a refusal answers `403` with
-`error.details.code = "SESSION_CREATE_NOT_AUTHORIZED"`, and a throw or an
-unreadable answer `503 SESSION_AUTHORIZATION_UNAVAILABLE`. A create without a
-first message, and a port without the method, check only `sessions:create`,
-as before.
-
 `authorizeSession` receives the account/workspace, requested operation and
-surface, the immediate target plus its server-resolved lineage root, durable
-`ownerSubjectId` (nullable), and native `visibility` (`workspace_shared` or
-`user_private`), and either the authenticated subject or a live exact agent attempt. Agent authority is
+surface, the immediate target plus its server-resolved lineage root, and either
+the authenticated subject or a live exact agent attempt. Agent authority is
 reconstructed from durable attempt ownership and includes the caller session,
 caller root, turn, attempt, execution generation, and frozen initiator; caller
 input cannot nominate those fields. A settled, superseded, interrupted, or
@@ -891,19 +724,10 @@ lineage, control, parent, and tree-stat projections remove information derived
 from other sessions. This projection choice never authorizes an operation on a
 second session; that target always receives its own authorization decision.
 
-`resolveListScope` returns `all`, a bounded `scoped` selector, or an ownership
-selector. In `scoped`, `rootSessionIds` include their descendants while
-`sessionIds` authorize exact rows only. `{ kind: "owned", subjectId }` selects
-only rows whose native `ownerSubjectId` matches; `owned_or_shared` also includes
-`workspace_shared` rows. The host supplies this well-formed subject as trusted
-policy output; Opengeni never infers a person from a technical agent identity.
-Native private-session, workspace, Slack, Site, and durable agent-viewer fences
-still intersect every selector. The target fields are optional for older host
-contracts, and the `all`/`scoped` forms retain their existing behavior. Native
-sessions have no individual-person sharing relation; these selectors add none.
-Changing an ownership selector's kind or subject invalidates list, message-search,
-and discovery continuation cursors. Opengeni applies the scope inside search, pin,
-ordering, totals, snapshot continuation, and MCP discovery queries. It does not hydrate a broad
+`resolveListScope` returns either `all` or a bounded database-applicable scope:
+`rootSessionIds` include their descendants while `sessionIds` authorize exact
+rows only. Opengeni applies the scope inside search, pin, ordering, totals,
+snapshot continuation, and MCP discovery queries. It does not hydrate a broad
 page and filter afterward. Revocation between cursor pages skips newly hidden
 rows and continues scanning to fill the next authorized page.
 
@@ -952,700 +776,11 @@ have that user connect it from a canonical signed-in Opengeni session, which
 freezes an ordinary personal-connection delegation onto the causal turn. See
 `docs/organization-tenancy.md` for the authority model.
 
-### Organization Governance
-
-`OrganizationGovernancePort.narrowWorkspaceToolServers` optionally narrows the configured gateway server IDs for a workspace of a governed organization. It receives the actual organization/workspace and configured IDs. The gateway intersects its answer with the existing servers and permission filters; it cannot add a server, tool or permission. An absent callback or ungoverned organization retains native behavior. Rejected or malformed responses fail closed. A host can use its own canonical workspace binding to narrow only its managed primary lane while leaving other lanes unchanged. This affects gateway preparation and OAuth proposal production, not the native Documents lifecycle.
-
-Canonical sources: `OrganizationGovernancePort` and `GOVERNED_MUTATIONS` in
-`packages/contracts/src/organization-governance.ts`, the route gate in
-`apps/api/src/http/organization-governance.ts` and the host commands in
-`apps/api/src/routes/governed-organization-commands.ts`.
-
-A host that owns business authorization can govern the organizations it
-provisions by binding `AppDependencies.organizationGovernance` (or the
-`startApi` option of the same name):
-
-```ts
-type OrganizationGovernancePort = {
-  governs(input: { organizationId: string; externalSource: string | null }): boolean;
-  decide(input: {
-    organizationId: string;
-    mutation: GovernedMutation;
-    via: "native" | "host";
-  }): "allow" | "refuse";
-  memberRouteAccess?: "allowlist";
-  organizationCreation?: "host";
-  reasoningDisclosure?: "full" | "withheld";
-  allowedRealtimeModels?: readonly string[];
-};
-```
-
-`governs` receives the organization's `managed_accounts.external_source`
-and must answer synchronously with a boolean; any other answer (a Promise
-included) fails the request closed (`OrganizationGovernancePortContractError`).
-For a governed organization, every native route that invites, revokes or
-re-sends an invitation, changes a role, suspends, reactivates or offboards a
-member, adds, changes or removes workspace or external members, creates,
-changes or revokes API keys, personal API keys or service accounts,
-connects, changes or disconnects an MCP agent (the OAuth consent is refused
-before a code is issued), starts, approves, cancels or executes an
-organization recovery operation (`organization_recovery.*`), or deletes a
-workspace (`workspace.delete`, both `DELETE /v1/organizations/:id/workspaces/:ws`
-and `DELETE /v1/workspaces/:ws`) asks `decide` with `via: "native"` after
-authenticating the caller. First-use external provisioning through an
-organization key (`x-opengeni-external-actor`) asks for `external_member.add`:
-when refused, only identities and memberships that already exist resolve. A
-refusal is `403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`,
-for owners too. Unbound, nothing changes and the host routes below are not
-registered.
-
-**Organization creation.** A person who belongs (any membership but a revoked
-one) to a governed organization creates no organization of their own:
-`POST /v1/organizations`, `POST /v1/organizations/additional` and the
-self-service `POST /v1/auth/organization-onboarding` ask `decide` for
-`organization.create` with `via: "native"` for each governed organization
-they belong to, and any refusal answers `403` with `error.details.code =
-"ORGANIZATION_CREATE_GOVERNED"` before anything is written. With
-`organizationCreation: "host"` on the port, organizations are the host's to
-create: those routes also refuse every managed human who has no governed
-membership whose host allows it, a freshly signed-up identity included.
-Without the field, a person without a governed membership, and a deployment
-without a port, are unchanged.
-
-`decide` MUST answer `"refuse"` for any mutation it does not recognize:
-`GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
-stay closed until the host chooses to allow it.
-
-**Member route allowlist (opt-in).** With `memberRouteAccess: "allowlist"` on
-the port, a person of a governed organization reaches
-`/v1/workspaces/:workspaceId/*` and `/v1/organizations/:organizationId/*` only
-through the governed allowlist; every other route answers `403` with
-`error.details.code = "WORKSPACE_ROUTE_NOT_ALLOWED"` and a body that names no
-resource, ahead of the route's own checks and of `decide`. A person is a
-`user:` or `external_user:` subject with their own credential (browser
-session, native app credential, personal API key), or a host-minted person
-token (`principalKind: "human_session"` signed with the delegation secret).
-The host's service tokens, the worker's agent-attempt tokens, machine
-credentials (organization and workspace keys, the configured key) and an
-organization key acting for a person (`asUser`, `x-opengeni-external-actor`)
-keep each route's own checks; so does a caller with no grant in the workspace
-(or, for an organization route, in the organization), so `401` stays `401`
-and nothing tells an outsider the organization exists. MCP OAuth clients
-authenticate inside `/mcp` and get that route's own answer. A guarded path
-that resolves no handler template is refused for a person (fail closed).
-
-**Reasoning disclosure (opt-in).** With `reasoningDisclosure: "withheld"` on
-the port, the provider's reasoning text (OpenAI reasoning summaries, Anthropic
-thinking and chat-completions reasoning) never leaves the server for a session
-of an organization the host governs, whoever reads it. Every
-`agent.reasoning.delta` keeps its id, sequence, turn and coverage, so cursors,
-replay and gap detection are unchanged, and is delivered without text (the
-payload keeps only a numeric `coalescedUntil`) on
-`GET .../sessions/:id/events/stream` (live, replay and the `http1-bounded`
-batch), `GET .../sessions/:id/events` in every mode and payload mode
-(a forensic page then answers `X-OpenGeni-Forensic-Exact: false`), and the MCP
-`session_events` debug and compact reads. The stock transcript draws nothing
-for a reasoning event without text, so a governed reader sees no thinking row
-at all; there is no placeholder. Session reads, turns, the model-context read,
-the MCP conversation, results and tools views, `session_wait` and the Slack and
-Teams deliveries carry no reasoning text, and a published Site already omits
-reasoning events. Stored events and model history are unchanged; the setting
-only changes what is delivered. Give the worker the same port
-(`ActivityDependencies.organizationGovernance`) and a turn of such an
-organization also asks the provider for no reasoning summary; Anthropic
-thinking and chat-completions reasoning are not controlled by that request, so
-the server-side removal is the guarantee. Unset or `"full"`, nothing changes.
-
-**Realtime voice models (opt-in).** With `allowedRealtimeModels` on the port
-(realtime catalog ids, for example `opengeni-gateway/openai/gpt-realtime-2.1`),
-a governed organization's `GET /v1/workspaces/:id/realtime-model-catalog`
-lists only those models, in catalog order, and the server refuses any other
-model: a voice start (`POST .../sessions/:id/realtime`) answers `403` with
-`error.details.code = "REALTIME_MODEL_NOT_ALLOWED"` and the refused `model`
-before anything is written, and a WebRTC or WebSocket connection of a voice
-mode whose model is no longer allowed is refused the same way. An empty list
-allows no voice model. A saved workspace or organization default outside the
-list is simply not listed. Without the field, and for an organization the
-host does not govern, the stock catalog and starts are unchanged.
-
-The allowlist (exported from `@opengeni/api-router/app`) is the workspace
-itself, the session list and create, the composer's reads
-(`session-tenancy/capabilities`, `new-session-draft`,
-`session-message-search`, `models`, `model-catalog`, `usage/me`,
-`allowance/state`), the workspace live streams, the inbox and its
-notifications, documents, Knowledge and Skills (each under its own
-permission), session feedback and artifact reads, plus every session route
-whose `sessionAuthorizationOperationForHttp` operation is in
-`GOVERNED_MEMBER_SESSION_OPERATIONS`, except the routes in
-`GOVERNED_MEMBER_SESSION_ROUTE_DENIALS`: `GET codex-accounts`,
-`GET model-account`, `GET` and `DELETE background-commands`, `GET` and
-`POST sandbox-recovery`, `GET admin-access`, `GET model-source-basis`
-(model and account provenance) and `PUT usage-limit` (the task budget is the
-host's) under a session reuse a generic operation (`session.read`,
-`session.control`) for a subject the allowlist otherwise closes, so they are
-refused too. `GET usage-limit` and `POST retry` stay allowed. Not on it: `/mcp`, which for a person's
-own credential is the whole workspace tool gateway (as `tools/*`; sessions
-reach their tools through the worker's delegated tokens), and every
-organization route. `governedRouteTable(app.routes)` gives the decision for
-every mounted route, so a host can generate its refusal tests from it.
-
-The host performs these mutations through `/v1/host/organizations/:id/...`
-(`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,
-`members/:id/{suspend,reactivate,offboard}` (reactivate also takes
-`workspaceIds`, below), `PUT workspaces/:ws/members/:id` and
-`DELETE workspaces/:ws/members/:id`). Each takes
-`{ actingExternalUser: { source, externalId }, command }`, where `command` is
-the native request body. Authentication is a service delegated token
-(`ogd2_`, `principalKind: "service"`) for that organization and one of its
-workspaces, holding `members:manage`; anything else is `401
-HOST_COMMAND_SERVICE_TOKEN_REQUIRED`. The command must be allowed by
-`decide` with `via: "host"`, and an ungoverned organization answers `403
-ORGANIZATION_NOT_HOST_GOVERNED`. The token's `subjectId` is the database
-actor, checked like any administrator: an active `owner` or `admin`
-membership of the organization, otherwise `403
-HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. That is normally the subject the host
-passed to `bootstrapWorkspace` with `governedOrganizationOwner: true`, which
-owns the organizations it creates that way (see the host owner below). The native receipt and lifecycle event are
-written as for the native route, and `organization_host_command_attributions`
-names the acting external user and service initiator under the same operation
-id. Reusing an operation id for another command or acting user is `409
-HOST_COMMAND_OPERATION_CONFLICT`.
-
-**The host owner.** The owner write is opt-in. A host that runs its commands
-as the subject it bootstraps with passes
-`bootstrapWorkspace({ ..., governedOrganizationOwner: true })`. When that call
-creates the organization, it also makes the subject the organization's active
-`owner`, which writes three rows: the `organization_memberships` row, the
-hidden Personal workspace every active membership has (with no access to
-it), and that workspace's `workspace_inference_controls` row. It does so only
-for a new organization (decided by the insert itself, so two concurrent first
-bootstraps write one owner), never for the `opengeni:local`,
-`opengeni:configured` and `better-auth:user` accounts, which have their own
-memberships, and never for identity-backed subjects (`user:`,
-`external_user:`), whose memberships come from invitations and external
-identities. Without the flag, `bootstrapWorkspace` writes no organization
-membership, as in stock. An organization bootstrapped without it, or before
-the owner routine was granted, has no such owner, so every host command and
-read for it is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. The host
-fixes that once with `POST /v1/host/organizations/:id/host-owner/ensure`
-(`HostEnsureOrganizationOwnerRequest`):
-`{ actingExternalUser, command: { operationId } }`.
-
-- It authenticates with the same service token, but the token's subject need
-  not be an administrator yet. The organization must be governed (otherwise
-  `403 ORGANIZATION_NOT_HOST_GOVERNED`). There is no `decide`: no native route
-  can do this.
-- It only ever makes the token's own `subjectId` the owner of the token's own
-  organization. The command names no subject, and another field is `422`.
-- The subject must own one of the organization's workspaces, which is what
-  `bootstrapWorkspace` left for it. Any other subject, and identity-backed
-  subjects (`user:`, `external_user:`), are `403
-  HOST_COMMAND_ACTOR_NOT_AUTHORIZED`.
-- It is idempotent. The answer (`HostOrganizationOwner`) is
-  `{ membershipId, subjectId, created }`, where `created` is true only for the
-  call that wrote the row. A membership of the subject that is already an
-  active owner is a no-op. Any other membership of the subject (an admin, a
-  member, suspended or revoked) is `409 HOST_ORGANIZATION_OWNER_CONFLICT`: the
-  ensure never promotes or reactivates anyone. It changes no other membership.
-- It is audited like a host command: `organization_host_command_attributions`
-  records it under `mutation = "host_owner.ensure"` with the acting external
-  user, service subject and initiator, and the same operation-id rules apply.
-  The database enforces this: it adds an owner to an existing organization only
-  for an operation id recorded that way by the same subject, and
-  `bootstrapWorkspace`'s own call (with no operation id) only to an
-  organization that has no membership yet.
-  Like the other host commands, it then stores the governed session policy
-  default (unless a policy is stored) and turns Personal workspaces off.
-- Answers carry `cache-control: no-store`.
-
-The owner write is a runtime definer
-(`opengeni_private.ensure_organization_host_owner`, migration 1017) whose
-runtime `EXECUTE` migration 1019 grants, one release later. Before 1019,
-`bootstrapWorkspace` wrote no owner and the ensure command answered `503`
-"not yet"; from 1019 on, readiness requires the grant (a runtime without it is
-unready and names the routine). Once 1019 is applied, call the ensure once for
-each organization bootstrapped before it.
-
-A governed organization's people have no Personal workspace to see or start
-work in. The fork turns the organization's Personal workspaces setting off
-(`personal_workspaces_enabled`, migration 0918) the first time it sees the
-organization governed: when it is created through `POST /v1/organizations`
-or `/v1/organizations/additional`, and before each host command, because a
-host usually provisions its organizations out of band. Members then land in a
-shared workspace, as for any organization with the setting off. Turning the
-setting back on through `PATCH /v1/organizations/:id/privacy-settings` is
-`403 ORGANIZATION_GOVERNED_BY_HOST` with `details.setting =
-"personalWorkspaces"`; turning it off is always accepted.
-
-Because a governed member has no Personal workspace to fall back to, the host
-must keep every human member in at least one shared workspace, and each break
-of that is `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`:
-
-- A host or native invitation with an empty `initialWorkspaceIds` is `422`.
-- Removing a managed human member's last shared workspace, through the host's
-  `DELETE workspaces/:ws/members/:id` command (whose `command` is the native
-  revoke body, `{ expectedUpdatedAt, operationId }`) or a native removal route
-  the host allows, is `409`. The removal command checks it under
-  its organization lock; service principals and external identities are not
-  checked. To take someone out, offboard them.
-- Suspension removes every workspace grant, so reactivation must re-grant:
-  the host's `members/:id/reactivate` command takes `workspaceIds` (required,
-  shared workspaces of the organization) and grants each with the workspace
-  role `member` in the same transaction as the reactivation; without them it
-  is `422`. A native reactivation cannot carry grants and is `422` too.
-
-The host's `PUT workspaces/:ws/members/:id` command only grants or changes
-access; `DELETE workspaces/:ws/members/:id` removes it.
-
-To link one of its people to the native identity that accepted its
-invitation, the host reads `POST /v1/host/organizations/:id/identities/lookup`
-with `{ identityId }`, the `sub` of a host session token
-(`HostLookupOrganizationIdentityRequest`). It authenticates like the host
-commands (the same service token, `members:manage`, an administrator subject
-and `403 ORGANIZATION_NOT_HOST_GOVERNED`), but it is a read: no `decide`, no
-`actingExternalUser` and no attribution row. Every answer, refusals included,
-is sent with `cache-control: no-store`. The answer (`HostOrganizationIdentity`)
-is:
-
-```ts
-{
-  identityStatus: "active" | "recovery_required" | "disputed" | "disabled";
-  verifiedEmail: string | null; // null while the account's email is unverified
-  activeLoginBinding: { id: string; revision: number } | null;
-  memberships: {
-    id: string;
-    status: "provisioning" | "active" | "suspended" | "revoked";
-    role: "owner" | "admin" | "member";
-    authorizationRevision: number; // members/:id/* expectedAuthorizationRevision
-    sharedWorkspaceAccess: {
-      workspaceId: string;
-      membershipId: string; // the workspace grant's id
-      role: "viewer" | "member" | "admin" | "custom";
-      permissions: string[];
-      updatedAt: string; // workspaces/:ws/members/:id expectedUpdatedAt, exact
-    }[];
-  }[];
-  acceptedInvitations: { id: string; acceptedMembershipId: string; acceptedAt: string }[];
-}
-```
-
-`memberships` lists the identity's memberships in this organization, oldest
-first; it is a list because one identity can sign in through more than one
-account. A suspended or offboarded (`revoked`) member still answers `200`:
-**the host must refuse to link any membership that is not `active`.**
-
-Each membership carries the values the host's member commands fence on, so
-the host does not need a second read before changing someone:
-
-- `authorizationRevision` is what `members/:id/change-role`, `suspend`,
-  `reactivate` and `offboard` take as `expectedAuthorizationRevision`. A stale
-  value is `409`.
-- `sharedWorkspaceAccess` lists the membership's grants in the organization's
-  shared workspaces (never its Personal workspace), ordered by workspace name,
-  as the organization administration overview shows them. `updatedAt` is what
-  `PUT` and `DELETE workspaces/:ws/members/:id` take as `expectedUpdatedAt`.
-  The database compares it to the microsecond, so it keeps full precision
-  (for example `2026-10-27T10:15:30.123456+00:00`): send it back exactly as
-  received. A stale value is `409`. `role` is `custom` when `permissions` is
-  not one of the preset roles. A suspended or offboarded membership has no
-  grants.
-
-`verifiedEmail` is the email of this organization's member account that the
-active login binding signs in to; without an active binding, the oldest
-active membership's account. It is `null` while that email is unverified, or
-when there is no such account (for example when the binding signs in to an
-account of the identity that is not a member here).
-`activeLoginBinding` is the identity's active canonical login binding, or
-`null` when it has none in the `active` state. Its `id` changes when another
-sign-in method becomes the active binding, and its `revision` increases
-whenever that binding's state changes. `acceptedInvitations` lists only this
-organization's invitations, newest first; `acceptedAt` is the invitation's
-`accepted_at` (migration 1016), set when it is accepted. An identity with no
-membership in the organization answers `404` with
-`error.details.code = "HOST_IDENTITY_NOT_IN_ORGANIZATION"`, the same answer as
-an identity that does not exist. A token whose subject is not an active owner
-or admin of the organization is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`, the
-code every host command now gives when the database refuses its actor.
-
-#### Host session token claims
-
-A host session token (`GET /v1/auth/host-token?workspace=<id>`, enabled by
-`OPENGENI_HOST_TOKEN_AUDIENCE`) also names the identity's active login binding
-as two top-level claims: `login_binding_id` and `login_binding_revision`. They
-are the same pair this lookup answers as `activeLoginBinding`, read at mint
-time, so a host that recorded the pair when it linked the person can tell
-locally, with no identity round trip, that another sign-in method became
-active (`login_binding_id` differs) or that the binding changed state since
-(`login_binding_revision` is higher), and ask an administrator to confirm
-before the person's access carries over. A signed-in identity with no active
-binding gets no token: `403 HOST_TOKEN_LOGIN_BINDING_UNKNOWN`. The claims are
-flat snake-case keys, like the token's other claims, rather than one nested
-object.
-
-`GET /v1/auth/host-token?purpose=registration` mints the registration
-variant, for a signed-in person who may have no workspace yet (for example
-before the host creates their organization). It carries no `org` and no `ws`
-(the keys are absent, not null), `purpose: "registration"`, the account's
-verified `email` with `email_verified: true`, and the same `login_binding_*`
-claims; `aud` is the configured audience, as for a workspace token. It is
-minted only for a managed browser session (no bearer credential), refuses an
-unverified email with `403 HOST_TOKEN_EMAIL_NOT_VERIFIED`, and counts against
-the same per-session limit (30 per minute) as workspace tokens. A `purpose`
-other than `registration`, or `purpose` together with `workspace`, is
-`400 HOST_TOKEN_PURPOSE_INVALID`. A host must accept a `purpose` token only at
-its registration endpoint and refuse it everywhere else. Opengeni itself
-accepts neither kind of host session token as a credential: every Opengeni
-route answers its own authentication refusal to one.
-
-The read is one query by identity
-(`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
-adds the fences), with no member-list bound. Like every new runtime definer,
-its runtime `EXECUTE` was granted one release later (migration 1019); before
-that the route answered through the organization's member list, which
-inherited the administration overview's bounds.
-
-A host that retries an invitation revoke until it settles needs to know why a
-revoke was refused. The host's `invitations/:id/revoke` command answers `409`
-with `error.code = "conflict"` and one of two refusal codes:
-
-- `error.details.code = "HOST_INVITATION_REVISION_CONFLICT"` with
-  `details.status = "pending"`: the invitation is still pending, but at a
-  revision other than `expectedRevision`. Read it back and retry at its current
-  revision.
-- `error.details.code = "HOST_INVITATION_NOT_PENDING"` with `details.status`
-  `"accepted"`, `"revoked"` or `"expired"`. For `accepted` and `revoked` no
-  revoke can succeed, at any revision; an `accepted` invitation made a
-  membership, so offboard that member if the person must go. An `expired`
-  invitation can no longer be accepted and the host may treat it as settled; a
-  revoke at its current revision still records it as `revoked`.
-
-Every other answer is the native one. An unknown invitation is `404`. An
-expired invitation revoked at its current revision is revoked (`200`), because
-its stored row is still pending. The revoke is idempotent on its
-`operationId`: replaying the same command after success returns the original
-receipt and changes nothing. The same `operationId` with another input is
-`409`.
-
-To read an invitation back, the host calls
-`GET /v1/host/organizations/:id/invitations/:invitationId`. It authenticates
-like the identity lookup (the same service token, `members:manage`, an
-administrator subject, `403 ORGANIZATION_NOT_HOST_GOVERNED`) and is a read, with
-no `decide` and no attribution row. Every answer, refusals included, is sent
-with `cache-control: no-store`. The answer (`HostOrganizationInvitation`) is:
-
-```ts
-{
-  id: string;
-  organizationId: string;
-  status: "pending" | "accepted" | "revoked" | "expired"; // expired: pending past expiresAt
-  revision: number; // a revoke's expectedRevision while pending
-  acceptedMembershipId: string | null; // set when accepted
-  acceptedAt: string | null; // set when accepted
-  expiresAt: string;
-}
-```
-
-Instants are ISO-8601 UTC with millisecond precision. The invitee's email,
-name and workspaces are left out. An invitation that does not exist and one
-that belongs to another organization both answer `404` with
-`error.details.code = "HOST_INVITATION_NOT_IN_ORGANIZATION"`. Without the
-governance port, the route does not exist.
-
-To read one membership back before acting on it, the host calls
-`GET /v1/host/organizations/:id/members/:membershipId`. It authenticates like
-the invitation read and is a read, with no `decide`, no attribution row and
-`cache-control: no-store` on every answer. Every status answers `200`; a
-membership that does not exist and one that belongs to another organization
-both answer `404` with `error.details.code = "HOST_MEMBER_NOT_IN_ORGANIZATION"`.
-The answer (`HostOrganizationMember`) is:
-
-```ts
-{
-  membershipId: string;
-  organizationId: string;
-  userId: string | null; // the native account (subject `user:<userId>`)
-  identityId: string | null; // that account's native identity: a host session token's `sub`
-  status: "provisioning" | "active" | "suspended" | "revoked"; // revoked: offboarded
-  role: "owner" | "admin" | "member";
-  authorizationRevision: number; // a member command's expectedAuthorizationRevision
-  sharedWorkspaceAccess: { workspaceId; membershipId; role; permissions; updatedAt }[];
-  updatedAt: string; // the membership's last change
-}
-```
-
-`status`, `authorizationRevision` and `sharedWorkspaceAccess` are the identity
-lookup's: a suspended or offboarded membership has no shared-workspace access.
-
-To settle what it projected from an outside MCP client a member signed in
-with, the host reads the connection:
-`GET /v1/host/organizations/:id/mcp-connections/:connectionId`, where
-`connectionId` is the connection's id in the native connected-agents list. It
-authenticates like the member read, writes nothing and is sent with
-`cache-control: no-store`. A connection that does not exist and one that
-belongs to another organization both answer `404` with
-`error.details.code = "HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION"`. The answer
-(`HostOrganizationMcpConnection`) is:
-
-```ts
-{
-  connectionId: string;
-  organizationId: string;
-  workspaceId: string | null; // a workspace connection's one workspace; null for an organization connection
-  clientId: string;
-  status: "active" | "revoked";
-  reason: null | "revoked" | "expired" | "membership_not_live" | "permissions_lost";
-  consentScope: { preset: string | null; permissions: string[]; workspaceScope };
-  revokedAt: string | null; // when it was disconnected or expired
-  updatedAt: string; // its latest token rotation or its revocation
-}
-```
-
-`status` is `active` only while the connection's next request would resolve a
-live grant. Otherwise it is `revoked`, and `reason` is the first of these that
-holds: it was disconnected (`revoked`), its refresh token expired (`expired`),
-its person's membership is no longer active (`membership_not_live`), or the
-person no longer holds any consented permission at the organization or in a
-workspace in the consented scope (`permissions_lost`; for a workspace
-connection, the live-grant resolution its requests use refuses). Only the last
-two can become `active` again. Treat any other `reason` as not live.
-
-A workspace connection's consent offers an access level, as an organization
-sign-in does: **Full** (everything the person can do in the workspace, the
-default and the behaviour of a consent form without the field), **Read only**
-(the `read_only` preset's permissions, and only tools that declare
-`readOnlyHint: true` and are not destructive) or **Custom** (the permissions
-the person picks, plus `workspace:read`; only read tools when none of them
-changes anything). The consent form posts `access_preset`
-(`full` | `read_only` | `custom`) and, for Custom, one `permission` per
-choice; an unknown level is refused before a code is issued. The level never
-widens anything: the grant keeps only permissions the person holds at consent
-(and the live membership still caps every request), and the tool identities
-frozen into the connection are what that narrowed grant lists. The level is
-recorded on the grant (migration 1021), so `consentScope.preset` of a
-workspace connection names it; it is `null` for a consent recorded before
-the level existed. Annotations are hints a tool declares, and a tool may
-change them later, so a connection whose recorded level is read-only (Read
-only, or Custom whose permissions change nothing) checks each frozen tool's
-current annotations on every request: a tool that keeps its name but no
-longer declares that it only reads leaves `tools/list`, and `tools/call`
-answers `-32602` with `data.code: "TOOL_NOT_CONSENTED"`. The check keys on
-the recorded level, so a Full consent, or one recorded before levels, is never
-narrowed by it, whatever the person's permissions.
-
-To hear about a disconnect without polling, configure the
-`mcp_connection.revoked` host webhook on both the API and the worker:
-`OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL` (http(s)) and
-`OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET` (at least 32
-characters), set together (`settings.hostWebhooks.mcpConnectionRevoked`).
-Unset, nothing is sent. When a person or an administrator disconnects an MCP
-connection, or its person changes its access setting so that it loses a
-permission or a workspace, the API starts one durable delivery (a Temporal
-workflow) just before it writes the change, and the worker POSTs it once it
-sees the change committed. It looks for about two minutes (24 checks, 5
-seconds apart); a change that never commits sends nothing. A notification
-never blocks the change: the start has a 3-second deadline, and when the
-delivery cannot be started in time (Temporal unreachable or hung), the API
-counts it in `opengeni_host_webhook_delivery_start_failures_total{event,change}`,
-logs one warning with `errorCode: "host_webhook_delivery_start_failed"` and a
-`correlationId` (the organization, connection and delivery ids go only to the
-protected failure diagnostic), and writes the change anyway, so the connection
-read stays authoritative. The URL
-must be https outside local/test (a plain http URL there refuses startup with
-`HOST_WEBHOOK_URL_HTTPS_REQUIRED`); a target inside the cluster is allowed. The body
-(`HostMcpConnectionRevokedWebhook`) is:
-
-```ts
-{
-  type: "mcp_connection.revoked";
-  change: "revoked" | "consent_downgraded";
-  connectionId: string;
-  organizationId: string;
-  workspaceId: string | null;
-  clientId: string;
-  revokedAt: string | null; // null for consent_downgraded
-  consentScope: { preset: string | null; permissions: string[]; workspaceScope }; // the new setting
-}
-```
-
-`X-Host-Signature: sha256=<hex>` is the HMAC-SHA256 of the raw body under the
-secret; verify it over the exact bytes received. `X-Host-Delivery` is the
-delivery's id. A delivery is retried with backoff (for about a day) until the
-host answers `2xx`, each retry with the same id and body, so deduplicate on
-the id; a `3xx` (redirects are never followed) or a `4xx` other than `408`
-and `429` ends it. A membership that ends, a
-refresh-token reuse that revokes a connection, and an expiry send nothing:
-settle those with the connection read.
-
-The gate is on HTTP routes. In-process callers of the `@opengeni/db`
-membership functions are not routed through it.
-
-#### Session policy: attachments and generic tool families
-
-Each governed organization has one session policy
-(`@opengeni/contracts/organization-session-policy`, table
-`organization_session_policies`, migration 1018) for every session in its
-workspaces, whatever started it (chat, API, schedules, automations):
-
-```ts
-type OrganizationSessionPolicy = {
-  attachments: "enabled" | "disabled";
-  toolFamilies: {
-    mode: "deny" | "allow";
-    families: ("shell" | "codemode" | "browser" | "computerUse")[];
-  };
-  recordings?: "allowed" | "denied";
-};
-```
-
-- **Families.** `shell` is the sandbox shell and file-editing tools
-  (`exec_command`, `write_stdin`, `apply_patch`, `view_image`, `code_search`,
-  `command_read`/`command_wait`) and the compute-routing tools
-  (`sandboxes_list`, `sandbox_attach`, `sandbox_swap`, `sandbox_provision`,
-  `run_on`, `connected_machine_enroll_token`, `connected_machine_remove`).
-  `codemode` is the in-sandbox Codemode bearer and the `/codemode/*` routes.
-  `browser` is the browser and interaction tools. `computerUse` is the
-  `computer_*` tools, the desktop tools, `excel_run` and
-  `connected_machine_enable_screen_control`. `deny` removes the named families;
-  `allow` keeps only the named ones. The policy only narrows: a kept family
-  still follows the session's own capabilities.
-- **Default, from the first piece of work.** The governed default is
-  `{ attachments: "disabled", toolFamilies: { mode: "deny", families:
-  ["shell", "codemode", "browser", "computerUse"] } }`. With the port bound,
-  the API stores it unless a policy is stored at every governed entry point
-  that can start work: native organization creation, every host command and
-  the host owner ensure, session creation, message admission, the create,
-  update, resume and run of a schedule or an automation trigger (REST and
-  first-party MCP alike), and the workspace-scoped
-  `GET /v1/config/client?workspaceId=` (which reports `fileUploads.enabled`
-  from it).
-  `bootstrapWorkspace({ ..., governedSessionPolicy: true })` stores it in the
-  bootstrap transaction. The worker, which has no port, treats a missing row as
-  stock; because every governed entry stores the row first, a governed
-  organization's work never reaches the worker without one.
-- **Organizations governed before 1018.** Whether a host governs an
-  organization is the port's answer at run time, not a fact in the database,
-  so migration 1018 backfills the governed default only for organizations the
-  database shows governed (those that already ran a host command). When the API
-  starts with its port bound it stores the default for every other
-  organization the port governs that has none
-  (`storeGovernedOrganizationSessionPolicyDefaults`; idempotent, paged, one
-  statement per governed organization). The pass runs in the background, so
-  the API serves without waiting for it. Each organization is isolated: one
-  whose port answer or write fails is skipped, and the pass goes on. Every
-  governed organization counts once in
-  `opengeni_governed_session_policy_defaults_total{outcome="stored"|"present"|"failed"}`.
-  A failed organization logs `errorCode=governed_session_policy_default_failed`
-  with a `correlationId`; its organization id is only in the protected failure
-  diagnostic with that id (exported when
-  `OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT` is set), never in public logs.
-  A summary line (`governed session policy defaults stored`, with `governed`,
-  `stored`, `failed`, `durationMs`) closes a finished pass; a pass whose
-  organization listing fails logs only
-  `errorCode=governed_session_policy_backfill_failed`, with no summary. A failed
-  organization gets the default at its next governed entry point or the next
-  start, and runs stock until then. **So schedules and triggers a governed organization saved before 1018
-  start running under the governed default after the migration and that
-  startup pass**: no attachments (a saved file reference makes the run
-  `attachments_disabled`) and no generic tool families. A worker that fires one
-  between the migration and the moment the pass reaches its organization still
-  runs it as stock; a drained cutover that waits for the summary line, with
-  `failed` 0, before undraining has no such window. Nothing is stored
-  for an ungoverned organization, and without a bound port the API reads
-  nothing, so stock deployments are unchanged.
-- **Who may write the row.** The runtime may read it and insert only the
-  governed default (the table's INSERT policy admits nothing else); it has no
-  UPDATE or DELETE. A host's policy is written only by
-  `opengeni_private.put_host_organization_session_policy`, a SECURITY DEFINER
-  routine that requires the host command's `session_policy.update`
-  attribution for the same service subject and operation id, keeps a receipt
-  per operation id with the body's digest, and checks the expected revision.
-  The routine's runtime EXECUTE was withheld for one release
-  (expand-contract) and migration 1019 grants it; readiness requires it from
-  then on.
-- **Host command.** `PUT /v1/host/organizations/:org/session-policy` with
-  `{ actingExternalUser, command: { policy, operationId, expectedRevision } }`
-  replaces the policy (mutation `session_policy.update`, decided with
-  `via: "host"`; the same service-token rules as the other host commands).
-  `expectedRevision` is the `revision` the host last read; `0` means no host
-  policy yet (nothing stored, or only the governed default). The same
-  operation id with the same body replays (`replay: true`); with another body
-  it is `409 SESSION_POLICY_OPERATION_CONFLICT`; a stale revision is `409
-  SESSION_POLICY_REVISION_CONFLICT`, so a delayed old command never overwrites
-  a newer revision. `GET` on the same path is a read with no side effect: it
-  stores nothing, decides nothing and records nothing, and answers the
-  governed default with revision `0` while nothing is stored. Answers are
-  `{ organizationId, policy, source: "stock" | "governed_default" | "host",
-  revision, updatedAt }` (and `replay` on PUT). No native route writes the
-  policy, and native workspace settings or session capabilities cannot widen
-  it.
-- **Recordings (migration 1020).** `recordings` decides whether people may
-  record meetings and send recorded or dictated audio to a transcription
-  provider. When the policy leaves it out it takes the default for its source
-  (`sessionRecordingsAllowed`): `denied` for a stored policy (the governed
-  default or a host policy), `allowed` for stock. Answers name it only once a
-  host has set it, so a stored governed default reads back exactly as before.
-  A host command that names it sets it through
-  `opengeni_private.set_host_organization_session_recordings`, called right
-  after the policy routine for the row this operation id wrote; one that leaves
-  it out keeps the stored setting, and the body digest includes it only when
-  named. That routine's runtime EXECUTE is withheld for one release: until
-  it is granted, a command naming `recordings` answers `503
-  HOST_SESSION_POLICY_UNAVAILABLE` and records nothing, and other commands are
-  unchanged. Denied, these answer `403` with `details.code
-  SESSION_RECORDINGS_DENIED`; allowed, they still answer `403
-  ATTACHMENTS_DISABLED` while attachments are off:
-  - `POST /v1/workspaces/:ws/recordings` (meetings and dictation) and a
-    recording's `uploads`, `chunks/complete`, `finalize`, `transcripts`,
-    `live-session` and `live-segments`;
-  - `POST /v1/workspaces/:ws/transcription-recordings`, its chunk `PUT`,
-    `finalize` and `process-next`;
-  - `POST /v1/workspaces/:ws/transcriptions`.
-
-  Reading, editing and deleting existing recordings stay open, and the
-  workspace-scoped client config reports voice input unavailable.
-- **Attachments off.** These answer `403` with `details.code
-  ATTACHMENTS_DISABLED`:
-  - a person's `POST /v1/workspaces/:ws/files/uploads` and its `/complete`;
-  - a session create or message that attaches a file (`resources[].kind ===
-    "file"`);
-  - `POST /v1/workspaces/:ws/knowledge/drops` (text or file);
-  - a person's `sessions/:id/fs/write`, `fs/move` and `fs/mkdir`;
-  - a schedule or automation trigger whose template attaches a file, at create,
-    update, resume and run (REST `trigger`, first-party MCP
-    `scheduled_tasks_trigger`), and a manual automation event or webhook that
-    would start such a trigger. When the worker fires one saved before
-    attachments were turned off, it refuses it (`attachments_disabled`).
-
-  The workspace-scoped `GET /v1/config/client?workspaceId=` reports
-  `fileUploads.enabled: false`, and the console hides its attach controls for
-  that workspace. **Accepted exemptions:** an agent principal's own uploads
-  and file writes are its outputs, not attachments, and pass; a session fork
-  or history import reuses files that were already admitted, and is not
-  re-checked.
-- **Families off.** The worker removes the denied families from every turn's
-  tool catalog (first-party tools, function tools, the sandbox shell and
-  filesystem capabilities) and mints no Codemode bearer when `codemode` or
-  `shell` is denied. The API refuses them again at call admission: the
-  first-party MCP server never registers a denied tool whatever the token's
-  signed selection names, and these routes answer `403` with `details.code
-  SESSION_TOOL_FAMILY_DENIED` and `details.family`, after authenticating the
-  caller (these guards only read the policy, so an unauthenticated or refused
-  request writes nothing): `/codemode/*`; `browser-sessions` and `computer-sessions`
-  (mutations); `machines/:id/screen-control`; `enrollments/token` and
-  `enrollments/device/approve` (a Connected Machine is both `shell` and
-  `computerUse`); `sessions/:id/terminal/*`, `sessions/:id/fs/*` and
-  `sessions/:id/git/*`.
-- **A stored row outlives governance.** Nothing deletes a policy row. If a
-  host stops governing an organization, its stored policy still applies, at
-  the API and in the worker. If the port is unbound, the worker keeps
-  honouring the row while the API, which reads nothing without a port, stops
-  refusing at its own entry points. An operator deletes the row to lift it.
-
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.
 
-`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and workspace membership rows, then returns an `AccessContext`. Two opt-in flags are for a host that governs the organization: `governedSessionPolicy` stores the governed session policy, and `governedOrganizationOwner` makes the subject the owner of an organization the call creates (see "The host owner" under Organization Governance). Without them it writes neither.
+`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and membership rows, then returns an `AccessContext`.
 
 The workspace remains the operational boundary. Route and core code must use the workspace id from the grant/path, not a resource id, as the access boundary.
 
@@ -2406,12 +1541,6 @@ approvals. Hooks outside that baseline export exact structural refinements:
 used by the mounted hooks; it does not stub workspace administration, billing,
 sandbox environment, connected-machine, or unrelated workbench APIs.
 
-Meeting recording embeds the same way: `@opengeni/sdk/recordings` gives a
-headless, local-first recorder and uploader, and `@opengeni/react/recordings`
-gives capture, list, transcript and speaker hooks over an explicit
-`recordings` client when the host proxies the API. See
-[`recordings.md`](recordings.md#embedding).
-
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the
 stock web implementation calls the SDK's
@@ -2458,128 +1587,6 @@ root dotfiles while preserving nested project dotfiles:
   isFileNodeVisible={(node, { depth }) => !(depth === 0 && node.name.startsWith("."))}
 />
 ```
-
-### Web console host extension
-
-A host can also extend the stock web console itself at build time.
-`OPENGENI_WEB_HOST_EXTENSION` names an absolute directory with a built
-`index.js` and `style.css`; the console resolves the fixed
-`@opengeni/web-host-extension` specifier to it. The contract is `HostExtension`
-in `@opengeni/react/app/host-extension`.
-
-`index.js` is the descriptor, and the console loads it at startup. Keep it to
-plain data, small eager components (nav icons, brand marks, shell providers)
-and `import()` thunks. Load page bodies through `routes[].load`, and load
-tool-card bodies with `lazy(() => import(…))` behind the card's own
-`Suspense`. Pages and cards then download only when someone opens them, and the
-descriptor adds about one small module to the console's startup load.
-
-The console's Tailwind build also scans that directory, so a utility class
-that only the extension's built JS uses is still generated, even when the
-directory is listed in the host's `.gitignore`.
-
-The console imports the descriptor from one startup module that only its main
-entry reaches (`apps/web/src/host-extension/startup.ts`). Every other console
-module reads the installed extension at call time. Do not import the
-specifier anywhere else. A module that lazy routes also reach statically and
-that holds `import()` reshuffles the bundler's route-aware startup chunks,
-which can pull whole lazy surfaces into the first load. A host tool card may
-use an exact `mcp_<hash>__<leaf>` name whose leaf has a built-in card when the
-hash is 16 or 24 lowercase hexadecimal characters and `matchPrefixedLeaf` is
-explicitly `false`. Bare built-in names and built-in names under the native
-`opengeni__` and `mcp__opengeni__` prefixes remain protected.
-
-`navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
-`plugins`, `state`, `automations`, `meetings`, `artifacts`, `insights`): `label` renames
-one wherever the rail draws it (expanded, collapsed, folded under More),
-`group: "chat"` moves it into the chat group right after "New session" (its own
-`role="group"` with a rule before the other entries), and `group: "hidden"`
-leaves it off the rail while its page stays. Each id appears once, and an
-override of a destination the extension hides is refused.
-`composePrimaryNav(extension, nativeItems, context?)` is the pure resolver the
-rail uses; it imports no React or DOM code, so a host can run it in a test or
-a child process.
-
-`insights` is a `NativeNavId` too: the workspace Insights page, which the
-settings rail lists in the workspace section. Its `label` renames it there and
-in the settings header, and `group` is `"peer"` (its own place) or
-`"hidden"`; `"chat"` is refused. `settingsGroup` (one of the extension's
-`settingsGroups`) moves a native entry into that group of the settings rail,
-listed first and in native order, before the group's own `nav` items, and off
-its native place (the primary rail, or the workspace section for Insights);
-it cannot be combined with `group`, the inbox stays on the primary rail, and
-Insights keeps its `workspace:admin` gate there.
-`nativeEntriesInSettingsGroup(extension, groupId)` and
-`nativeNavOverride(extension, id)` resolve this without React or a DOM. A
-host nav item placed in a group (`placement: { settingsGroup }`) is
-validated against `settingsGroups` the same way.
-
-`landing` is the workspace-relative page the console opens for a workspace,
-both from the root (`/`) and from `workspaces/$workspaceId/`: `"sessions"`
-(the default) or one of the extension's own `routes` without a `$param`; any
-other value is refused at registration. `workspaceLanding(extension)` resolves
-it without React or a DOM.
-
-`outsideWorkspaceRoutes` mounts host pages at the console's top level,
-outside any workspace (for example `register`, `not-admitted`), for people
-who have no workspace yet. Each is `{ path, load, access? }`: `path` is
-lowercase static segments whose first segment is not one of the console's own
-top-level routes (or `v1`, `api`, `assets`, `auth`, `oauth`, `mcp`), which
-registration refuses; `access: "public"` renders the page before configuration
-and sign-in, like the reset-password page, and `"signedIn"` (the default)
-renders it once the person is signed in, before the workspace access and
-onboarding gates. These pages render inside `outsideWorkspaceProviders`
-(components taking only `children`), not inside `shellProviders`, which take a
-workspace.
-
-`chatPanel` opens the console's own chat as a side panel beside the
-extension's rail pages. It is `{ enabled(context) }`, which decides per page
-(`context` is `{ workspaceId, pathname }`); a page it answers false for, and
-every `mode: "settings"` page, has no panel. A page opens the panel with
-`openChatPanel(context)` from `@opengeni/react/app/chat-panel`, which returns
-false and changes nothing where no panel is offered (so the page can keep its
-own link to a new chat there). The panel is the signed-in person's chat on the
-console's own client and app context, like the Site view's chat panel: the
-extension's tool cards, `sessionIndicator` and `starters` apply in it, and an
-open chat has its one stream. `context` is checked like `messageContext`
-(labelled items with unique ids and only `id`, `text`, `label` and `detail`);
-a refused value opens the panel without it and warns once
-(`HOST_CHAT_PANEL_CONTEXT_FAILED`). The items show as pills beside the page's
-own `messageContext`, which still resolves at each send, and go with every
-message; the person can leave any of them out. Opening the panel again while
-a chat is open keeps that chat and replaces the items. A closed panel opens on
-a new chat; one created there starts with the workspace's default tools, like
-the Site view's chats. "Open as a full chat" opens that chat's route with the
-items the person kept, still sent beside the page's context there. The panel's
-code loads with the Site view's chunk the first time a page opens it, not at
-startup.
-
-`hiddenNativeDestinations` hides a native destination wherever the console
-offers it: its nav entries, its settings-rail and settings-search entries, its
-links, and its URL, which renders the not-found page. `insights` also hides the
-organization settings page Organization > Insights:
-`organization?section=insights` renders the not-found page. `productName`
-replaces "Opengeni" in the document title and in the panel that asks to reload
-after a new version.
-
-**Content-Security-Policy nonce.** A host that serves the console under a
-nonce CSP (never `'unsafe-inline'`) puts the response's nonce in
-`<meta property="csp-nonce" nonce="…">` first in `<head>`, ahead of the
-console's scripts, which carry the same nonce. An inline bootstrap in
-`index.html` (`opengeni-csp-nonce-bootstrap`) then stamps it on every `<style>`
-element the document creates (sonner's stylesheet, xterm's renderer styles)
-and sets `__webpack_nonce__` for get-nonce (radix's scroll lock), before any
-module runs; the main entry installs it again for the dev server. Only
-`<style>` is stamped: a script the page creates stays under `script-src`.
-Extensions read it with `nonce()` from `@opengeni/react/app/host-extension`.
-
-Bundle the extension's own icon set (for example `lucide-react`) into its
-build rather than leaving it external to share the console's modules. The
-console's startup and direct chat route load some of the same icon modules.
-When a lazy extension chunk imports many of them as well, the bundler can merge
-the shared modules into a lazy chunk that startup then has to load, and the
-build's eager-graph check refuses it. Bundled icons cost a few duplicate
-drawings and share no state, since the console mounts no icon provider.
 
 ## Trust model
 

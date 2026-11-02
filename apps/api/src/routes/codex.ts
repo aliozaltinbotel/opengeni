@@ -134,7 +134,6 @@ export function codexAccountJson(
     // P3 rotation cooldown: when set and in the future, this account is cooling-down.
     exhaustedUntil: row.exhaustedUntil,
     ...(row.ownInWorkspaceIds ? { ownInWorkspaceIds: row.ownInWorkspaceIds } : {}),
-    ...(row.reach ? { reach: row.reach } : {}),
     appsDesignated: options.appsCredentialId === row.id,
     canEnableApps:
       row.source === "workspace" &&
@@ -280,7 +279,6 @@ import {
   signCodexRedemptionConfirmation,
   verifyCodexRedemptionConfirmation,
 } from "../codex-redemption-security";
-import { parseRequestBody } from "../http/request-body";
 
 const CODEX_OVERVIEW_STALE_MS = 15 * 60_000;
 const CODEX_REDEMPTION_CONFIRMATION_SECONDS = 5 * 60;
@@ -705,17 +703,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/codex/source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const parsed = parseRequestBody(CodexSourceRequest, await c.req.json().catch(() => null), {
-      status: 400,
-      message: "a valid Codex source mode is required",
-    });
+    const parsed = CodexSourceRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "a valid Codex source mode is required",
+      });
+    }
     await codexRouteDisposition(deps, grant.accountId);
 
     return await coreCodexSetSource(c, deps, {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
-      mode: parsed.mode,
+      mode: parsed.data.mode,
     });
   });
 
@@ -956,18 +956,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const parsed = parseRequestBody(
-      SubscriptionRotationSettingsRequest,
+    const parsed = SubscriptionRotationSettingsRequest.safeParse(
       await c.req.json().catch(() => null),
-      { status: 400, message: "rotationEnabled is required" },
     );
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "rotationEnabled is required" });
+    }
     await codexRouteDisposition(deps, organizationId);
 
     return await coreCodexSetRotation(
       c,
       deps,
       { accountId: organizationId, workspaceId: null, subjectId: human.subjectId },
-      parsed.rotationEnabled,
+      parsed.data.rotationEnabled,
     );
   });
 
@@ -975,15 +976,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const parsed = parseRequestBody(
-      SubscriptionAccountToggleRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "enabled and expectedVersion are required" },
-    );
+    const parsed = SubscriptionAccountToggleRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
+    }
     const admin = { accountId: organizationId, workspaceId: null, subjectId: human.subjectId };
     await codexRouteDisposition(deps, organizationId);
 
-    return await coreCodexAllocator(c, deps, admin, c.req.param("accountId"), parsed);
+    return await coreCodexAllocator(c, deps, admin, c.req.param("accountId"), parsed.data);
   });
 
   app.patch(
@@ -992,15 +992,16 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const organizationId = c.req.param("organizationId");
       requireSameOriginBrowserMutation(c, deps);
       const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-      const parsed = parseRequestBody(
-        SubscriptionAccountToggleRequest,
+      const parsed = SubscriptionAccountToggleRequest.safeParse(
         await c.req.json().catch(() => null),
-        { status: 400, message: "enabled and expectedVersion are required" },
       );
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
+      }
       const admin = { accountId: organizationId, workspaceId: null, subjectId: human.subjectId };
       await codexRouteDisposition(deps, organizationId);
 
-      return await coreCodexExtraCredits(c, deps, admin, c.req.param("accountId"), parsed);
+      return await coreCodexExtraCredits(c, deps, admin, c.req.param("accountId"), parsed.data);
     },
   );
 
@@ -1296,18 +1297,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     await codexRouteDisposition(deps, grant.accountId);
 
-    const parsed = parseRequestBody(
-      SubscriptionAccountToggleRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "enabled and expectedVersion are required" },
-    );
+    const parsed = SubscriptionAccountToggleRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "enabled and expectedVersion are required",
+      });
+    }
 
     return await coreCodexAllocator(
       c,
       deps,
       { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
       c.req.param("accountId"),
-      parsed,
+      parsed.data,
     );
   });
 
@@ -1316,18 +1318,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     await codexRouteDisposition(deps, grant.accountId);
 
-    const parsed = parseRequestBody(
-      SubscriptionAccountToggleRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "enabled and expectedVersion are required" },
-    );
+    const parsed = SubscriptionAccountToggleRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "enabled and expectedVersion are required",
+      });
+    }
 
     return await coreCodexExtraCredits(
       c,
       deps,
       { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
       c.req.param("accountId"),
-      parsed,
+      parsed.data,
     );
   });
 
@@ -1746,10 +1749,10 @@ async function coreCodexResetPrepare(
   resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
 ) {
   c.header("cache-control", "no-store");
-  const parsed = parseRequestBody(redemptionPrepareBody, await c.req.json().catch(() => null), {
-    status: 400,
-    message: "attemptId and creditId are required",
-  });
+  const parsed = redemptionPrepareBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new HTTPException(400, { message: "attemptId and creditId are required" });
+  }
   const { human, accountId, workspaceId } = input;
   const { credentialId, organizationManaged } = await resolveTarget();
   return await asRedemptionHuman(human, async () => {
@@ -1761,7 +1764,11 @@ async function coreCodexResetPrepare(
     });
     if (organizationManaged && !authority?.owned) organizationManagedRedemption();
     if (!authority) throw new HTTPException(404, { message: "codex account not found" });
-    let existing = await getCodexResetRedemptionAttempt(deps.db, workspaceId, parsed.attemptId);
+    let existing = await getCodexResetRedemptionAttempt(
+      deps.db,
+      workspaceId,
+      parsed.data.attemptId,
+    );
     if (!existing && authority.owned) {
       // The same person's attempt filed in another workspace (an
       // organization account redeemed from several workspaces, or a ledger
@@ -1773,8 +1780,8 @@ async function coreCodexResetPrepare(
         workspaceId,
         credentialId,
         subjectId: human.subjectId,
-        creditId: parsed.creditId,
-        attemptId: parsed.attemptId,
+        creditId: parsed.data.creditId,
+        attemptId: parsed.data.attemptId,
       });
       if (fence === "held_elsewhere") {
         throw new HTTPException(409, {
@@ -1782,7 +1789,11 @@ async function coreCodexResetPrepare(
         });
       }
       if (fence === "refiled") {
-        existing = await getCodexResetRedemptionAttempt(deps.db, workspaceId, parsed.attemptId);
+        existing = await getCodexResetRedemptionAttempt(
+          deps.db,
+          workspaceId,
+          parsed.data.attemptId,
+        );
       }
     }
     if (!authority.owned) {
@@ -1794,7 +1805,7 @@ async function coreCodexResetPrepare(
     if (
       existing &&
       (existing.credentialId !== credentialId ||
-        existing.creditId !== parsed.creditId ||
+        existing.creditId !== parsed.data.creditId ||
         existing.subjectId !== human.subjectId)
     ) {
       throw new HTTPException(409, { message: "logical redemption attempt identity mismatch" });
@@ -1839,16 +1850,16 @@ async function coreCodexResetPrepare(
     const expiresAt = Math.floor(Date.now() / 1000) + CODEX_REDEMPTION_CONFIRMATION_SECONDS;
     const confirmationToken = await signCodexRedemptionConfirmation(secret, {
       version: 1,
-      attemptId: parsed.attemptId,
+      attemptId: parsed.data.attemptId,
       workspaceId,
       credentialId,
-      creditId: parsed.creditId,
+      creditId: parsed.data.creditId,
       subjectId: human.subjectId,
       browserSessionHash: human.browserSessionHash,
       expiresAt,
     });
     return c.json({
-      attemptId: parsed.attemptId,
+      attemptId: parsed.data.attemptId,
       confirmationToken,
       expiresAt: new Date(expiresAt * 1000).toISOString(),
       resumable: existing?.status === "provider_started" || existing?.status === "completed",
@@ -1867,10 +1878,10 @@ async function coreCodexResetRedeem(
   resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
 ) {
   c.header("cache-control", "no-store");
-  const parsed = parseRequestBody(redemptionBody, await c.req.json().catch(() => null), {
-    status: 400,
-    message: "explicit redemption confirmation is required",
-  });
+  const parsed = redemptionBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new HTTPException(400, { message: "explicit redemption confirmation is required" });
+  }
   const secret = deps.settings.betterAuthSecret;
   if (!secret) {
     throw new HTTPException(503, { message: "managed browser confirmation is unavailable" });
@@ -1878,13 +1889,13 @@ async function coreCodexResetRedeem(
   const { human, accountId, workspaceId } = input;
   const target = await resolveTarget();
   const { credentialId } = target;
-  const claims = await verifyCodexRedemptionConfirmation(secret, parsed.confirmationToken);
+  const claims = await verifyCodexRedemptionConfirmation(secret, parsed.data.confirmationToken);
   if (
     !claims ||
-    claims.attemptId !== parsed.attemptId ||
+    claims.attemptId !== parsed.data.attemptId ||
     claims.workspaceId !== workspaceId ||
     claims.credentialId !== credentialId ||
-    claims.creditId !== parsed.creditId ||
+    claims.creditId !== parsed.data.creditId ||
     claims.subjectId !== human.subjectId ||
     claims.browserSessionHash !== human.browserSessionHash
   ) {
@@ -1896,13 +1907,13 @@ async function coreCodexResetRedeem(
     const claimed = await claimCodexResetRedemption(
       db,
       {
-        id: parsed.attemptId,
+        id: parsed.data.attemptId,
         accountId,
         workspaceId,
         credentialId,
         subjectId: human.subjectId,
         browserSessionHash: human.browserSessionHash,
-        creditId: parsed.creditId,
+        creditId: parsed.data.creditId,
         confirmationExpiresAt: new Date(claims.expiresAt * 1000),
         claimHolderId,
       },
@@ -1920,10 +1931,10 @@ async function coreCodexResetRedeem(
       throw new HTTPException(409, { message: "logical redemption attempt identity mismatch" });
     }
     if (claimed.kind === "in_progress") {
-      return c.json({ status: "in_progress", attemptId: parsed.attemptId }, 409);
+      return c.json({ status: "in_progress", attemptId: parsed.data.attemptId }, 409);
     }
     const finishResponse = (outcome: string) =>
-      c.json({ status: "completed", attemptId: parsed.attemptId, outcome, overview: null });
+      c.json({ status: "completed", attemptId: parsed.data.attemptId, outcome, overview: null });
     if (claimed.kind === "completed") return finishResponse(claimed.attempt.outcome!);
 
     const attempt = claimed.attempt;

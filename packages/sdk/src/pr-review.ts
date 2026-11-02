@@ -1,7 +1,4 @@
-/**
- * Optional Opengeni Review Bot API client, deprecated: pull-request review is an
- * automation with a GitHub event trigger now. Removed in the next major.
- */
+/** Optional Opengeni Review Bot API client; import this entry only where the capability is used. */
 export { OpenGeniPrReviewClient } from "./pr-review-client";
 export type { OpenGeniPrReviewTransport } from "./pr-review-client";
 export type {

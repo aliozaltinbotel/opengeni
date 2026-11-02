@@ -250,7 +250,7 @@ export async function getToolActionReview(
           }),
         }
       : {}),
-    ...toolReviewFields(args, context, request.toolName),
+    ...toolReviewFields(args, context),
     reason:
       status === "blocked"
         ? request.policySource === "explicit"

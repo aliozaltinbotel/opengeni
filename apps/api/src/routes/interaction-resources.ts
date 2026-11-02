@@ -1,5 +1,3 @@
-import type { z } from "zod";
-import { parseRequestBody } from "../http/request-body";
 import {
   AuthRun,
   AuthRunListResponse,
@@ -42,7 +40,7 @@ import {
   listInteractionInterventions,
   listNetworkRoutes,
   listSiteAuthConnections,
-  listVisibleSessionInvalidationHints,
+  listVisibleSessionInvalidationIds,
   sessionListChangesFor,
   resolveInteractionIntervention,
   updateNetworkRoute,
@@ -71,7 +69,6 @@ import {
   sseWorkspaceLiveStream,
 } from "../http/sse";
 import { observeInterventionMutation } from "../interaction-metrics";
-import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/live-events/stream", async (context) => {
@@ -99,7 +96,6 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
         ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
-        visibleControlEvents: workspaceControlEventVisibility(deps, workspaceId, authorization),
         sessionLists: source
           ? {
               source,
@@ -117,7 +113,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
                   freshGrant,
                   "http",
                 );
-                return await listVisibleSessionInvalidationHints(deps.db, workspaceId, ids, {
+                return await listVisibleSessionInvalidationIds(deps.db, workspaceId, ids, {
                   subjectId: freshGrant.subjectId,
                   ...(authorizationScope ? { authorizationScope } : {}),
                   personalWorkspaceOwnerException:
@@ -590,14 +586,16 @@ function interactionProvenance(grant: AccessGrant): {
   };
 }
 
-async function parseJsonBody<Schema extends z.ZodType>(
+async function parseJsonBody<T>(
   context: Context,
-  schema: Schema,
-): Promise<z.output<Schema>> {
-  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
-    status: 400,
-    message: "invalid request body",
-  });
+  schema: {
+    safeParse(value: unknown): { success: true; data: T } | { success: false };
+  },
+): Promise<T> {
+  const value = await context.req.json().catch(() => undefined);
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new HTTPException(400, { message: "invalid request body" });
+  return parsed.data;
 }
 
 function optionalResourceKind(context: Context): "browser_session" | "computer_session" | null {

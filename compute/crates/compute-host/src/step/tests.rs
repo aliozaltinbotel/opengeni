@@ -218,7 +218,7 @@ impl Sandbox {
                 vm: (),
                 incarnation: 1,
                 stopping: Arc::default(),
-                memory: LiveMemory::adopted(DiskWatch::fresh(&self.paths).unwrap(), Base::Unknown),
+                memory: LiveMemory::adopted(DiskWatch::fresh(&self.paths).unwrap()),
             }),
             restore_notice_port: None,
             disk_image: self.root.path().join("base.ext4"),
@@ -854,8 +854,7 @@ async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
         .description()
         .unwrap();
     fs::write(live::check_marker(&sandbox.paths), "").unwrap();
-    job.live.as_mut().unwrap().memory =
-        LiveMemory::adopted(DiskWatch::adopt(&sandbox.paths, kept), Base::Unknown);
+    job.live.as_mut().unwrap().memory = LiveMemory::adopted(DiskWatch::adopt(&sandbox.paths, kept));
 
     let ran = job.run(Step::Save).await;
     assert_eq!(ran.outcome, Outcome::Failed(Failure::Unsavable));

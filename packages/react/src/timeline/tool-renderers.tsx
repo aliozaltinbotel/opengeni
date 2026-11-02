@@ -7,20 +7,36 @@ import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import { parseSandboxFileArtifactReceipt, type RetainedArtifactReference } from "@opengeni/sdk";
 import {
+  BoxIcon,
   BrainCircuitIcon,
+  CalendarClockIcon,
   CameraIcon,
   CameraOffIcon,
   DownloadIcon,
+  FileDiffIcon,
   FileSearchIcon,
+  FolderGitIcon,
   GlobeIcon,
   ImageIcon,
+  KeyboardIcon,
   KeyRoundIcon,
   LockIcon,
+  MessageCircleQuestionIcon,
   MessagesSquareIcon,
+  MessageSquareIcon,
   MousePointer2Icon,
   PackageSearchIcon,
   PanelsTopLeftIcon,
+  PlugIcon,
+  SearchIcon,
+  ServerCogIcon,
+  ServerIcon,
+  Share2Icon,
+  TargetIcon,
+  TerminalIcon,
   VideoIcon,
+  WrenchIcon,
+  type LucideIcon,
 } from "lucide-react";
 import { useContext, useState, type ReactNode } from "react";
 import { formatBytes, tryParseJson } from "../lib/format";
@@ -28,7 +44,6 @@ import { useTimelineComputeLabel } from "./compute-label";
 import { useToolDetails } from "./tool-details";
 import type { ToolCallItem } from "./types";
 import { ConnectorLogoIcon, useToolConnectorLogo } from "./provider-logo";
-import { toolIcon } from "./tool-icon";
 import {
   generatedImageReceipt,
   mediaPreviewFact,
@@ -80,6 +95,7 @@ import {
   writeStdinPresentation,
   type PresentedToolKind,
   type ToolBody,
+  type ToolIconKind,
   type ToolPreview,
   type ToolRowPresentation,
   type WebSearchResult,
@@ -155,6 +171,59 @@ function PathPreview({
    run_on and the generic fallback draw their row from the renderer-neutral
    presentation model in ./tool-presentation, which non-DOM renderers share.
    -------------------------------------------------------------------------- */
+
+/**
+ * The icon for a presentation kind, looked up when a row renders. A module-level
+ * table would capture the icons at load time; in a bundle where this module and
+ * the icon library's chunk import each other, an icon can still be undefined
+ * then, and the row would render an undefined component (React #130).
+ */
+function toolIcon(kind: ToolIconKind): LucideIcon {
+  switch (kind) {
+    case "terminal":
+      return TerminalIcon;
+    case "keyboard":
+      return KeyboardIcon;
+    case "file-diff":
+      return FileDiffIcon;
+    case "search":
+      return SearchIcon;
+    case "question":
+      return MessageCircleQuestionIcon;
+    case "target":
+      return TargetIcon;
+    case "brain":
+      return BrainCircuitIcon;
+    case "sessions":
+      return MessagesSquareIcon;
+    case "server":
+      return ServerIcon;
+    case "server-cog":
+      return ServerCogIcon;
+    case "calendar":
+      return CalendarClockIcon;
+    case "panels":
+      return PanelsTopLeftIcon;
+    case "share":
+      return Share2Icon;
+    case "message":
+      return MessageSquareIcon;
+    case "git":
+      return FolderGitIcon;
+    case "box":
+      return BoxIcon;
+    case "key":
+      return KeyRoundIcon;
+    case "file-search":
+      return FileSearchIcon;
+    case "package-search":
+      return PackageSearchIcon;
+    case "plug":
+      return PlugIcon;
+    case "wrench":
+      return WrenchIcon;
+  }
+}
 
 function presentedPreviewNode(msg: OpenGeniText, preview: ToolPreview): ReactNode {
   switch (preview.kind) {
@@ -2214,11 +2283,6 @@ export function rendersToolOutputPreview(renderer: ToolRenderer, item: ToolCallI
     PRESENTATION_RENDERERS.get(renderer) === presentedToolKind(item) &&
     presentsToolOutputPreview(item)
   );
-}
-
-/** The built-in entries, for checks that must agree with {@link defaultToolRegistry}. */
-export function builtInToolRegistryEntries(): readonly ToolRegistryEntry[] {
-  return BASE_ENTRIES;
 }
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */

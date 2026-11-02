@@ -81,13 +81,14 @@ import {
 import {
   GARAGE_FIXTURE_ACCESS_KEY_ID,
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
-} from "@opengeni/testing/object-storage-fixture";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { parseSseBlock } from "@opengeni/testing/sse";
-import { startTestMcpServer } from "@opengeni/testing/mcp";
-import { startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { testSettings } from "@opengeni/testing/settings";
-import { waitFor } from "@opengeni/testing/process";
+  MemoryEventBus,
+  parseSseBlock,
+  startTestMcpServer,
+  startTestServices,
+  testSettings,
+  waitFor,
+  type TestServices,
+} from "@opengeni/testing";
 import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
@@ -840,13 +841,8 @@ describe("API component integration", () => {
       id: string;
       tools: Array<{ kind: string; id: string }>;
     };
-    // Goal-bearing sessions force the first-party MCP server so goal tools are
-    // reachable; new sessions keep its Knowledge search eager.
-    expect(session.tools).toContainEqual({
-      kind: "mcp",
-      id: "opengeni",
-      eager: ["knowledge_search"],
-    });
+    // Goal-bearing sessions force the first-party MCP server so goal tools are reachable.
+    expect(session.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
@@ -3020,7 +3016,7 @@ describe("API component integration", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        message: expect.stringMatching(/^invalid session event: /),
+        message: "invalid session event",
         retryable: false,
       },
     });
@@ -3440,7 +3436,7 @@ describe("API component integration", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        message: expect.stringMatching(/^invalid session event: /),
+        message: "invalid session event",
         retryable: false,
       },
     });
@@ -5716,7 +5712,6 @@ describe("API component integration", () => {
       accountType: "User",
       linkedBySubjectId: context.subjectId,
       repositoryIds: [repository.id],
-      eventRouteSecret: null,
     });
     const legacyInfo = (await (
       await app.request(workspacePath(secondWorkspace.id, "/github/app"))
@@ -5953,7 +5948,6 @@ describe("API component integration", () => {
         authorityExpiresAt,
         authorityNonce: `first-${crypto.randomUUID()}`,
         repositoryIds: [adminRepository.id],
-        eventRouteSecret: null,
       }),
       bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
         accountId: context.defaultAccountId!,
@@ -5970,7 +5964,6 @@ describe("API component integration", () => {
         authorityExpiresAt,
         authorityNonce: `second-${crypto.randomUUID()}`,
         repositoryIds: [adminRepository.id],
-        eventRouteSecret: null,
       }),
     ]);
 

@@ -26,7 +26,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { rawRows } from "../../../packages/db/src/database";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   TestAuthoritativeKernel,

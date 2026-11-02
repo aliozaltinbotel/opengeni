@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import net from "node:net";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { waitFor } from "@opengeni/testing/process";
+import { acquireSharedTestDatabase, waitFor, type SharedTestDatabase } from "@opengeni/testing";
 import { createDb, rawRows, withRlsContext } from "../src/database";
 import { DatabaseTransactionError } from "../src/persistence-errors";
 import { postClaimDatabaseRecoveryFailure } from "../../../apps/worker/src/activities/agent-turn/errors";

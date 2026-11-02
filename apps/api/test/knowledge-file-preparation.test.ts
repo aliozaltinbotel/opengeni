@@ -24,8 +24,11 @@ import {
   withSessionRlsActorContext,
   type KnowledgeContext,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 import { createTemporalWorkflowClient } from "../src/index";

@@ -39,9 +39,12 @@ import {
   submitCodemodeOperation,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+} from "@opengeni/testing";
 import {
   InputWaitYield,
   extractOpenSuffixFromRunState,

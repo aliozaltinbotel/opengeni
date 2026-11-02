@@ -110,19 +110,15 @@ describe("turn finalization diagnostics", () => {
       timeoutMs: 10,
       slowAfterMs: 1,
       execution,
-      outstandingWriters: () => [{ kind: "shell_session", count: 1 }],
       requestWorkerDrain() {
         drains++;
       },
     });
     try {
-      monitor.enter("tool_writers");
+      monitor.enter("credential_cleanup");
       await Bun.sleep(15);
       expect(drains).toBe(1);
-      expect(logs.join("\n")).toContain('"reason":"tool_writers"');
-      expect(logs.join("\n")).toContain('"writerKinds":"shell_session"');
-      expect(warnings.join("\n")).toContain('"writerKinds":"shell_session"');
-      expect(logs.join("\n")).toContain('"registered":1');
+      expect(logs.join("\n")).toContain('"reason":"credential_cleanup"');
       expect(logs.join("\n")).toContain('"surface":"turn_finalization"');
       expect(logs.join("\n")).toContain(`"correlationId":"${correlationId}"`);
       expect(warnings.join("\n")).toContain(`"correlationId":"${correlationId}"`);
@@ -136,7 +132,7 @@ describe("turn finalization diagnostics", () => {
         sample(
           await obs.prometheusMetrics(),
           "opengeni_turn_finalization_slow_total",
-          "tool_writers",
+          "credential_cleanup",
         ),
       ).toBe(1);
     } finally {

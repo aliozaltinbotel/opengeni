@@ -15,7 +15,7 @@ import {
   type DbClient,
   type VaultDbContext,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createSecretResolver } from "../src/domain/vaults";
 
 setDefaultTimeout(300_000);

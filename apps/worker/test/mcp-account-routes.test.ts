@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import { selectedSessionRemoteMcpTargets } from "@opengeni/runtime";
 import {

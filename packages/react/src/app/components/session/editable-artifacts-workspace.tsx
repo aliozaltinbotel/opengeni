@@ -141,7 +141,6 @@ export function SessionEditableArtifactsWorkspace({
           workspaceId={workspaceId}
           sessionId={sessionId}
           compact
-          viewer
           items={filterArtifactCatalog(catalogItems, filters)}
           filters={filters}
           onFiltersChange={setFilters}

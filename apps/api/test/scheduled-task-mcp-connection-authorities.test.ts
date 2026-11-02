@@ -20,9 +20,12 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
@@ -853,7 +856,7 @@ describe("first-party MCP scheduled task pinned accounts", () => {
         targetSessionId: session.id,
         variableSetId: null,
         rigId: null,
-        overlapPolicy: "steer",
+        overlapPolicy: "buffer_one",
       });
       expect(task!.agentConfig.model).toBeUndefined();
       expect(task!.agentConfig.agent).toBeUndefined();

@@ -7,7 +7,6 @@
  */
 import {
   formatSecretReference,
-  standardVaultFieldName,
   type HumanInputQuestion,
   type HumanInputSecretAnswerResult,
   type SecretSaveTo,
@@ -16,7 +15,6 @@ import type { z } from "zod";
 import type { Database } from "./database";
 import {
   applySecretAnswersInTransaction,
-  VaultError,
   type SecretAnswerWrite,
   type VaultDbContext,
 } from "./vaults";
@@ -32,8 +30,6 @@ export type PreparedSecretAnswer = {
   value: PreparedSecretValue;
   /** The username is not a secret: the agent receives it in plain text (AC-3). */
   username?: PreparedSecretValue & { plain: string };
-  /** Derived from an SSH private key answer; saved by `ssh_key` questions. */
-  sshPublicKey?: { publicKey: PreparedSecretValue; fingerprint: PreparedSecretValue };
   generated: boolean;
 };
 
@@ -60,20 +56,6 @@ function secretAnswerWrite(
       valueEncrypted: answer.username.valueEncrypted,
       valueSize: answer.username.valueSize,
     });
-  }
-  if (spec.itemType === "ssh_key") {
-    if (answer.generated) {
-      throw new VaultError(
-        "invalid_secret_name",
-        "an SSH key question takes a pasted private key; generate key pairs with secret_save generateKey",
-      );
-    }
-    if (answer.sshPublicKey && standardVaultFieldName("ssh_key", spec.field) === "private key") {
-      fields.push(
-        { name: "public key", kind: "text", ...answer.sshPublicKey.publicKey },
-        { name: "fingerprint", kind: "text", ...answer.sshPublicKey.fingerprint },
-      );
-    }
   }
   return {
     questionId: answer.questionId,

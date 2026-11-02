@@ -28,8 +28,11 @@ import {
   type SubscriptionCoreCodexAppsDeps,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { createApp } from "../src/app";
 
@@ -438,11 +441,16 @@ async function appsRoutingFixture(api: ReturnType<typeof app>) {
     expect(response.status).toBe(200);
     return ((await response.json()) as { version: number }).version;
   };
-  // New work stops using the workspace's own accounts: each is switched off
-  // for inference, so only the organization's serve it.
   const routeToOrganization = async () => {
-    await admin`update subscription_connections set allocator_enabled = false
-      where account_id = ${accountId} and managed_by_workspace_id = ${workspaceId}`;
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      mode: "organization",
+    });
+    expect(
+      (await getWorkspaceCodexSubscriptionSource(client.db, workspaceId)).effectiveSource,
+    ).toBe("organization");
   };
   return { accountId, workspaceId, connect, connectOrganization, designate, routeToOrganization };
 }
@@ -2086,18 +2094,20 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
     const [connection] = await admin<{ id: string }[]>`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-        provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id, label,
-        allow_personal_workspaces
+        provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id, label
       ) values (
         ${accountId}::uuid, 'codex', 'subscription', ${encryptedCodexTokens("core-token", "core-refresh")},
         'shared', 'workspaces', ${`core-${crypto.randomUUID()}`}, 'pro', '{}'::jsonb,
-        ${new Date(Date.now() + 60 * 60_000).toISOString()}::timestamptz, ${workspaceId}::uuid, 'Core',
-        false
+        ${new Date(Date.now() + 60 * 60_000).toISOString()}::timestamptz, ${workspaceId}::uuid, 'Core'
       ) returning id::text as id`;
     const connectionId = connection!.id;
     await admin`
       insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
       values (${accountId}::uuid, ${connectionId}::uuid, ${workspaceId}::uuid)`;
+    await admin`
+      insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool
+      ) values (${accountId}::uuid, ${connectionId}::uuid, ${workspaceId}::uuid, 'workspace')`;
     await admin`
       insert into subscription_settings (
         account_id, rotation, providers, cross_provider_failover, fallback_order,

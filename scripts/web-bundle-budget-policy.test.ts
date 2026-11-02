@@ -1,18 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { readFileSync } from "node:fs";
 
 import {
   ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
@@ -82,10 +69,10 @@ describe("web bundle budget policy", () => {
       "initialRaw: 1485 * kib",
       "initialGzip: 405 * kib",
       "initialFileGzip: wholeKibEnvelope(82_325)",
-      "initialFiles: 37",
+      "initialFiles: 20",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      "cssGzip: wholeKibEnvelope(48_180)",
+      "cssGzip: wholeKibEnvelope(46_869)",
     ])
       expect(source).toContain(limit);
     expect(source).toContain("39,");
@@ -97,10 +84,19 @@ describe("web bundle budget policy", () => {
     const envelope = wholeKibEnvelope(656_741, 1.5 * KIB);
     expect(envelope).toBe(643 * KIB);
     expect(envelope - 656_774).toBeGreaterThanOrEqual(1.5 * KIB);
-    // Shared hard limits are pinned once above; retain the unique direct-session caps here.
+    // Keep the unrelated hard limits pinned while adding the measured gzip cost.
     for (const limit of [
+      "initialRaw: 1485 * kib",
+      "initialGzip: 405 * kib",
+      "initialFileGzip: wholeKibEnvelope(82_325)",
+      // Usage allowances split one shared members chunk (807 gzip bytes).
+      "initialFiles: 20",
       "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
       "directSessionFiles: 31",
+      "lazyChunkRaw: 800 * kib",
+      "lazyChunkGzip: 240 * kib",
+      // The neutral retheme's documented stylesheet growth.
+      "cssGzip: wholeKibEnvelope(46_869)",
     ])
       expect(source).toContain(limit);
   });
@@ -119,14 +115,14 @@ describe("web bundle budget policy", () => {
     expect(source).toContain("wholeKibEnvelope(2_933_830, 1.5 * kib)");
     expect(source).toContain("wholeKibEnvelope(838_954, 1.5 * kib)");
     expect(source).toContain("apps/web/vite-eager-graph.ts");
-    expect(source).toContain("    81,\n  ),");
+    expect(source).toContain("    52,\n  ),");
     for (const [measured, limit] of [
       [2_933_830, wholeKibEnvelope(2_933_830, 1.5 * KIB)],
       [838_954, wholeKibEnvelope(838_954, 1.5 * KIB)],
-      [48_180, wholeKibEnvelope(48_180)],
+      [46_869, wholeKibEnvelope(46_869)],
     ] as const) {
       expect(limit % KIB).toBe(0);
-      expect(limit - measured).toBeGreaterThanOrEqual(measured === 48_180 ? KIB : 1.5 * KIB);
+      expect(limit - measured).toBeGreaterThanOrEqual(measured === 46_869 ? KIB : 1.5 * KIB);
     }
   });
 
@@ -406,232 +402,4 @@ describe("web bundle budget policy", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     expect(source).toContain("wholeKibEnvelope(2_536_098, 1.5 * kib)");
   });
-});
-
-const repoRoot = path.resolve(import.meta.dir, "..");
-const webRoot = path.join(repoRoot, "apps/web");
-const webDist = path.join(webRoot, "dist");
-const extensionFixture = path.join(repoRoot, "apps/web/test/fixtures/host-extension-dist");
-// Two full production web builds (stub, then fixture): they run only when
-// asked for. The fixture's shape is checked on every run.
-const fixtureBuildRequested = process.env.OPENGENI_WEB_BUNDLE_FIXTURE_BUILD === "1";
-
-type BudgetReport = Readonly<{ initial: Readonly<{ gzip: number; files: number }> }>;
-type ManifestChunk = Readonly<{ imports?: string[]; isEntry?: boolean }>;
-type BuildMeasure = Readonly<{
-  report: BudgetReport;
-  manifest: Record<string, ManifestChunk>;
-  css: string;
-}>;
-// Tailwind also scans every file under apps/web that git does not ignore, so a
-// class in the committed fixture would reach the stock CSS too. The fixture
-// build therefore stages a copy in an ignored directory under apps/web (where
-// the fixture's bare imports still resolve), as a host's own ignored dist is,
-// and gives the copy's page a utility class no console source uses. This file
-// is outside apps/web, so its literal is not a Tailwind source.
-const stagedFixture = path.join(webRoot, "tmp/host-extension-fixture");
-const PAGE_CLASS_MARKER = "const pageClassName = undefined;";
-const EXTENSION_ONLY_CLASS = "tracking-[0.4242em]";
-// Tailwind minifies the generated value to `.4242em`.
-const EXTENSION_ONLY_CSS = "letter-spacing:.4242em";
-
-/**
- * Copies the fixture to `target` (its ignored staging directory by default),
- * its page using EXTENSION_ONLY_CLASS, runs `use` with that path, then
- * removes what staging created: the copy, and its parent only when staging
- * created the parent. Refuses, before anything is written or removed, a
- * target that already exists, so someone else's directory is never deleted.
- */
-function withStagedFixture<T>(use: (staged: string) => T, target = stagedFixture): T {
-  if (existsSync(target)) {
-    throw new Error(`${target} already exists; remove it before the fixture budget build`);
-  }
-  const parent = path.dirname(target);
-  const parentExisted = existsSync(parent);
-  try {
-    cpSync(extensionFixture, target, { recursive: true });
-    const page = path.join(target, "chunks/today-page.js");
-    const source = readFileSync(page, "utf8");
-    if (!source.includes(PAGE_CLASS_MARKER)) throw new Error(`${page} has no page class marker`);
-    writeFileSync(
-      page,
-      source.replace(PAGE_CLASS_MARKER, `const pageClassName = "${EXTENSION_ONLY_CLASS}";`),
-    );
-    return use(target);
-  } finally {
-    rmSync(target, { recursive: true, force: true });
-    if (!parentExisted && existsSync(parent) && readdirSync(parent).length === 0) rmdirSync(parent);
-  }
-}
-
-function bun(args: string[], env: Record<string, string> = {}) {
-  return spawnSync(process.execPath, args, {
-    cwd: repoRoot,
-    // Nested `bun run` calls in the build script use this same Bun.
-    env: {
-      ...process.env,
-      PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`,
-      ...env,
-    },
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
-}
-
-/**
- * Builds apps/web, then reads the budget report (printed even when a budget
- * fails). The budget script reads apps/web/dist only, so this refuses to run
- * over a dist it did not build rather than delete someone's output.
- */
-function buildAndMeasure(hostExtension: string): BuildMeasure {
-  if (existsSync(webDist)) {
-    throw new Error(`${webDist} already exists; remove it before the fixture budget build`);
-  }
-  try {
-    // `bun test` sets NODE_ENV=test, which Vite would keep for the build.
-    const build = bun(["run", "--cwd", "apps/web", "build"], {
-      NODE_ENV: "production",
-      OPENGENI_WEB_HOST_EXTENSION: hostExtension,
-    });
-    if (build.status !== 0) {
-      throw new Error(`apps/web build failed:\n${build.stdout}\n${build.stderr}`);
-    }
-    const check = bun(["run", "check:web-bundle-budget"]);
-    const assets = path.join(webDist, "assets");
-    return {
-      css: readdirSync(assets)
-        .filter((file) => file.endsWith(".css"))
-        .map((file) => readFileSync(path.join(assets, file), "utf8"))
-        .join("\n"),
-      report: JSON.parse(check.stdout) as BudgetReport,
-      manifest: JSON.parse(
-        readFileSync(path.join(webDist, ".vite/manifest.json"), "utf8"),
-      ) as Record<string, ManifestChunk>,
-    };
-  } finally {
-    rmSync(webDist, { recursive: true, force: true });
-  }
-}
-
-function staticImportGraph(manifest: Record<string, ManifestChunk>): Set<string> {
-  const graph = new Set<string>();
-  const pending = Object.keys(manifest).filter((key) => manifest[key]?.isEntry);
-  while (pending.length > 0) {
-    const key = pending.pop()!;
-    if (graph.has(key)) continue;
-    graph.add(key);
-    pending.push(...(manifest[key]?.imports ?? []));
-  }
-  return graph;
-}
-
-describe("staging the host extension fixture", () => {
-  function scratch(): string {
-    return mkdtempSync(path.join(tmpdir(), "web-bundle-fixture-"));
-  }
-
-  test("a directory already at the staging path is refused and left alone", () => {
-    const root = scratch();
-    try {
-      const target = path.join(root, "tmp/host-extension-fixture");
-      mkdirSync(target, { recursive: true });
-      writeFileSync(path.join(target, "keep.txt"), "someone else's");
-      let built = false;
-      expect(() =>
-        withStagedFixture(() => {
-          built = true;
-        }, target),
-      ).toThrow("already exists");
-      expect(built).toBe(false);
-      expect(readFileSync(path.join(target, "keep.txt"), "utf8")).toBe("someone else's");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("a staging parent that already existed is kept; one staging created is removed", () => {
-    const root = scratch();
-    try {
-      const existingParent = path.join(root, "existing");
-      mkdirSync(existingParent);
-      const kept = path.join(existingParent, "host-extension-fixture");
-      expect(
-        withStagedFixture((staged) => {
-          expect(readFileSync(path.join(staged, "chunks/today-page.js"), "utf8")).toContain(
-            EXTENSION_ONLY_CLASS,
-          );
-          return staged;
-        }, kept),
-      ).toBe(kept);
-      expect(existsSync(kept)).toBe(false);
-      expect(existsSync(existingParent)).toBe(true);
-      const createdParent = path.join(root, "created");
-      expect(() =>
-        withStagedFixture(
-          () => {
-            throw new Error("build failed");
-          },
-          path.join(createdParent, "host-extension-fixture"),
-        ),
-      ).toThrow("build failed");
-      expect(existsSync(createdParent)).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("web bundle budget with a host extension", () => {
-  test("the prebuilt extension fixture keeps its page and card body behind import()", () => {
-    const descriptor = readFileSync(path.join(extensionFixture, "index.js"));
-    const source = descriptor.toString("utf8");
-    expect(source).toContain('import("./chunks/today-page.js")');
-    expect(source).toContain('import("./chunks/status-card.js")');
-    expect(source).not.toMatch(/^import .*["']\.\/chunks\//m);
-    // The eager descriptor stays tiny: well under the 2 KiB fixture allowance.
-    expect(Bun.gzipSync(descriptor).byteLength).toBeLessThan(KIB);
-    const page = readFileSync(path.join(extensionFixture, "chunks/today-page.js"), "utf8");
-    expect(page).toContain(PAGE_CLASS_MARKER);
-    expect(page).toContain("className: pageClassName");
-    // The page shares an icon module with the console's direct chat route, so
-    // the fixture build exercises how the bundler places a module both graphs
-    // import.
-    expect(page).toMatch(/^import \{ PencilIcon \} from "lucide-react";$/m);
-  });
-
-  test.skipIf(!fixtureBuildRequested)(
-    "OPENGENI_WEB_BUNDLE_FIXTURE_BUILD=1: the fixture extension build stays within 2 KiB of the stub's initial load",
-    () => {
-      // The staged copy must stay outside Tailwind's own scan, or the CSS
-      // assertions below would pass without the extension source.
-      const ignored = spawnSync("git", ["check-ignore", "-q", stagedFixture], { cwd: repoRoot });
-      expect({ stagedFixture, ignored: ignored.status === 0 }).toEqual({
-        stagedFixture,
-        ignored: true,
-      });
-      const stub = buildAndMeasure("");
-      const fixture = withStagedFixture(buildAndMeasure);
-      // The descriptor is eager startup code. It may join an existing startup
-      // chunk or, if the bundler splits it, become one small file of its own;
-      // its pages and cards must add nothing else to the initial load.
-      expect(fixture.report.initial.files).toBeLessThanOrEqual(stub.report.initial.files + 1);
-      expect(fixture.report.initial.gzip - stub.report.initial.gzip).toBeLessThanOrEqual(2 * KIB);
-      // Tailwind scans the configured extension: the class only its page uses
-      // is generated for the fixture build and not for the stock one.
-      expect(fixture.css).toContain(EXTENSION_ONLY_CSS);
-      expect(stub.css).not.toContain(EXTENSION_ONLY_CSS);
-      // Every page and card body the fixture ships is its own lazy entry,
-      // outside the static initial graph. Manifest keys are relative to apps/web.
-      const lazyKeys = readdirSync(path.join(extensionFixture, "chunks"))
-        .filter((file) => file.endsWith(".js"))
-        .map((file) => path.relative(webRoot, path.join(stagedFixture, "chunks", file)));
-      expect(lazyKeys.length).toBeGreaterThan(0);
-      const initialGraph = staticImportGraph(fixture.manifest);
-      for (const key of lazyKeys) {
-        expect({ key, inManifest: key in fixture.manifest }).toEqual({ key, inManifest: true });
-        expect({ key, initial: initialGraph.has(key) }).toEqual({ key, initial: false });
-      }
-    },
-    15 * 60 * 1000,
-  );
 });

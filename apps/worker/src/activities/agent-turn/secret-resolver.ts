@@ -18,7 +18,6 @@ import {
   type ExternalVaultProviderFactories,
 } from "@opengeni/core";
 import { listVaultsForSubject, type Database } from "@opengeni/db";
-import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import {
   createProviderCallBudget,
   type ProviderCallBudget,
@@ -81,15 +80,10 @@ type AttemptSecretInput = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
-  /**
-   * Live fan-out for the approval card the resolver posts when a use is
-   * blocked; readers catch up from the durable log without it.
-   */
-  bus?: EventBus | undefined;
 };
 
 function attemptPrincipal(
-  input: Omit<AttemptSecretInput, "db" | "settings" | "agentConfig" | "vaultAccess" | "bus">,
+  input: Omit<AttemptSecretInput, "db" | "settings" | "agentConfig" | "vaultAccess">,
 ) {
   return {
     kind: "attempt",
@@ -103,7 +97,6 @@ function attemptPrincipal(
 }
 
 export function attemptSecretResolver(input: AttemptSecretInput): SecretResolver {
-  const bus = input.bus;
   return createSecretResolver(
     {
       db: input.db,
@@ -114,12 +107,6 @@ export function attemptSecretResolver(input: AttemptSecretInput): SecretResolver
     {
       capabilityEnabled: secretsCapabilityEnabled(input.agentConfig),
       ...(input.vaultAccess ? { attemptBudget: input.vaultAccess.attemptBudget } : {}),
-      ...(bus
-        ? {
-            publishEvents: (events) =>
-              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
-          }
-        : {}),
     },
   );
 }

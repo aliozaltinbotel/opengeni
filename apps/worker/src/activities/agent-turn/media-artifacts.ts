@@ -5,6 +5,7 @@ import {
 } from "@opengeni/db";
 import {
   materializeSandboxFileDownloads,
+  sandboxRunAs,
   type CodemodeTokenWriterSession,
   type RetainableSessionImageOutputHook,
   type SandboxFileDownload,
@@ -121,6 +122,7 @@ export class TurnMediaArtifacts {
     sessionForDownload: CodemodeTokenWriterSession,
     download: SandboxFileDownload,
   ): Promise<void> => {
+    const runAs = sandboxRunAs(this.deps.getModelRunSettings());
     const publish = this.deps.getPublish();
     const fence = this.deps.toolCancellationFenceRef.current;
     const materialized = await materializeSandboxFileDownloads(sessionForDownload, [download], {
@@ -128,6 +130,7 @@ export class TurnMediaArtifacts {
       onRuntimeEvent: async (event) => {
         await publish?.([{ type: event.type, payload: event.payload }], true);
       },
+      ...(runAs ? { runAs } : {}),
       ...(fence ? { commandRunner: fence.runSandboxCommand.bind(fence) } : {}),
     });
     if (materialized.failures.length > 0) {

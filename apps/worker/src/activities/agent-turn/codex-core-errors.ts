@@ -45,6 +45,9 @@ export type SubscriptionCoreCodexFailurePayload = {
   maxFailoverSteps?: number;
 };
 
+/** The provider-neutral name of the core turn failure payload. */
+export type SubscriptionCoreFailurePayload = SubscriptionCoreCodexFailurePayload;
+
 /** A typed core turn failure (the class keeps its M3 name; it serves every provider). */
 export class SubscriptionCoreCodexTurnError extends Error {
   readonly code: SubscriptionCoreCodexFailurePayload["code"];

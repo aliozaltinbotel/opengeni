@@ -1,4 +1,3 @@
-import { integrationAvailable, requireIntegrationAvailable } from "../integrations/teams-rollout";
 import {
   CORE_INTEGRATION_DEFINITIONS,
   INTEGRATION_DEFINITION_PRESENTATIONS,
@@ -36,7 +35,6 @@ import {
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
-  apiIntegrationConnected,
   listInstalledApiIntegrations,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
@@ -202,9 +200,7 @@ export function registerApiIntegrationRoutes(
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       ListIntegrationDefinitionsResponse.parse({
-        definitions: CORE_INTEGRATION_DEFINITIONS.filter((definition) =>
-          integrationAvailable(deps.settings, workspaceId, definition.id),
-        ).map((definition) => ({
+        definitions: CORE_INTEGRATION_DEFINITIONS.map((definition) => ({
           id: definition.id,
           name: definition.name,
           summary: definition.summary,
@@ -252,12 +248,9 @@ export function registerApiIntegrationRoutes(
             providerDomain: integration.providerDomain,
             baseUrl: integration.baseUrl,
             sourceUrl: integration.sourceUrl,
-            // Signed in now; an expired or revoked account keeps its
-            // connectionId and ownership so it can be reconnected.
-            connected: apiIntegrationConnected(integration),
+            connected: integration.connectionRef !== null,
             requiresConnection: apiIntegrationRequiresConnection(integration.authScheme),
             connectionId: integration.connectionRef?.connectionId ?? null,
-            connectionLastUsedAt: integration.connectionLastUsedAt,
             ownership:
               integration.connectionRef?.subjectScope === "subject"
                 ? "personal"
@@ -408,13 +401,6 @@ export async function resolveForRoute(input: {
   payload: PreviewApiIntegrationRequest | InstallApiIntegrationRequest;
 }): ReturnType<typeof resolveApiIntegrationPreview> {
   const payload = structuredClone(input.payload);
-  if (payload.source.kind === "definition") {
-    requireIntegrationAvailable(
-      input.deps.settings,
-      input.workspaceId,
-      payload.source.definitionId,
-    );
-  }
   const preparation = await withOrganizationIntegrationPolicyFence(
     input.deps.db,
     input,

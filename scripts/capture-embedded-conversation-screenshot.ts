@@ -9,8 +9,7 @@ import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { chromium } from "playwright";
-import { freePort } from "@opengeni/testing/compose";
-import { startProcess } from "@opengeni/testing/process";
+import { freePort, startProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const outputs = [

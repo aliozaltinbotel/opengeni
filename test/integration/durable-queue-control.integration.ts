@@ -30,12 +30,14 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
-import { startTestServices, type TestServices } from "@opengeni/testing/compose";
-import { testSettings } from "@opengeni/testing/settings";
-import { waitFor } from "@opengeni/testing/process";
+import {
+  ScriptedModel,
+  startTestServices,
+  testSettings,
+  waitFor,
+  type TestServices,
+} from "@opengeni/testing";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
-import { goalContinuationPrompt } from "../../apps/worker/src/activities/goals";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
@@ -511,7 +513,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     async () => {
       const grant = await testGrant(dbClient.db, "lost-wake");
       const session = await createDurableSession(dbClient.db, grant, "repair a lost Temporal wake");
-      const goal = await createSessionGoal(dbClient.db, {
+      await createSessionGoal(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -585,20 +587,13 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         // either acknowledged or truthfully pending; the model/turn checks
         // below establish that this specific session actually executed.
         expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
-        // The child result is delivered to exactly one system turn. The active
-        // goal may then legitimately continue in its own goal turn, and the
-        // global dispatcher may run other sessions on this worker, so wait on
-        // this session's turns rather than the shared model's total call count.
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
-        let observedTurns: Awaited<ReturnType<typeof listSessionTurns>> = [];
         await waitFor(
           async () => {
             const current = await getSession(dbClient.db, grant.workspaceId, session.id);
             observedSession = current;
-            observedTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
             return (
-              observedTurns.some((turn) => turn.source === "system" && turn.finishedAt) &&
-              (current?.status === "idle" || current?.status === "failed")
+              model.calls === 1 && (current?.status === "idle" || current?.status === "failed")
             );
           },
           {
@@ -607,10 +602,6 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
                 modelCalls: model.calls,
                 status: observedSession?.status ?? null,
                 activeTurnId: observedSession?.activeTurnId ?? null,
-                turns: observedTurns.map((turn) => ({
-                  source: turn.source,
-                  status: turn.status,
-                })),
               }),
           },
         );
@@ -629,42 +620,21 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           );
         }
 
+        expect(model.calls).toBe(1);
         const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-        const systemTurns = turns.filter((turn) => turn.source === "system");
-        expect(systemTurns).toHaveLength(1);
-        expect(systemTurns[0]).toMatchObject({ status: "completed" });
-        expect(turns.every((turn) => turn.source === "system" || turn.source === "goal")).toBe(
-          true,
-        );
-        // Turn counts alone miss a duplicate model call inside the one system
-        // turn. Attribute the shared model's requests instead: this session's
-        // requests that are not goal continuations belong to the system turn,
-        // which has finished, so exactly one inference consumed the update.
-        const goalContinuationMarker = JSON.stringify(
-          goalContinuationPrompt(goal, 1, null).split("\n")[0]!,
-        ).slice(1, -1);
-        expect(
-          model.requests.filter((request) => {
-            const serialized = JSON.stringify(request);
-            return serialized.includes(session.id) && !serialized.includes(goalContinuationMarker);
-          }),
-        ).toHaveLength(1);
+        expect(turns).toHaveLength(1);
+        expect(turns[0]).toMatchObject({
+          source: "system",
+          status: "completed",
+        });
         expect(
           await listSessionSystemUpdatesForTurn(
             dbClient.db,
             grant.workspaceId,
             session.id,
-            systemTurns[0]!.id,
+            turns[0]!.id,
           ),
         ).toHaveLength(1);
-        expect(
-          countOccurrences(
-            JSON.stringify(
-              await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id),
-            ),
-            input.summary,
-          ),
-        ).toBe(1);
         const durable = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
         expect(committedEventIds.every((id) => durable.some((event) => event.id === id))).toBe(
           true,

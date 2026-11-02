@@ -17,6 +17,7 @@ e2e(
     const sockets = await mkdtemp("/tmp/og-headless-ua-s-");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: root,
+      socketRootDirectory: sockets,
     });
     const reference = {
       browserSessionId: randomUUID(),
@@ -100,6 +101,7 @@ e2e(
     const sockets = await mkdtemp("/tmp/og-headless-ch-s-");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: root,
+      socketRootDirectory: sockets,
     });
     const reference = {
       browserSessionId: randomUUID(),

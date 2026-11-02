@@ -10,7 +10,7 @@ import {
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
@@ -30,17 +30,16 @@ import { ALL_RESOURCES } from "./prompt-sentences";
 
 /**
  * Module ids kept in contracts so stored model-context snapshots still parse,
- * but no longer rendered: secrets are used by reference, nothing is exported
- * (`workspace_environment`), and per-turn attachment guidance travels with the
- * turn's attachment notice so it never changes the cached prefix (`attachments`).
+ * but no longer rendered: secrets are used by reference, nothing is exported.
  */
-const RETIRED_MODULE_IDS: readonly string[] = ["workspace_environment", "attachments"];
+const RETIRED_MODULE_IDS: readonly string[] = ["workspace_environment"];
 
 const NO_RESOURCES: AgentPromptResources = {
   managedSandbox: false,
   connectedMachine: false,
   repositories: false,
   gitCredentials: false,
+  attachments: false,
 };
 
 function config(
@@ -86,6 +85,7 @@ const MARKERS: Record<string, RegExp> = {
   subagents: /session_(?:events|wait|get|send_message)|child worker|Session coordination|a child,/u,
   artifacts: /documents|visualize|sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
+  attachments: /\.opengeni\/files|Attached files/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,
   admin: /capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get/u,
   skills: /# Using skills|Skill index/u,
@@ -184,6 +184,7 @@ describe("modular composer: module selection (AC12)", () => {
 
   const resourceCases: Array<[keyof AgentPromptResources, keyof typeof MARKERS]> = [
     ["repositories", "repositories"],
+    ["attachments", "attachments"],
     ["connectedMachine", "machines"],
     ["managedSandbox", "sandbox"],
   ];
@@ -204,10 +205,15 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
-  test("attachment guidance never enters the instructions; it travels with the turn", () => {
-    const composed = compose(allAgentCapabilities(), ALL_RESOURCES).composed;
-    expect(composed).not.toContain("# Attached files");
-    expect(composed).not.toContain(".opengeni/files");
+  test("standing session attachments are not presented as new input", () => {
+    const composed = compose(allAgentCapabilities(), {
+      ...NO_RESOURCES,
+      managedSandbox: true,
+      attachments: true,
+    }).composed;
+    expect(composed).toContain(
+      "Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.",
+    );
   });
 
   test("background-command guidance needs a sandbox or Connected Machine", () => {
@@ -379,7 +385,7 @@ describe("modular composer: secrets module (AG-2)", () => {
     const options = {
       agentConfig: config(allAgentCapabilities()),
       codemodeAvailable: true,
-      agentPromptResources: ALL_RESOURCES,
+      agentPromptResources: { ...ALL_RESOURCES, attachments: false },
     };
     const first = inspectPersistentAgentInstructions(settings, options).composed;
     expect(inspectPersistentAgentInstructions(settings, options).composed).toBe(first);
@@ -515,7 +521,7 @@ describe("modular composer: prompt-cache stability", () => {
     const options = {
       agentConfig: config(allAgentCapabilities()),
       codemodeAvailable: true,
-      agentPromptResources: ALL_RESOURCES,
+      agentPromptResources: { ...ALL_RESOURCES, attachments: false },
     };
     const first = inspectPersistentAgentInstructions(settings, options);
     const second = inspectPersistentAgentInstructions(settings, options);
@@ -545,6 +551,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: false,
       repositories: true,
       gitCredentials: true,
+      attachments: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
@@ -555,19 +562,8 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: true,
       repositories: false,
       gitCredentials: false,
+      attachments: false,
     });
-    expect(
-      agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),
-    ).toEqual(
-      agentPromptResourcesFor(
-        settings,
-        [
-          { kind: "repository", uri: "x" },
-          { kind: "file", fileId: "11111111-1111-4111-8111-111111111111" },
-        ] as never,
-        {},
-      ),
-    );
     expect(agentPromptResourcesFor(testSettings({ sandboxBackend: "none" }), [], {})).toEqual(
       NO_RESOURCES,
     );

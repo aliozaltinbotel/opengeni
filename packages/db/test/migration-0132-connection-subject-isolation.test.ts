@@ -7,8 +7,11 @@ import {
   selectCanonicalPersonalSlackConnection,
 } from "@opengeni/contracts";
 import postgres from "postgres";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   buildConnectionTokenResolver,
   createDb,

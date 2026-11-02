@@ -1,16 +1,19 @@
 /**
- * Automations: one flat list of every automation in the workspace. Scheduled
- * ones by next run, then the ones waiting for events, then the ones that
- * won't fire. Each row's switch pauses or resumes it in one click. A row opens
- * the automation's own page; New automation opens the form page.
+ * Schedules: one flat list of every schedule in the workspace. Active ones by
+ * next run, then the ones that won't fire (paused ones get an inline Resume).
+ * A row opens the schedule's own page; New schedule opens the form page.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { LayoutTemplateIcon, LockIcon, PlusIcon, RadioTowerIcon, ZapIcon } from "lucide-react";
-
-import { eventStatusReasonText, type AutomationTemplate } from "@opengeni/react/automations";
-import { t } from "@opengeni/react/app/lib/console-text";
-import type { EventSource } from "@opengeni/sdk";
+import {
+  CalendarClockIcon,
+  GitPullRequestIcon,
+  LockIcon,
+  PlayIcon,
+  PlusIcon,
+  SunriseIcon,
+  TrendingUpIcon,
+} from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
 import {
@@ -24,7 +27,6 @@ import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { Switch } from "@opengeni/react/ui/switch";
 import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
@@ -43,12 +45,10 @@ import type {
 } from "@opengeni/react/app/types";
 
 import {
-  automationWhenWords,
+  SCHEDULE_TEMPLATES,
   lastRunState,
-  listensForEvents,
-  nextRunOf,
   ownsSchedule,
-  scheduleTemplates,
+  scheduleWords,
   sortSchedulesForList,
   templateCadenceLabel,
 } from "./schedule-model";
@@ -58,21 +58,16 @@ import {
   OwnerValue,
   ScheduleMenuItems,
   ScheduleTile,
-  canSwitchSchedule,
   hasMenuItems,
   inAppClick,
-  runsOnEventsOnly,
   schedulePath,
   schedulePermissions,
-  scheduleSwitchedOn,
   useScheduleAccess,
   useScheduleNavigation,
 } from "./schedule-parts";
 import { scheduledTaskAttentionText } from "./schedule-access-notices";
 import { PrivateScheduleSummaries } from "./private-schedule-summaries";
 import { useScheduleActions } from "./use-schedule-actions";
-import { useEventSources, useEventTriggersEnabled } from "./use-event-sources";
-import { templateIcon } from "./use-automation-templates";
 import {
   CreateWithOpenGeniButton,
   useCanCreateScheduleWithAgent,
@@ -120,9 +115,15 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+const TEMPLATE_ICONS: Record<string, ReactNode> = {
+  "morning-brief": <SunriseIcon />,
+  "dependency-pr": <GitPullRequestIcon />,
+  "cost-check": <TrendingUpIcon />,
+};
+
 /**
- * True on phone widths. The list drops its fact columns there, so the switch
- * sits by the ⋯ menu and every row keeps one height.
+ * True on phone widths. Rows keep one height there, so the paused row's
+ * Resume stays in its ⋯ menu instead of dropping onto a line of its own.
  */
 function useNarrow(): boolean {
   const query = "(max-width: 639px)";
@@ -151,32 +152,18 @@ export function SchedulesListPage({
   targetSessionId,
 }: {
   workspaceId: string;
-  /** Show only the automations that post into this chat (from the chat header). */
+  /** Show only the schedules that post into this chat (from the chat header). */
   targetSessionId?: string;
 }) {
   const { client, accessContext } = useAppContext();
   const access = useScheduleAccess(workspaceId);
   const isAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
   const go = useScheduleNavigation(workspaceId);
-  const eventTriggers = useEventTriggersEnabled();
-  // Source names for the rows' "When" words; rows read without them meanwhile.
-  const { sources } = useEventSources(workspaceId, eventTriggers);
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [clock, setClock] = useState(() => new Date());
   const [filteredChat, setFilteredChat] = useState<{ id: string; title: string } | null>(null);
-  // Switched rows show their new state before the server answers.
-  const [switching, setSwitching] = useState<Record<string, ScheduledTask["status"]>>({});
-  // After a switch the rows keep their order, so a row never moves away from
-  // the pointer that just toggled it. Released when the pointer and focus
-  // leave the list, or when the set of schedules changes.
-  const [heldOrder, setHeldOrder] = useState<readonly string[] | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  // Bumped when a switch starts and when it settles: a refresh that overlaps
-  // either can't paint an old status over it. Each switch refreshes again
-  // when it settles.
-  const switchSeq = useRef(0);
   const viewState = listViewState({ loading, error: loadError, count: list.tasks.length });
 
   useEffect(() => {
@@ -205,7 +192,6 @@ export function SchedulesListPage({
   const refresh = useCallback(
     async (background = false) => {
       if (!background) setLoading(true);
-      const seq = switchSeq.current;
       try {
         const [next, attention] = await Promise.all([
           targetSessionId
@@ -232,8 +218,6 @@ export function SchedulesListPage({
             }
           },
         );
-        if (seq !== switchSeq.current) return;
-        setHeldOrder((held) => (held && sameIds(held, next) ? held : null));
         setList({
           tasks: next,
           lastRuns: Object.fromEntries(
@@ -292,42 +276,7 @@ export function SchedulesListPage({
 
   // The order is fixed by the snapshot's clock, not the minute tick, so rows
   // don't move while someone is pointing at them.
-  const sorted = useMemo(
-    () => holdOrder(sortSchedulesForList(list.tasks, new Date()), heldOrder),
-    [list, heldOrder],
-  );
-
-  const switchSchedule = async (task: ScheduledTask, on: boolean) => {
-    const status: ScheduledTask["status"] = on ? "active" : "paused";
-    switchSeq.current += 1;
-    setHeldOrder(sorted.map((item) => item.id));
-    setSwitching((current) => ({ ...current, [task.id]: status }));
-    const updated = await actions.setPaused(task, !on);
-    switchSeq.current += 1;
-    if (updated) {
-      setList((current) => ({
-        ...current,
-        tasks: current.tasks.map((item) => (item.id === task.id ? updated : item)),
-      }));
-    }
-    // On failure dropping the override is the rollback; the refresh then
-    // shows what the server holds, in case the change went through anyway.
-    setSwitching(({ [task.id]: _settled, ...rest }) => rest);
-    void refresh(true);
-  };
-
-  const releaseOrder = () => {
-    const node = listRef.current;
-    if (!node || node.contains(document.activeElement)) return;
-    // A row's ⋯ menu renders outside the list; keep its row in place while open.
-    if (node.querySelector('[aria-expanded="true"]')) return;
-    try {
-      if (node.matches(":hover")) return;
-    } catch {
-      // No hover state to read: release on focus alone.
-    }
-    setHeldOrder(null);
-  };
+  const sorted = useMemo(() => sortSchedulesForList(list.tasks, new Date()), [list]);
   const shared = sorted.some((task) => !ownsSchedule(task, access.viewerSubjectId));
   const narrow = useNarrow();
   const columns = narrow
@@ -343,55 +292,23 @@ export function SchedulesListPage({
   return (
     <>
       <PageHeader
-        icon={<ZapIcon />}
-        title="Automations"
-        description={
-          eventTriggers
-            ? "Agent work that runs on a schedule or when something happens."
-            : "Recurring agent work in this workspace."
-        }
+        icon={<CalendarClockIcon />}
+        title="Schedules"
+        description="Recurring agent work in this workspace."
         actions={
-          canCreate || eventTriggers ? (
+          canCreate && !empty && viewState !== "loading" ? (
             <>
-              {canCreate && !targetSessionId ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={go.templates}
-                  className="pointer-coarse:h-11"
-                >
-                  <LayoutTemplateIcon aria-hidden="true" />
-                  Templates
-                </Button>
-              ) : null}
-              {eventTriggers && !targetSessionId ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={go.sources}
-                  className="pointer-coarse:h-11"
-                >
-                  <RadioTowerIcon aria-hidden="true" />
-                  Event sources
-                </Button>
-              ) : null}
-              {canCreate && !empty && viewState !== "loading" ? (
-                <>
-                  {canAsk && !targetSessionId ? (
-                    <CreateWithOpenGeniButton onClick={ask.open} />
-                  ) : null}
-                  <Button
-                    type="button"
-                    onClick={() =>
-                      go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
-                    }
-                    className="pointer-coarse:h-11"
-                  >
-                    <PlusIcon aria-hidden="true" />
-                    New automation
-                  </Button>
-                </>
-              ) : null}
+              {canAsk && !targetSessionId ? <CreateWithOpenGeniButton onClick={ask.open} /> : null}
+              <Button
+                type="button"
+                onClick={() =>
+                  go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
+                }
+                className="pointer-coarse:h-11"
+              >
+                <PlusIcon aria-hidden="true" />
+                New schedule
+              </Button>
             </>
           ) : undefined
         }
@@ -408,11 +325,11 @@ export function SchedulesListPage({
               onClick={() => go.list()}
               className="pointer-coarse:h-11"
             >
-              Show all automations
+              Show all schedules
             </Button>
           }
         >
-          Automations for{" "}
+          Schedules for{" "}
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
             params={{ workspaceId, sessionId: targetSessionId }}
@@ -425,13 +342,13 @@ export function SchedulesListPage({
       ) : null}
       <div className="mt-6 min-w-0">
         {viewState === "loading" ? (
-          <RowList label="Automations" columns={columns} flush busy>
+          <RowList label="Schedules" columns={columns} flush busy>
             <ListRowSkeleton count={4} />
           </RowList>
         ) : viewState === "error" ? (
           <ErrorMessage
             align="center"
-            title="Couldn't load automations"
+            title="Couldn't load schedules"
             details={loadError ? [{ label: "Error", value: loadError.message }] : undefined}
             action={
               <Button
@@ -445,14 +362,12 @@ export function SchedulesListPage({
               </Button>
             }
           >
-            Check your connection, then try again. Your automations keep running either way.
+            Check your connection, then try again. Your schedules keep running either way.
           </ErrorMessage>
         ) : empty ? (
           <SchedulesEmpty
             canCreate={canCreate}
             filtered={Boolean(targetSessionId)}
-            templates={scheduleTemplates(eventTriggers)}
-            eventTriggers={eventTriggers}
             now={clock}
             onNew={() =>
               go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
@@ -461,97 +376,90 @@ export function SchedulesListPage({
             onTemplate={(template) => go.create({ template })}
           />
         ) : (
-          <div
-            ref={listRef}
-            onPointerLeave={() => window.setTimeout(releaseOrder)}
-            onBlur={() => window.setTimeout(releaseOrder)}
-          >
-            <RowList label="Automations" columns={columns} flush>
-              {sorted.map((listed) => {
-                const pending = switching[listed.id];
-                const task = pending ? { ...listed, status: pending } : listed;
-                const perms = schedulePermissions(task, access);
-                const switchable = canSwitchSchedule(listed, access);
-                const busy = actions.busyTaskId === task.id || pending !== undefined;
-                const href = schedulePath(workspaceId, task.id);
-                return (
-                  <ListRow
-                    key={task.id}
-                    leading={<ScheduleTile task={task} />}
-                    // Titles stay in fg; a paused automation says so in its switch and Next run.
-                    title={task.name}
-                    titleAddon={
-                      task.visibility === "private" ? (
-                        <MetaChip icon={<LockIcon />}>Only me</MetaChip>
-                      ) : undefined
-                    }
-                    status={accessBadge({
-                      task,
-                      attention: list.attention[task.id] ?? null,
-                      own: perms.own,
-                      workspaceId,
-                      sources,
-                    })}
-                    description={
-                      // A phone shows one fact: the next run, or the events it
-                      // waits for, or why it won't run.
-                      narrow && !runsOnEventsOnly(task, clock) ? (
-                        <>
-                          {nextRunOf(task, clock) ? "Next run: " : null}
-                          <NextRunValue task={task} now={clock} />
-                        </>
-                      ) : (
-                        automationWhenWords(task, sources ?? [], clock)
-                      )
-                    }
-                    cells={{
-                      next: <NextRunValue task={task} now={clock} />,
-                      last: <LastRunValue state={lastRunState(list.lastRuns, task.id)} />,
-                      ...(shared && !perms.own
-                        ? {
-                            owner: (
-                              <OwnerValue task={task} viewerSubjectId={access.viewerSubjectId} />
-                            ),
-                          }
-                        : {}),
-                    }}
-                    control={
-                      switchable ? (
-                        <Switch
-                          checked={
-                            pending !== undefined ? pending === "active" : scheduleSwitchedOn(task)
-                          }
-                          pending={pending !== undefined}
-                          disabled={actions.busyTaskId === task.id}
-                          onCheckedChange={(on) => void switchSchedule(listed, on)}
-                          aria-label={task.name}
-                        />
-                      ) : null
-                    }
-                    menu={
-                      hasMenuItems(task, access) ? (
-                        <ScheduleMenuItems
-                          task={task}
-                          access={access}
-                          busy={busy}
-                          pauseItem={!switchable}
-                          onRunNow={() => void actions.runNow(task)}
-                          onPause={() => void actions.pause(task)}
-                          onResume={() => void actions.resume(task)}
-                          onEdit={() => go.edit(task.id)}
-                          onDuplicate={() => go.create({ from: task.id })}
-                          onDelete={() => actions.requestDelete(task)}
-                        />
-                      ) : undefined
-                    }
-                    menuLabel={`More actions for ${task.name}`}
-                    href={href}
-                    linkProps={{ onClick: inAppClick(() => go.detail(task.id)) }}
-                  />
-                );
-              })}
-            </RowList>
-          </div>
+          <RowList label="Schedules" columns={columns} flush>
+            {sorted.map((task) => {
+              const perms = schedulePermissions(task, access);
+              const paused = task.status === "paused";
+              const busy = actions.busyTaskId === task.id;
+              const href = schedulePath(workspaceId, task.id);
+              return (
+                <ListRow
+                  key={task.id}
+                  leading={<ScheduleTile task={task} />}
+                  // Titles stay in fg; a paused schedule says so in its tile and Next run.
+                  title={task.name}
+                  titleAddon={
+                    task.visibility === "private" ? (
+                      <MetaChip icon={<LockIcon />}>Only me</MetaChip>
+                    ) : undefined
+                  }
+                  status={accessBadge({
+                    task,
+                    attention: list.attention[task.id] ?? null,
+                    own: perms.own,
+                    workspaceId,
+                  })}
+                  description={
+                    narrow ? (
+                      <>
+                        {task.status === "active" && task.schedule.type !== "manual"
+                          ? "Next "
+                          : null}
+                        <NextRunValue task={task} now={clock} />
+                      </>
+                    ) : (
+                      scheduleWords(task.schedule, clock).short
+                    )
+                  }
+                  cells={{
+                    next: <NextRunValue task={task} now={clock} />,
+                    last: <LastRunValue state={lastRunState(list.lastRuns, task.id)} />,
+                    ...(shared && !perms.own
+                      ? {
+                          owner: (
+                            <OwnerValue task={task} viewerSubjectId={access.viewerSubjectId} />
+                          ),
+                        }
+                      : {}),
+                  }}
+                  control={
+                    paused && perms.canPauseOrDelete && !narrow ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        disabled={busy}
+                        onClick={() => void actions.resume(task)}
+                        aria-label={`Resume ${task.name}`}
+                        className="h-7 rounded-[10px] px-2 pointer-coarse:h-11"
+                      >
+                        <PlayIcon aria-hidden="true" />
+                        Resume
+                      </Button>
+                    ) : null
+                  }
+                  menu={
+                    hasMenuItems(task, access) ? (
+                      <ScheduleMenuItems
+                        task={task}
+                        access={access}
+                        busy={busy}
+                        onRunNow={() => void actions.runNow(task)}
+                        onPause={() => void actions.pause(task)}
+                        onResume={() => void actions.resume(task)}
+                        onEdit={() => go.edit(task.id)}
+                        onDuplicate={() => go.create({ from: task.id })}
+                        onDelete={() => actions.requestDelete(task)}
+                      />
+                    ) : undefined
+                  }
+                  menuLabel={`More actions for ${task.name}`}
+                  href={href}
+                  linkProps={{ onClick: inAppClick(() => go.detail(task.id)) }}
+                />
+              );
+            })}
+          </RowList>
         )}
       </div>
       {isAdmin && !targetSessionId ? (
@@ -564,38 +472,19 @@ export function SchedulesListPage({
 }
 
 /**
- * `fresh` in the order of `held` while both list the same schedules, so a
- * switched row stays where it is; otherwise `fresh` as sorted.
- */
-export function holdOrder(fresh: ScheduledTask[], held: readonly string[] | null): ScheduledTask[] {
-  if (!held || held.length !== fresh.length) return fresh;
-  const byId = new Map(fresh.map((task) => [task.id, task]));
-  const ordered = held.map((id) => byId.get(id));
-  return ordered.every((task) => task !== undefined) ? (ordered as ScheduledTask[]) : fresh;
-}
-
-function sameIds(held: readonly string[], tasks: readonly ScheduledTask[]): boolean {
-  const ids = new Set(held);
-  return held.length === tasks.length && tasks.every((task) => ids.has(task.id));
-}
-
-/**
  * One quiet badge per row; the schedule's own page says what happened and
- * offers the refresh. A trigger that can't receive events and drift are shown
- * only to the owner, who can act on them.
+ * offers the refresh. Drift is shown only to the owner, who can act on it.
  */
 function accessBadge({
   task,
   attention,
   own,
   workspaceId,
-  sources,
 }: {
   task: ScheduledTask;
   attention: ScheduledTaskAccessAttention | null;
   own: boolean;
   workspaceId: string;
-  sources: readonly EventSource[] | undefined;
 }): ReactNode {
   const attentionText = scheduledTaskAttentionText(attention);
   if (attentionText) {
@@ -606,30 +495,6 @@ function accessBadge({
     );
   }
   if (!own) return undefined;
-  const held = listensForEvents(task)
-    ? task.events?.triggers.find((trigger) => trigger.status === "blocked")
-    : undefined;
-  if (held) {
-    return (
-      <StatusBadge
-        variant="dot"
-        status="needs_you"
-        reason={
-          eventStatusReasonText(
-            t,
-            {
-              text: held.statusReason,
-              code: held.statusReasonCode,
-              detail: held.statusReasonDetail,
-            },
-            sources?.find((source) => source.id === held.sourceId)?.name,
-          ) ?? "One of its event sources can't deliver events."
-        }
-      >
-        Needs attention
-      </StatusBadge>
-    );
-  }
   const drift = visibleScheduledTaskPolicyDrift(
     task.policyDrift,
     scheduledTaskDriftDismissal(workspaceId, task),
@@ -647,8 +512,6 @@ function accessBadge({
 function SchedulesEmpty({
   canCreate,
   filtered,
-  templates,
-  eventTriggers,
   now,
   onNew,
   onAsk,
@@ -656,9 +519,6 @@ function SchedulesEmpty({
 }: {
   canCreate: boolean;
   filtered: boolean;
-  /** The templates this deployment can create. */
-  templates: readonly AutomationTemplate[];
-  eventTriggers: boolean;
   now: Date;
   onNew: () => void;
   /** "Create with Opengeni"; absent without the permissions to start it. */
@@ -669,16 +529,12 @@ function SchedulesEmpty({
     return (
       <EmptyState
         variant="inline"
-        title="No automations for this chat"
-        description={
-          eventTriggers
-            ? "Continue the conversation later, on a schedule or when something happens."
-            : "Schedule a message to continue the conversation later."
-        }
+        title="No schedules for this chat"
+        description="Schedule a message to continue the conversation later."
         action={
           canCreate ? (
             <Button type="button" onClick={onNew}>
-              New automation
+              New schedule
             </Button>
           ) : undefined
         }
@@ -688,14 +544,12 @@ function SchedulesEmpty({
   return (
     <EmptyState
       variant="page"
-      icon={<ZapIcon />}
-      title="No automations yet"
+      icon={<CalendarClockIcon />}
+      title="No schedules yet"
       description={
         canCreate
-          ? eventTriggers
-            ? "Have the agent work on a rhythm, like a morning brief, or when something happens, like a new pull request."
-            : "Have the agent do something on a rhythm, like a morning brief or a weekly dependency PR."
-          : "Automations run agent work on their own. Ask a workspace admin for access to create one."
+          ? "Have the agent do something on a rhythm, like a morning brief or a weekly dependency PR."
+          : "Schedules run agent work on a rhythm. Ask a workspace admin for access to create one."
       }
       action={
         canCreate ? (
@@ -703,7 +557,7 @@ function SchedulesEmpty({
             {onAsk ? <CreateWithOpenGeniButton onClick={onAsk} /> : null}
             <Button type="button" onClick={onNew} className="pointer-coarse:h-11">
               <PlusIcon aria-hidden="true" />
-              New automation
+              New schedule
             </Button>
           </>
         ) : undefined
@@ -712,10 +566,10 @@ function SchedulesEmpty({
       templates={
         canCreate ? (
           <EmptyStateTemplates>
-            {templates.map((template) => (
+            {SCHEDULE_TEMPLATES.map((template) => (
               <EmptyStateTemplate
                 key={template.id}
-                icon={templateIcon(template)}
+                icon={TEMPLATE_ICONS[template.id]}
                 title={template.name}
                 description={template.description}
                 meta={templateCadenceLabel(template, now)}

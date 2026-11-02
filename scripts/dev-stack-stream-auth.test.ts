@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { copyFile, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 type StartupFixture = {
@@ -13,7 +12,7 @@ async function withStartupFixture(
   settings: Record<string, string>,
   verify: (fixture: StartupFixture) => Promise<void>,
 ): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "opengeni-stream-auth-test-"));
+  const root = await mkdtemp(join(import.meta.dir, ".stream-auth-test-"));
   try {
     const scripts = join(root, "scripts");
     await mkdir(scripts);

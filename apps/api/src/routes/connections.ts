@@ -22,7 +22,6 @@ import {
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import {
   startSlackBotInstall,
   requireOpenGeniSlackOAuthSettings,
@@ -142,10 +141,6 @@ import {
   isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
-import {
-  MICROSOFT_ADMIN_CONSENT_STATE,
-  microsoftAdminConsentResultPage,
-} from "../integrations/microsoft-admin-consent";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
@@ -180,15 +175,14 @@ import {
   startFikenOAuth,
   prepareFikenTokenInstall,
 } from "../integrations/fiken";
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
 } from "@opengeni/contracts";
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
-import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
-import { parsePathParam } from "../http/path-identifier";
+import { parseRequestJson } from "../http/request-body";
 
 type OpenGeniSlackInstallState = {
   connectAttemptId?: string;
@@ -214,24 +208,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId);
-    const reach = connectionReadReach(grant);
-    const connections = await listConnectionsMetadata(db, workspaceId, grant.subjectId);
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
     return c.json(
       ListConnectionsResponse.parse({
-        // The personal setup permission sees only the caller's own accounts.
-        connections:
-          reach === "all"
-            ? connections
-            : connections.filter((connection) => connection.subjectId === grant.subjectId),
+        connections: await listConnectionsMetadata(db, workspaceId, grant.subjectId),
       }),
     );
   });
 
   app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId);
-    const reach = connectionReadReach(grant);
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
     const includeInactive = c.req.query("includeInactive");
     if (
       includeInactive !== undefined &&
@@ -242,11 +229,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: (
-          await listOwnConnectionAccountsForGrant(db, grant, {
-            includeInactive: includeInactive === "true",
-          })
-        ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
+        connections: await listOwnConnectionAccountsForGrant(db, grant, {
+          includeInactive: includeInactive === "true",
+        }),
       }),
     );
   });
@@ -267,11 +252,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/operations/:operationId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    const operationId = parsePathParam(
-      c,
-      "operationId",
-      CreateConnectionRequest.shape.operationId.unwrap(),
-    );
+    const operationId = CreateConnectionRequest.shape.operationId
+      .unwrap()
+      .parse(c.req.param("operationId"));
     const connection = await getConnectionCreationResult(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -805,10 +788,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertPersonalConnectionOwnerPrincipal(access, "Google Drive");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const parsed = parseRequestBody(GoogleDriveOAuthStartRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid Google Drive install request",
-    });
+    const parsed = GoogleDriveOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid Google Drive install request" });
+    }
     return c.json(
       GoogleDriveOAuthStartResponse.parse(
         await startGoogleDriveOAuth(deps, {
@@ -816,7 +799,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           requestUrl: c.req.url,
-          payload: parsed,
+          payload: parsed.data,
         }),
       ),
     );
@@ -831,10 +814,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertPersonalConnectionOwnerPrincipal(access, "Atlassian");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const parsed = parseRequestBody(AtlassianOAuthStartRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid Atlassian install request",
-    });
+    const parsed = AtlassianOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid Atlassian install request" });
+    }
     return c.json(
       AtlassianOAuthStartResponse.parse(
         await startAtlassianOAuth(deps, {
@@ -842,7 +825,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           requestUrl: c.req.url,
-          payload: parsed,
+          payload: parsed.data,
         }),
       ),
     );
@@ -867,17 +850,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-      const parsed = parseRequestBody(AtlassianLifecycleActionRequest, await c.req.json(), {
-        status: 400,
-        message: "invalid Atlassian lifecycle request",
-      });
+      const parsed = AtlassianLifecycleActionRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid Atlassian lifecycle request" });
+      }
       return c.json(
         ConnectionResponse.parse({
           connection: await transitionAtlassianLifecycle(deps, {
             workspaceId,
             subjectId: grant.subjectId,
             connectionId: c.req.param("connectionId"),
-            payload: parsed,
+            payload: parsed.data,
           }),
         }),
       );
@@ -944,17 +927,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-      const parsed = parseRequestBody(GoogleDriveLifecycleActionRequest, await c.req.json(), {
-        status: 400,
-        message: "invalid Google Drive lifecycle request",
-      });
+      const parsed = GoogleDriveLifecycleActionRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid Google Drive lifecycle request" });
+      }
       return c.json(
         ConnectionResponse.parse({
           connection: await transitionGoogleDriveLifecycle(deps, {
             workspaceId,
             subjectId: grant.subjectId,
             connectionId: c.req.param("connectionId"),
-            payload: parsed,
+            payload: parsed.data,
           }),
         }),
       );
@@ -1388,21 +1371,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const connectionId = c.req.param("connectionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId);
-    if (
-      !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
-    )
-      throw new HTTPException(403, { message: "missing permission: connections:write" });
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const existing = await getConnectionMetadata(db, workspaceId, connectionId, grant.subjectId);
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    // The personal setup permission removes only the caller's own accounts.
-    if (
-      existing.subjectId !== grant.subjectId &&
-      !hasPermission(grant.permissions, "connections:write", grant.permissionMode)
-    )
-      throw new HTTPException(403, { message: "missing permission: connections:write" });
     assertNotReservedExternalVaultMetadata(existing.metadata);
     if (
       existing.subjectId === null &&
@@ -1447,27 +1420,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (googleDriveDisconnect && !googleDriveDisconnect.success) {
-      throw requestValidationError(googleDriveDisconnect.error, "body", {
-        status: 400,
-        message: "invalid Google Drive disconnect request",
+      throw new HTTPException(400, {
+        message:
+          googleDriveDisconnect.error.issues[0]?.message ??
+          "invalid Google Drive disconnect request",
       });
     }
     const atlassianDisconnect = isAtlassian
       ? AtlassianDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (atlassianDisconnect && !atlassianDisconnect.success) {
-      throw requestValidationError(atlassianDisconnect.error, "body", {
-        status: 400,
-        message: "invalid Atlassian disconnect request",
+      throw new HTTPException(400, {
+        message:
+          atlassianDisconnect.error.issues[0]?.message ?? "invalid Atlassian disconnect request",
       });
     }
     const personalGitHubDisconnect = isPersonalGitHub
       ? PersonalGitHubDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (personalGitHubDisconnect && !personalGitHubDisconnect.success) {
-      throw requestValidationError(personalGitHubDisconnect.error, "body", {
-        status: 400,
-        message: "invalid personal GitHub disconnect request",
+      throw new HTTPException(400, {
+        message:
+          personalGitHubDisconnect.error.issues[0]?.message ??
+          "invalid personal GitHub disconnect request",
       });
     }
     if (
@@ -1538,11 +1513,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireProviderConsentInBrowser(access);
     const grant = access.grant;
-    const parsed = parseRequestBody(OAuthStartRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid OAuth start request",
-    });
-    const payload = withDesktopAppReturnPath(c, parsed);
+    const parsed = OAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid OAuth start request",
+      });
+    }
+    const payload = withDesktopAppReturnPath(c, parsed.data);
     const result = await startMcpOAuth(
       { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
@@ -1566,10 +1543,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireProviderConsentInBrowser(access);
     const grant = access.grant;
-    const parsed = parseRequestBody(ApiIntegrationOAuthStartRequest, await c.req.json(), {
-      status: 400,
-      message: "invalid Integration OAuth start request",
-    });
+    const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid Integration OAuth start request",
+      });
+    }
     return c.json(
       OAuthStartResponse.parse(
         await startApiIntegrationProviderOAuth(deps, {
@@ -1581,7 +1560,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
           requestUrl: c.req.url,
-          payload: withDesktopAppReturnPath(c, parsed),
+          payload: withDesktopAppReturnPath(c, parsed.data),
         }),
       ),
     );
@@ -1611,19 +1590,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
     assertIntegrationsEnabled();
-    // An administrator returning from the Microsoft approval link, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
     const result = await completeApiIntegrationProviderOAuth(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
-      ...(c.req.query("error_description")
-        ? { errorDescription: c.req.query("error_description") }
-        : {}),
       requestUrl: c.req.url,
     });
     if (result.exactReturn)
@@ -2081,21 +2051,6 @@ export function requireWorkspaceIntegrationAdministration(grant: {
 }): void {
   if (!hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode))
     throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
-}
-
-/**
- * Who may list connections: `connections:read` sees the workspace's shared
- * connections and the caller's own; the personal setup permission sees only
- * the caller's own accounts.
- */
-function connectionReadReach(grant: {
-  permissions: Parameters<typeof hasPermission>[0];
-  permissionMode?: Parameters<typeof hasPermission>[2];
-}): "all" | "own" {
-  if (hasPermission(grant.permissions, "connections:read", grant.permissionMode)) return "all";
-  if (hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode))
-    return "own";
-  throw new HTTPException(403, { message: "missing permission: connections:read" });
 }
 
 function writableSubjectId(

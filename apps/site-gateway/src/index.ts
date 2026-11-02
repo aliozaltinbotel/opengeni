@@ -36,7 +36,7 @@ import { SITE_GATEWAY_HUMAN_PATH } from "./shell/shell-config";
 import { handleShell } from "./shell";
 import type { SiteContext } from "./site-context";
 import { handleSiteDbInternal, isSiteDbInternalPath } from "./site-db";
-import { handleVersionHtml, isFrameLoad } from "./version";
+import { handleVersionHtml } from "./version";
 
 export type { GatewayEnv } from "./env";
 /** The per-Site SQLite Durable Object class bound as `SITE_DB` (optional Cloudflare storage). */
@@ -100,13 +100,6 @@ export async function handleRequest(
   const hsts = !config.development;
   const pathname = url.pathname;
   const api = isApiPath(pathname);
-  const pageSecurity = {
-    hsts,
-    frameable:
-      pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`) && isFrameLoad(request)
-        ? ("self" as const)
-        : ("none" as const),
-  };
   const clientIp = request.headers.get("cf-connecting-ip") ?? "";
 
   let record;
@@ -121,7 +114,7 @@ export async function handleRequest(
           { noindex: true, hsts },
         )
       : messagePage(
-          pageSecurity,
+          { hsts },
           502,
           "Temporarily unavailable",
           "This Site could not be loaded. Try again shortly.",
@@ -144,7 +137,7 @@ export async function handleRequest(
           { code: "site_not_found", message: "No published Site here" },
           { noindex: true, hsts },
         )
-      : neutralPage(pageSecurity);
+      : neutralPage({ hsts });
   if (record.status === "suspended")
     return api
       ? jsonError(
@@ -152,7 +145,7 @@ export async function handleRequest(
           { code: "site_suspended", message: "This Site has been taken down" },
           { noindex: true, hsts },
         )
-      : takedownPage(pageSecurity, config.abuseEmail);
+      : takedownPage({ hsts }, config.abuseEmail);
 
   const cookies = parseCookies(request.headers.get("cookie"));
   const site: SiteContext = {
@@ -189,7 +182,7 @@ export async function handleRequest(
   } catch (error) {
     if (!(error instanceof UpstreamError)) throw error;
     return messagePage(
-      pageSecurity,
+      site,
       502,
       "Temporarily unavailable",
       "This Site could not be loaded. Try again shortly.",

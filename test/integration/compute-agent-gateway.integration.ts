@@ -31,7 +31,6 @@ import {
   createSandboxEnrollment,
   createSession,
   settleConnectedMachineSessionBackgroundCommand,
-  getEnrollment,
   getLiveEnrollmentConnection,
   revokeSandboxEnrollment,
   type Database,
@@ -44,9 +43,12 @@ import {
 } from "@opengeni/db/session-background-commands";
 import { connect, createNatsEventBus, type NatsConnection } from "@opengeni/events";
 import { AGENT_UNANSWERED_HEADER, NatsControlRpc, NO_WAKE_HEADER } from "@opengeni/runtime/sandbox";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { freePort } from "@opengeni/testing/compose";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  freePort,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { releaseStoredConnectedCommandOutput } from "../../packages/core/src/sandbox/output-release";
 import {
   ComputeAgentIncompatibleError,
@@ -1242,27 +1244,6 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const resolve = () =>
         plane.resolveConnection({ workspaceId: agent.workspaceId, enrollmentId: agent.agentId });
       // Before its Hello nothing is known, and nothing is refused.
-      expect((await resolve())?.connectionInstanceId).toBe(instance);
-
-      // A desktop sandbox's first heartbeat can be recorded before its Hello.
-      // The desktop state it records says nothing about OpRelease, so the
-      // sandbox is still not refused.
-      await handleAgentEventPayload(
-        db,
-        undefined,
-        AgentEvent.encode(
-          AgentEvent.fromPartial({
-            agentId: agent.agentId,
-            event: {
-              $case: "heartbeat",
-              heartbeat: { seq: "1", desktopStatus: { available: true, unavailableReason: "" } },
-            },
-          }),
-        ).finish(),
-        `agent.${agent.workspaceId}.${agent.agentId}.connection.${instance}.events`,
-      );
-      const beforeHello = await getEnrollment(db, agent.workspaceId, agent.agentId);
-      expect(beforeHello?.agentCapabilities).toEqual({ desktop: true });
       expect((await resolve())?.connectionInstanceId).toBe(instance);
 
       // An agent without OpRelease: a version error at its Hello, and the

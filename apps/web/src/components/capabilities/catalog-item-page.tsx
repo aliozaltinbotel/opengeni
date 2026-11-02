@@ -41,11 +41,6 @@ import {
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { McpAuthDiscoveryNotice } from "@opengeni/react/app/components/capabilities/mcp-auth-discovery-notice";
 import { OnePasswordCatalogLink } from "@opengeni/react/app/components/capabilities/onepassword-catalog-link";
-import { useNativeDestinationVisible } from "@opengeni/react/app/lib/app-host";
-import {
-  ExcelAddinCatalogLink,
-  ExcelAddinSetupSteps,
-} from "@opengeni/react/app/components/capabilities/excel-addin-catalog-link";
 import {
   CatalogConnectedAccounts,
   type CatalogConnectedAccountsManagement,
@@ -135,8 +130,6 @@ export function CatalogItemPage({
 }) {
   const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  // The same app-host read as OnePasswordCatalogLink, so the header and the link agree.
-  const secretsVisible = useNativeDestinationVisible("secrets");
   const personalOnly = personalOnlyCapability(item);
   const defaultOwnership = personalOnly ? "personal" : defaultCapabilityConnectionOwnership(item);
   const [ownership, setOwnership] = useState<ConnectionOwnership>(defaultOwnership);
@@ -255,12 +248,7 @@ export function CatalogItemPage({
   } else if (item.surfaceType === "codex_apps") {
     primary = null;
   } else if (item.surfaceType === "first_party_onepassword") {
-    // Its only action opens Secrets; with Secrets hidden the header has none.
-    primary = secretsVisible ? (
-      <OnePasswordCatalogLink workspaceId={workspaceId} connected={item.enabled} />
-    ) : null;
-  } else if (item.surfaceType === "first_party_excel_addin") {
-    primary = <ExcelAddinCatalogLink item={item} />;
+    primary = <OnePasswordCatalogLink workspaceId={workspaceId} connected={item.enabled} />;
   } else if (plan.mode === "social_oauth") {
     primary = socialSetupAvailable ? (
       <Button
@@ -386,15 +374,7 @@ export function CatalogItemPage({
 
   let setup: ReactNode = null;
   if (!isSkill && item.surfaceType !== "codex_apps") {
-    if (item.surfaceType === "first_party_excel_addin") {
-      setup = (
-        <DetailSection title="Set up">
-          <div className="max-w-md">
-            <ExcelAddinSetupSteps item={item} />
-          </div>
-        </DetailSection>
-      );
-    } else if (plan.mode === "social_oauth") {
+    if (plan.mode === "social_oauth") {
       setup = (
         <DetailSection title={socialAccounts.length ? "Accounts" : `Connect ${title}`}>
           <div className="grid gap-5">

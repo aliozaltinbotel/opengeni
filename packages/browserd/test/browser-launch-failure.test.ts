@@ -9,8 +9,8 @@ describe("browser launch failures", () => {
     const failure = browserLaunchFailure(
       new AgentBrowserCommandError(
         "driver_rejected",
-        "no browser executable is installed",
-        "Chrome not found. Install Google Chrome or Chromium on this machine.",
+        "agent-browser rejected the command",
+        "Chrome not found. Checked: - agent-browser cache: /home/u/.agent-browser/browsers - System Chrome installations",
       ),
     );
     expect(failure).toBeInstanceOf(InteractionDefiniteDriverError);
@@ -22,21 +22,18 @@ describe("browser launch failures", () => {
     const failure = browserLaunchFailure(
       new AgentBrowserCommandError(
         "driver_rejected",
-        "browser exited during launch",
-        "Chrome exited early (1) without writing DevToolsActivePort",
+        "agent-browser rejected the command",
+        "Chrome exited early (exit code: 1) without writing DevToolsActivePort",
       ),
     );
     expect(failure).toMatchObject({ code: "driver_failed", retryable: false });
     expect((failure as Error).message).toBe(
-      "The browser could not start on this machine: Chrome exited early (1) without writing DevToolsActivePort",
+      "The browser could not start on this machine: Chrome exited early (exit code: 1) without writing DevToolsActivePort",
     );
   });
 
   test("other failures keep their own type", () => {
-    const silent = new AgentBrowserCommandError(
-      "process_failed",
-      "managed browser did not terminate",
-    );
+    const silent = new AgentBrowserCommandError("process_failed", "agent-browser process failed");
     const other = new Error("profile is locked");
     expect(browserLaunchFailure(silent)).toBe(silent);
     expect(browserLaunchFailure(other)).toBe(other);

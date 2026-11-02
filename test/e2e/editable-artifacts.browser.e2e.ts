@@ -5,13 +5,15 @@ import { chromium, type Browser, type Page } from "playwright";
 
 import { OpenGeniClient } from "@opengeni/sdk/artifacts";
 import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
-import { freePort, startTestServices, type TestServices } from "@opengeni/testing/compose";
 import {
+  freePort,
   removeTempDir,
   startProcess,
+  startTestServices,
   waitFor,
   type StartedProcess,
-} from "@opengeni/testing/process";
+  type TestServices,
+} from "@opengeni/testing";
 
 import { prepareDevelopmentArtifactRuntime } from "../../scripts/prepare-development-artifact-runtime";
 

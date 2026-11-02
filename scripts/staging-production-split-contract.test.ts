@@ -1,13 +1,15 @@
-import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
+const workflows = join(import.meta.dir, "..", ".github", "workflows");
 
 function workflow(name: string): string {
-  return readRetiredWorkflow(name);
+  return readFileSync(join(workflows, name), "utf8");
 }
 
 describe("staging / production split workflows", () => {
-  test("historical workflow fixture: staging dispatch pins existing canary-sha tags and refuses unsigned rebuild", () => {
+  test("staging dispatch pins existing canary-sha tags and refuses unsigned rebuild", () => {
     const source = workflow("staging-canary-dispatch.yml");
     expect(source).toContain("workflow_dispatch:");
     expect(source).toContain("git fetch --no-tags origin main");
@@ -21,7 +23,7 @@ describe("staging / production split workflows", () => {
     expect(source).not.toContain(":ci");
   });
 
-  test("historical workflow fixture: production PR heads admit only live main or hotfix/*", () => {
+  test("production PR heads admit only live main or hotfix/*", () => {
     const source = workflow("production-pr-heads.yml");
     expect(source).toContain("branches:\n      - production");
     expect(source).toContain('if [ "$HEAD_REF" = "main" ]; then');
@@ -29,7 +31,7 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("PRs into production must use head main (promote) or hotfix/*.");
   });
 
-  test("historical workflow fixture: canary publication separates trusted controller from admitted source and cannot move latest", () => {
+  test("canary publication separates trusted controller from admitted source and cannot move latest", () => {
     const source = workflow("publish-canary.yml");
     const admission = source.indexOf("name: Admit protected main source");
     const checkout = source.indexOf("name: Check out controller");
@@ -64,7 +66,7 @@ describe("staging / production split workflows", () => {
     expect(source).not.toContain("--tag latest");
   });
 
-  test("historical workflow fixture: manual Version PR dispatches exact-head CI and is not push-triggered", () => {
+  test("manual Version PR dispatches exact-head CI and is not push-triggered", () => {
     const source = workflow("open-version-pr.yml");
     expect(source).toContain("workflow_dispatch:");
     expect(source).not.toContain("push:");
@@ -72,7 +74,7 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d");
   });
 
-  test("historical workflow fixture: source admission freeze-head runs only for hotfix/* into production", () => {
+  test("source admission freeze-head runs only for hotfix/* into production", () => {
     const source = workflow("source-admission.yml");
     expect(source).toContain("branches:\n      - production");
     expect(source).toContain("startsWith(github.event.pull_request.head.ref, 'hotfix/')");

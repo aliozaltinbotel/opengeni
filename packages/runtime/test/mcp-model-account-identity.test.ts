@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { RunContext, type MCPServer } from "@openai/agents";
-import { testSettings } from "@opengeni/testing/settings";
+import { testSettings } from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
   prepareAgentTools,

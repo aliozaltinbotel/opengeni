@@ -9,8 +9,6 @@ export {
   type ProviderFieldMeta,
   type ProviderFieldValue,
   type ProviderItemMeta,
-  type ProviderPasskey,
-  type ProviderPasskeyMeta,
   type ProviderVault,
   type ProviderWriteField,
   type ProviderWriteItem,

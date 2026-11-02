@@ -1,16 +1,8 @@
-import { sessionCreateCreatorForRequest } from "./host-token";
-import { SessionCancelSettlementQuery, projectSessionEventForPublic } from "@opengeni/contracts";
+import { SessionCancelSettlementQuery } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
 import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
-import { organizationReasoningDisclosure, withholdSessionEventReasoning } from "@opengeni/core";
-import {
-  organizationAllowedRealtimeModels,
-  RealtimeModelNotAllowedError,
-  requireOrganizationRealtimeModelAllowed,
-} from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
-import { readSessionResponsePair } from "./session-response-reads";
 import {
   legacyVariableSetFields,
   rejectLegacyVariableSetFields,
@@ -19,12 +11,7 @@ import {
 } from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
-import {
-  assertGoalResumeAllowed,
-  resolveGoalModelAdmission,
-  GoalResumeBlockedError,
-  turnAppActionGrant,
-} from "@opengeni/core";
+import { assertGoalResumeAllowed, resolveGoalModelAdmission, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
@@ -33,24 +20,16 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
-import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
-import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
-import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
-import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
-import { capabilitySetupReadiness } from "../capability-setup-readiness";
-import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
-  sessionScheduleTargets,
-  type SessionScheduleTargets,
+  scheduledSessionIds,
   currentSiteViewerRlsContext,
   nestedPostgresSqlState,
 } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
   isVerifiedDelegatedHumanAuthorization,
-  scheduledTaskViewerSubjectForGrant,
   withSiteSessionOrigin,
 } from "@opengeni/core";
 import {
@@ -65,11 +44,7 @@ import {
 import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
-import {
-  resolveSiteSessionOrigin,
-  siteViewConversationContext,
-  withOptionalSiteCommandOrigin,
-} from "../site-session-origin";
+import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
@@ -125,7 +100,6 @@ import {
   PublishSandboxFileArtifactRequest,
   RenewSessionRealtimeRequest,
   SyncSessionRealtimeLedgerRequest,
-  SessionCodexAccountPinRequest,
   SessionControlRequest,
   SessionRetryRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -241,10 +215,10 @@ import {
   setSessionChannel,
   ChannelNotFoundError,
   setSessionAttention,
+  setSessionArchive,
   setSessionPin,
   SessionAttentionVersionConflictError,
   SessionArchiveVersionConflictError,
-  SessionArchiveConfirmationRequiredError,
   SessionPinVersionConflictError,
   SessionPinAccessError,
   SessionListAccessError,
@@ -359,7 +333,6 @@ import {
   withResolvedSessionAuthorization,
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
   SessionAuthorizationDeniedError,
-  SessionCreateAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   SessionTenancyManagedHumanRequiredError,
   SessionTenancyPersistenceOutcomeUnknownError,
@@ -386,7 +359,6 @@ import {
   acceptSessionUserMessage,
   validateSessionMcpCredentialUpdates,
   controlHumanSessionWorkstream,
-  archiveHumanSessionWorkstream,
   retryFailedSession,
   createSessionForRequestWithOutcome,
   type CreateSessionRequestOutcome,
@@ -444,51 +416,13 @@ import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
-import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
 /** One immediate stop attempt; a sleeping compute sandbox wakes within it. */
 const BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS = 5_000;
-/** Readers without schedule authority see no schedule relationship at all. */
-const NO_SESSION_SCHEDULE_TARGETS: SessionScheduleTargets = {
-  scheduled: new Set<string>(),
-  upcoming: new Set<string>(),
-  waitingForEvents: new Set<string>(),
-  waits: null,
-};
-
-/**
- * The automations posting into these sessions, for a reader allowed to run
- * schedules and control chats; wait details cover what that person can see.
- */
-async function sessionScheduleTargetsForGrant(
-  db: ApiRouteDeps["db"],
-  grant: AccessGrant,
-  workspaceId: string,
-  sessionIds: string[],
-): Promise<SessionScheduleTargets> {
-  if (
-    !hasPermission(grant.permissions, "scheduled_tasks:run") ||
-    !hasPermission(grant.permissions, "sessions:control")
-  ) {
-    return NO_SESSION_SCHEDULE_TARGETS;
-  }
-  return await sessionScheduleTargets(db, workspaceId, sessionIds, {
-    viewer: async () => await scheduledTaskViewerSubjectForGrant(db, grant),
-  });
-}
-
-/** What the session list and header show about the automations posting into a chat. */
-function sessionAutomationFacts(targets: SessionScheduleTargets, sessionId: string) {
-  return {
-    hasSchedules: targets.scheduled.has(sessionId),
-    hasUpcomingSchedules: targets.upcoming.has(sessionId),
-    waitingForEvents: targets.waitingForEvents.has(sessionId),
-    ...(targets.waits ? { automationWait: targets.waits.get(sessionId) ?? null } : {}),
-  };
-}
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
 /**
@@ -876,34 +810,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // additionally restricts that execution to the parent's real owner.
         if (grant.principalKind !== "agent_attempt")
           (payload as Record<string, unknown>).visibility = "private";
-        // Started beside the Site in the console's Site view (its id and
-        // version without a frame marker: not Site code, which the bridge
-        // always marks), by someone who may publish it: the first message
-        // says which Site "the Site" is. Later messages carry the console's
-        // own context. Server-authored; the caller's context was refused above.
-        if (
-          siteOrigin.siteId &&
-          c.req.header(SITE_FRAME_HEADER) === undefined &&
-          hasPermission(grant.permissions, "artifacts:publish", grant.permissionMode) &&
-          typeof (payload as { initialMessage?: unknown }).initialMessage === "string"
-        ) {
-          const context = await siteViewConversationContext(db, grant, siteOrigin);
-          if (context) (payload as Record<string, unknown>).modelContext = context;
-        }
       }
       const create = () =>
-        createSessionForRequestWithOutcome(
-          deps,
-          grant,
-          workspaceId,
-          payload,
-          authorization,
-          undefined,
-          {
-            authorizationSurface: "http",
-            creator: sessionCreateCreatorForRequest(c, deps, grant),
-          },
-        );
+        createSessionForRequestWithOutcome(deps, grant, workspaceId, payload, authorization);
       result = await measureSessionCreatePhase(deps.observability, "core_create", () =>
         origin ? withSiteSessionOrigin(origin, create) : create(),
       );
@@ -922,22 +831,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         result = { ...result, session: { ...result.session, retention: kept.retention } };
       }
     }
-    // Creation committed. Independent response reads may overlap on a pool;
-    // keep policy failures outside the create-rejection boundary.
-    const [response, usageLimit] = await readSessionResponsePair(
-      db,
-      () =>
-        measureSessionCreatePhase(deps.observability, "response_projection", () =>
-          withEffectivePolicy(deps, workspaceId, grant.subjectId, result.session),
-        ),
-      () =>
-        (payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined
-          ? sessionUsageLimitForRead(db, result.session, { subjectId: grant.subjectId })
-          : Promise.resolve(undefined),
-    );
+    // Echo a requested usage limit so clients can tell this server applied it
+    // (older servers strip the unknown field and would run unlimited).
+    if ((payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined) {
+      const usageLimit = await sessionUsageLimitForRead(db, result.session, {
+        subjectId: grant.subjectId,
+      });
+      if (usageLimit) result = { ...result, session: { ...result.session, usageLimit } };
+    }
+    // Creation has committed by this point. Keep response projection outside
+    // the create-rejection boundary so a post-commit policy read cannot be
+    // misreported as though the session itself was rejected.
     return c.json(
       {
-        ...(usageLimit ? { ...response, usageLimit } : response),
+        ...(await measureSessionCreatePhase(deps.observability, "response_projection", () =>
+          withEffectivePolicy(deps, workspaceId, grant.subjectId, result.session),
+        )),
         freshCreated: result.outcome === "created",
       },
       202,
@@ -1046,17 +955,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw sessionAuthorizationHttpError(error);
     }
     const raw = c.req.query();
-    const parsed = parseRequestQuery(
-      SessionMessageSearchRequest,
-      { ...raw, ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}) },
-      { status: 400, message: "Invalid session message search request" },
-    );
+    const parsed = SessionMessageSearchRequest.safeParse({
+      ...raw,
+      ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}),
+    });
+    if (!parsed.success)
+      throw new HTTPException(400, { message: "Invalid session message search request" });
     try {
       return c.json(
         await searchSessionMessagesForSubject(
           db,
           workspaceId,
-          parsed,
+          parsed.data,
           {
             subjectId: grant.subjectId,
             ...(authorizationScope ? { authorizationScope } : {}),
@@ -1156,7 +1066,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
           ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
           ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
-          ...(query.siteConversations ? { siteConversations: query.siteConversations } : {}),
           ...(query.createdBy ? { createdBy: query.createdBy } : {}),
           ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
           ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
@@ -1195,16 +1104,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
     });
-    const scheduleTargets = await sessionScheduleTargetsForGrant(
-      db,
-      grant,
-      workspaceId,
-      [...page.pinned, ...page.sessions].map((session) => session.id),
-    );
+    const scheduleTargets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(
+            db,
+            workspaceId,
+            [...page.pinned, ...page.sessions].map((session) => session.id),
+          )
+        : new Set<string>();
     if ("projection" in page) {
       const decorateEntry = (session: (typeof page.sessions)[number]) => ({
         ...session,
-        ...sessionAutomationFacts(scheduleTargets, session.id),
+        hasSchedules: scheduleTargets.has(session.id),
         ...(commandActivity.has(session.id)
           ? { backgroundCommandActivity: commandActivity.get(session.id)! }
           : {}),
@@ -1226,7 +1138,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const activity = commandActivity.get(session.id);
       const decorated = {
         ...session,
-        ...sessionAutomationFacts(scheduleTargets, session.id),
+        hasSchedules: scheduleTargets.has(session.id),
         ...(activity ? { backgroundCommandActivity: activity } : {}),
       };
       return sessionResponse(decorated, policy);
@@ -1419,21 +1331,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-      const query = parseRequestQuery(
-        z.object({
+      const query = z
+        .object({
           actionDigest: z.string().regex(/^[0-9a-f]{64}$/),
           path: z.string().max(2048).default(""),
           offset: z.coerce.number().int().min(0).max(4_194_304).default(0),
-        }),
-        c.req.query(),
-        { status: 400, message: "Invalid review page" },
-      );
+        })
+        .safeParse(c.req.query());
+      if (!query.success) throw new HTTPException(400, { message: "Invalid review page" });
       const input = {
         accountId: grant.accountId,
         workspaceId,
         sessionId: c.req.param("sessionId"),
         approvalId: c.req.param("approvalId"),
-        ...query,
+        ...query.data,
       };
       const page = await getToolReviewDetailsPage(db, input);
       if (!page) throw new HTTPException(404, { message: "Review details unavailable" });
@@ -1462,26 +1373,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // Independent reads of the already-authorized session: the effective
     // policy context depends only on the session row, not on the activity or
     // schedule annotations, so all three are read concurrently.
-    const [[activity, scheduleTargets, policy], usageLimit] = await readSessionResponsePair(
-      db,
-      () =>
-        Promise.all([
-          backgroundCommandActivityForSessions(db, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionIds: [sessionId],
-          }),
-          sessionScheduleTargetsForGrant(db, grant, workspaceId, [sessionId]),
-          loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
-        ]),
-      () => sessionUsageLimitForRead(db, session, { subjectId: grant.subjectId }),
-    );
+    const [activity, scheduleTargets, policy] = await Promise.all([
+      backgroundCommandActivityForSessions(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionIds: [sessionId],
+      }),
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? scheduledSessionIds(db, workspaceId, [sessionId])
+        : Promise.resolve(new Set<string>()),
+      loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
+    ]);
+    // the task's usage projection. A failed read is `unavailable`,
+    // never $0 or unlimited; it does not fail the session read.
+    const usageLimit = await sessionUsageLimitForRead(db, session, {
+      subjectId: grant.subjectId,
+    });
     return c.json(
       sessionResponse(
         {
           ...session,
           ...(usageLimit ? { usageLimit } : {}),
-          ...sessionAutomationFacts(scheduleTargets, sessionId),
+          hasSchedules: scheduleTargets.has(sessionId),
           ...(activity.get(sessionId)
             ? { backgroundCommandActivity: activity.get(sessionId) }
             : {}),
@@ -1672,12 +1586,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         parsed.data,
         "http",
-        sessionCreateCreatorForRequest(c, deps, authorization.grant),
       );
       return c.json(response, response.replay ? 200 : 201);
     } catch (error) {
-      if (error instanceof SessionCreateAuthorizationDeniedError || error instanceof SessionAuthorizationUnavailableError)
-        return sessionCreateErrorResponse(c,error);
       throw sessionTenancyHttpError(error);
     }
   });
@@ -1713,21 +1624,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "invalid session id" });
     }
-    const parsed = parseRequestBody(
-      BeginSessionRealtimeRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "invalid session realtime request" },
-    );
-    // A governing host's voice model allowlist refuses any other model (403).
-    await requireOrganizationRealtimeModelAllowed(deps, {
-      organizationId: grant.accountId,
-      model: parsed.model,
-    });
+    const parsed = BeginSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "invalid session realtime request",
+      });
+    }
     try {
       await realtimeVoiceBilling.admit({
         accountId: grant.accountId,
         workspaceId,
-        model: parsed.model,
+        model: parsed.data.model,
         attribution: creditDebitAttributionForGrant(grant),
       });
     } catch (error) {
@@ -1749,7 +1656,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId,
           sessionId,
           ownerSubjectId: grant.subjectId,
-          ...parsed,
+          ...parsed.data,
           ...accounts,
         });
       });
@@ -1776,11 +1683,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           message: "invalid realtime lifecycle id",
         });
       }
-      const parsed = parseRequestBody(
-        RenewSessionRealtimeRequest,
-        await c.req.json().catch(() => null),
-        { status: 400, message: "invalid realtime heartbeat request" },
-      );
+      const parsed = RenewSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) {
+        throw new HTTPException(400, {
+          message: "invalid realtime heartbeat request",
+        });
+      }
       try {
         // Settle observed minutes before renewing; out of credits keeps the
         // current lease so the call drains and ends instead of running free.
@@ -1798,7 +1706,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             sessionId,
             realtimeId,
             ownerSubjectId: grant.subjectId,
-            ...parsed,
+            ...parsed.data,
             extendLease: stop === null,
           }),
         );
@@ -1830,11 +1738,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "invalid realtime lifecycle id",
       });
     }
-    const parsed = parseRequestBody(
-      EndSessionRealtimeRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "invalid realtime end request" },
-    );
+    const parsed = EndSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "invalid realtime end request",
+      });
+    }
     try {
       const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
         endSessionRealtimeInTransaction(scopedDb, {
@@ -1843,7 +1752,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           realtimeId,
           ownerSubjectId: grant.subjectId,
           ownerSubjectLabel: grant.subjectLabel ?? null,
-          ...parsed,
+          ...parsed.data,
         }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
@@ -1869,14 +1778,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = parseRequestBody(
-      CodexRealtimeWebrtcRequest,
-      await c.req.json().catch(() => null),
-      { status: 422, message: "invalid Codex realtime WebRTC request" },
-    );
+    const parsed = CodexRealtimeWebrtcRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid Codex realtime WebRTC request",
+      });
+    }
 
     c.header("cache-control", "private, no-store");
-    const allowedModels = await organizationAllowedRealtimeModels(deps, grant.accountId);
     try {
       const {
         realtimeId,
@@ -1888,7 +1797,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         rotate,
         browserActivation,
         ...providerRequest
-      } = parsed;
+      } = parsed.data;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
         scopedDb.transaction(async (tx) => {
           const claimed = await claimSessionRealtimeConnectionInTransaction(
@@ -1916,10 +1825,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               "This voice model does not use WebRTC negotiation",
             );
           }
-          // A mode started before its organization's host narrowed the voice
-          // models does not connect with a model it no longer allows.
-          if (allowedModels && !allowedModels.has(claimed.mode.model))
-            throw new RealtimeModelNotAllowedError(claimed.mode.model);
           return claimed;
         }),
       );
@@ -2128,11 +2033,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = parseRequestBody(
-      SessionRealtimeWebsocketRequest,
-      await c.req.json().catch(() => null),
-      { status: 422, message: "invalid realtime WebSocket request" },
-    );
+    const parsed = SessionRealtimeWebsocketRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid realtime WebSocket request" });
+    }
     c.header("cache-control", "private, no-store");
     const {
       realtimeId,
@@ -2144,7 +2048,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       rotate,
       language,
       voiceSettings,
-    } = parsed;
+    } = parsed.data;
     let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
       null;
     let provider: ReturnType<typeof realtimeWebsocketProvider> = null;
@@ -2173,10 +2077,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           "Realtime client secrets are single-use; reconnect with a new operation",
         );
       }
-      await requireOrganizationRealtimeModelAllowed(deps, {
-        organizationId: grant.accountId,
-        model: claim.mode.model,
-      });
       provider = realtimeWebsocketProvider(claim.mode.model);
       if (!provider) {
         throw new RealtimeWebsocketBrokerError(
@@ -2243,9 +2143,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         connectionEpoch: completed.connection.connectionEpoch,
         startupFenceSequence: completed.connection.startupFenceSequence,
         modeVersion: claimed.modeVersion,
-        // The prior conversation travels in the provider's instructions;
-        // clients from earlier releases still read this list.
-        initialItems: [],
         replay: false as const,
       });
     } catch (error) {
@@ -2320,11 +2217,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           message: "invalid realtime connection id",
         });
       }
-      const parsed = parseRequestBody(
-        ActivateCodexRealtimeConnectionRequest,
+      const parsed = ActivateCodexRealtimeConnectionRequest.safeParse(
         await c.req.json().catch(() => null),
-        { status: 422, message: "invalid realtime connection activation" },
       );
+      if (!parsed.success) {
+        throw new HTTPException(422, {
+          message: "invalid realtime connection activation",
+        });
+      }
       try {
         const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
@@ -2334,7 +2234,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               realtimeId,
               connectionId,
               ownerSubjectId: grant.subjectId,
-              ...parsed,
+              ...parsed.data,
             }),
           ),
         );
@@ -2367,18 +2267,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ) {
         throw new HTTPException(400, { message: "invalid realtime ledger id" });
       }
-      const parsed = parseRequestBody(
-        SyncSessionRealtimeLedgerRequest,
+      const parsed = SyncSessionRealtimeLedgerRequest.safeParse(
         await c.req.json().catch(() => null),
-        { status: 422, message: "invalid realtime ledger sync request" },
       );
+      if (!parsed.success) {
+        throw new HTTPException(422, {
+          message: "invalid realtime ledger sync request",
+        });
+      }
       // A delegation that names its turn's route is resolved like a Send/Steer body,
       // before the ledger transaction; the ledger admits it with exactly this policy.
       const delegationExecutionPolicies = new Map<
         string,
         Awaited<ReturnType<typeof resolveRealtimeDelegationTurnExecutionPolicy>>
       >();
-      for (const entry of parsed.entries ?? []) {
+      for (const entry of parsed.data.entries ?? []) {
         if (!realtimeDelegationRequestsRoute(entry)) continue;
         delegationExecutionPolicies.set(
           entry.operationId,
@@ -2406,7 +2309,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 realtimeId,
                 ownerSubjectId: grant.subjectId,
                 ownerSubjectLabel: grant.subjectLabel ?? null,
-                ...parsed,
+                ...parsed.data,
                 delegationExecutionPolicies,
                 controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
               },
@@ -2448,10 +2351,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = parseRequestBody(UpdateSessionPinRequest, await c.req.json().catch(() => null), {
-      status: 400,
-      message: "invalid session pin request",
-    });
+    const parsed = UpdateSessionPinRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session pin request" });
+    }
     try {
       const session = await setSessionPin(db, {
         workspaceId,
@@ -2459,7 +2362,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         // Same owner-only personal-workspace fallback as the list above.
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        ...parsed,
+        ...parsed.data,
       });
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
@@ -2506,18 +2409,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = parseRequestBody(
-      UpdateSessionAttentionRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "invalid session attention request" },
-    );
+    const parsed = UpdateSessionAttentionRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session attention request" });
+    }
     try {
       const session = await setSessionAttention(db, {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        ...parsed,
+        ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
       return c.json(
@@ -2547,6 +2449,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Personal chat organization: archived roots leave the ordinary rail only
   // for this member and remain recoverable through the archived list view.
+  // Archiving a chat you started that still has work also pauses it (see
+  // pauseOwnArchivedWork); archiving anyone else's chat only hides it for you.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -2557,35 +2461,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
-    const parsed = parseRequestBody(
-      UpdateSessionArchiveRequest,
-      await c.req.json().catch(() => null),
-      { status: 400, message: "invalid session archive request" },
-    );
+    const parsed = UpdateSessionArchiveRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session archive request" });
+    }
     try {
-      const pause = parsed.archived && parsed.mode !== "hide_for_me";
-      if (pause && !hasPermission(grant.permissions, "sessions:control")) {
-        throw new HTTPException(403, {
-          message:
-            "Pausing a chat requires sessions:control. Use Hide for me to change only personal visibility.",
-        });
+      const archived = await setSessionArchive(db, {
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+        ...parsed.data,
+      });
+      if (!archived) throw new HTTPException(404, { message: "session not found" });
+      let session = archived;
+      if (parsed.data.archived) {
+        try {
+          session = await pauseOwnArchivedWork(deps, grant, workspaceId, archived);
+        } catch (error) {
+          return commandConflictResponse(c, error);
+        }
       }
-      const session = await archiveHumanSessionWorkstream(
-        deps,
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          sessionId,
-          authorizationSurface: "http",
-        },
-        {
-          ...parsed,
-          pause,
-          personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        },
-      );
-      if (!session) throw new HTTPException(404, { message: "session not found" });
       return c.json(
         await withEffectivePolicy(
           deps,
@@ -2604,7 +2500,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           409,
         );
       }
-      return commandConflictResponse(c, error);
+      throw error;
     }
   });
 
@@ -2630,14 +2526,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     };
     collect(lineage.children);
-    const targets = await sessionScheduleTargetsForGrant(db, grant, workspaceId, sessionIds);
+    const targets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(db, workspaceId, sessionIds)
+        : new Set<string>();
     const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
       nodes.map((node) => ({
         ...node,
-        session: {
-          ...node.session,
-          ...sessionAutomationFacts(targets, node.session.id),
-        },
+        session: { ...node.session, hasSchedules: targets.has(node.session.id) },
         children: decorateNodes(node.children),
       }));
     const policy = await loadEffectivePolicyContext(
@@ -2649,20 +2546,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({
       ...lineage,
-      sessionHasSchedules: targets.scheduled.has(c.req.param("sessionId")),
-      sessionHasUpcomingSchedules: targets.upcoming.has(c.req.param("sessionId")),
-      sessionWaitingForEvents: targets.waitingForEvents.has(c.req.param("sessionId")),
-      ...(targets.waits
-        ? { sessionAutomationWait: targets.waits.get(c.req.param("sessionId")) ?? null }
-        : {}),
+      sessionHasSchedules: targets.has(c.req.param("sessionId")),
       ancestors: lineage.ancestors.map((session) =>
-        sessionResponse(
-          {
-            ...session,
-            ...sessionAutomationFacts(targets, session.id),
-          },
-          policy,
-        ),
+        sessionResponse({ ...session, hasSchedules: targets.has(session.id) }, policy),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
     });
@@ -2709,10 +2595,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const { target } = await parseRequestJson(c, SessionCodexAccountPinRequest, {
-      status: 400,
-      message: 'target is required ("auto" or an account id)',
-    });
+    const body = (await c.req.json()) as { target?: string };
+    const target = typeof body.target === "string" ? body.target : "";
+    if (!target) {
+      throw new HTTPException(400, {
+        message: 'target is required ("auto" or an account id)',
+      });
+    }
     if (!deps.sessionAuthorization) {
       try {
         await requireSessionAuthorization(deps, grant, {
@@ -2979,16 +2868,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
-      const rawPayload = await c.req.json().catch(() => null);
-      if (!parsedServerId.success) {
+      const payload = UpdateSessionMcpApprovalPolicyRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsedServerId.success || !payload.success) {
         throw new HTTPException(400, {
           message: "invalid MCP approval-policy request",
         });
       }
-      const payload = parseRequestBody(UpdateSessionMcpApprovalPolicyRequest, rawPayload, {
-        status: 400,
-        message: "invalid MCP approval-policy request",
-      });
       await assertSessionExists(db, workspaceId, sessionId);
       return c.json(
         await updateSessionMcpApprovalPolicy(
@@ -2996,7 +2883,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           sessionId,
           parsedServerId.data,
-          payload.requireApproval,
+          payload.data.requireApproval,
         ),
       );
     },
@@ -3027,103 +2914,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw error;
     }
   });
-
-  // The person finished setup from a capability card the agent posted. Wake
-  // the agent once per card so it continues the request that needed it,
-  // unless the person already wrote since the card or the capability is not
-  // usable in this chat yet. Every skip is a normal 200 outcome.
-  app.post(
-    "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
-    async (c) => {
-      const workspaceId = c.req.param("workspaceId");
-      const sessionId = c.req.param("sessionId");
-      // Stands in for the person's own "done": only that person, present in a
-      // client, may send it; never an agent.
-      if (isAgentActingAsPerson(c)) {
-        throw new ApiHttpError(403, {
-          code: "forbidden",
-          message: "Only the person who finished setup can continue the request.",
-          retryable: false,
-        });
-      }
-      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-      if (grant.principalKind === "agent_attempt") {
-        throw new ApiHttpError(403, {
-          code: "forbidden",
-          message: "Only the person who finished setup can continue the request.",
-          retryable: false,
-        });
-      }
-      const payload = await parseRequestJson(c, ContinueAfterCapabilitySetupRequest);
-      const session = await getSessionForSubject(
-        db,
-        workspaceId,
-        sessionId,
-        grant.subjectId,
-        relatedSessionAccessFor(c),
-      );
-      if (!session) throw new HTTPException(404, { message: "session not found" });
-      // A reviewed integration's card stands for the person's own connected
-      // instances of it, which the workspace catalog does not list.
-      const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
-      const [item, withPolicy] = await Promise.all([
-        integration
-          ? integrationDefinitionSetupItem(
-              db,
-              settings,
-              workspaceId,
-              grant.subjectId,
-              payload.capabilityId,
-            )
-          : buildCapabilityCatalog({
-              db,
-              workspaceId,
-              settings,
-              subjectId: grant.subjectId,
-              accountId: grant.accountId,
-            }).then((catalog) => catalog.items.find((entry) => entry.id === payload.capabilityId)),
-        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
-      ]);
-      const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
-      if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
-        return c.json({
-          outcome: "not_needed",
-          reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
-        } satisfies ContinueAfterCapabilitySetupResponse);
-      }
-      const result = await enqueueCapabilitySetupContinuation(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        capabilityId: item.id,
-        capabilityName: item.name,
-        toolsVerified: readiness === "ready",
-        requesterSubjectId: grant.subjectId,
-      });
-      if (result.outcome === "not_needed") {
-        return c.json({
-          outcome: "not_needed",
-          reason: result.reason,
-        } satisfies ContinueAfterCapabilitySetupResponse);
-      }
-      if (result.events.length > 0) {
-        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
-      }
-      if (result.shouldWake && result.workflowWakeRevision !== null) {
-        await workflowClient.wakeSessionWorkflow({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          workflowId: result.temporalWorkflowId ?? workflowIdForSession(sessionId),
-          wakeRevision: result.workflowWakeRevision,
-        });
-      }
-      return c.json({
-        outcome: result.outcome,
-        updateId: result.update.id,
-      } satisfies ContinueAfterCapabilitySetupResponse);
-    },
-  );
 
   // Replace the session's agent configuration (capabilities, identity,
   // instructions alias, renderer). Shares the tool-policy version CAS and
@@ -3214,15 +3004,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const parsedQuery = parseRequestQuery(
-      ListSessionGoalRevisionsQuery,
-      {
-        limit: c.req.query("limit"),
-        before: c.req.query("before"),
-      },
-      { status: 400, message: "invalid goal revision page query" },
-    );
-    const query = parsedQuery;
+    const parsedQuery = ListSessionGoalRevisionsQuery.safeParse({
+      limit: c.req.query("limit"),
+      before: c.req.query("before"),
+    });
+    if (!parsedQuery.success) {
+      throw new HTTPException(400, { message: "invalid goal revision page query" });
+    }
+    const query = parsedQuery.data;
     try {
       return c.json(
         await listSessionGoalRevisionPage(db, workspaceId, sessionId, {
@@ -3620,10 +3409,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // Explicit confirm on the wire (literal true) — an empty/accidental POST
     // cannot wipe context. Mirrors the client-side confirm affordance. A
     // missing/false confirm is a client error (400), not a server fault.
-    parseRequestBody(ClearSessionContextRequest, await c.req.json().catch(() => ({})), {
-      status: 400,
-      message: "context clear requires an explicit { confirm: true }",
-    });
+    const clearBody = ClearSessionContextRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!clearBody.success) {
+      throw new HTTPException(400, {
+        message: "context clear requires an explicit { confirm: true }",
+      });
+    }
     // The database checks this under workspace/session locks so a turn cannot
     // start between an API precheck and the history rewrite.
     const result = await clearSessionContext(db, {
@@ -3674,11 +3465,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const reasoningWithheld =
-      (await organizationReasoningDisclosure(deps, grant.accountId)) === "withheld";
     const rawAfter = c.req.query("after");
     const rawBefore = c.req.query("before");
     const after = eventSequence(rawAfter, 0);
@@ -3817,14 +3606,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             payloadMode: dbPayloadMode,
           })
         : [];
-    const storedEvents =
+    const events =
       bookkeeping.length > 0 ? mergeBySequence(dbPage.events, bookkeeping) : dbPage.events;
-    // A withheld organization's reasoning events keep their place without text
-    // in every mode; a withheld page is then not forensic-exact.
-    const events = storedEvents.map((event) => {
-      const publicEvent = projectSessionEventForPublic(event);
-      return reasoningWithheld ? withholdSessionEventReasoning(publicEvent) : publicEvent;
-    });
     if (resultMode === "compact") {
       const event = events[0];
       c.header("X-OpenGeni-Event-Result-Mode", "compact");
@@ -3847,17 +3630,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result);
     }
     const compactProjection = compact ? coalesceSessionEventDeltasWithCoverage(events) : null;
-    // Coalescing joins reasoning runs into one row; that row carries no text either.
-    const projected =
-      compactProjection && reasoningWithheld
-        ? compactProjection.events.map(withholdSessionEventReasoning)
-        : (compactProjection?.events ?? events);
+    const projected = compactProjection?.events ?? events;
     const forensicExact =
-      !compact &&
-      mode === "forensic" &&
-      payloadMode === "full" &&
-      dbPage.fullPayloadsExact &&
-      events.every((event, index) => event === storedEvents[index]);
+      !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
       eventProjection: payloadMode === "full" ? "exact" : "bounded",
@@ -3906,7 +3681,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Selected search hit only: never use the audit event projection here, even
-  // in summary mode (it can truncate visible text).
+  // in summary mode (it can contain modelContext or truncate visible text).
   app.get(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
     async (c) => {
@@ -4005,8 +3780,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
-    const withholdReasoning =
-      (await organizationReasoningDisclosure(deps, grant.accountId)) === "withheld";
     return sseSessionStream(
       db,
       bus,
@@ -4018,7 +3791,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
-        ...(withholdReasoning ? { withholdReasoning } : {}),
         reauthorizeAfterMs:
           c.req.header("x-opengeni-site-frame") === "1"
             ? 2_000
@@ -4251,10 +4023,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const parsed = parseRequestBody(SandboxRecoveryRequest, await c.req.json().catch(() => null), {
-      status: 400,
-      message: "invalid checkpoint consent",
-    });
+    const parsed = SandboxRecoveryRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid checkpoint consent" });
     let consentCommitted = false;
     try {
       const receipt = await consentManagedHumanSandboxRecovery(
@@ -4262,7 +4032,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         authorization,
         workspaceId,
         sessionId,
-        parsed,
+        parsed.data,
       );
       consentCommitted = true;
       const projection = await getManagedHumanSandboxRecovery(
@@ -4272,7 +4042,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
       );
       if (
-        ("action" in parsed && receipt.outcome === "accepted") ||
+        ("action" in parsed.data && receipt.outcome === "accepted") ||
         (projection.operationId === receipt.operationId && projection.status === "consent_accepted")
       ) {
         // Establish/verify only. No failed-turn Retry, Send, tool callback or
@@ -4345,13 +4115,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    const parsed = parseRequestBody(SessionRetryRequest, await c.req.json().catch(() => null), {
-      status: 400,
-      message: "invalid session retry request",
-    });
+    const parsed = SessionRetryRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid session retry request" });
     try {
       return c.json(
-        await retryFailedSession(deps, grant, workspaceId, c.req.param("sessionId"), parsed),
+        await retryFailedSession(deps, grant, workspaceId, c.req.param("sessionId"), parsed.data),
       );
     } catch (error) {
       if (error instanceof SessionRetryConflictError)
@@ -4410,10 +4178,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     const sessionId = c.req.param("sessionId");
-    const parsed = parseRequestBody(SessionControlRequest, await c.req.json().catch(() => null), {
-      status: 400,
-      message: "invalid session control request",
-    });
+    const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "invalid session control request",
+      });
+    }
     try {
       const response = await controlHumanSessionWorkstream(
         deps,
@@ -4423,7 +4193,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           subjectId: grant.subjectId,
         },
-        parsed,
+        parsed.data,
       );
       return c.json({
         ...response,
@@ -4449,11 +4219,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = parseRequestBody(
-      SteerSessionMessageRequest,
-      await c.req.json().catch(() => null),
-      { status: 422, message: "invalid steer request" },
-    );
+    const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
     try {
       result = await withSiteCommandOrigin(c, grant, () =>
@@ -4462,7 +4228,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           annotations: payload.annotations,
           modelContext: payload.modelContext ?? null,
           messageModelSourceRefs: payload.messageModelSourceRefs,
-          timeZone: payload.timeZone ?? null,
           resources: payload.resources,
           model: payload.model ?? null,
           reasoningEffort: payload.reasoningEffort ?? null,
@@ -4530,10 +4295,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
-    const event = parseRequestBody(ClientSessionEvent, await c.req.json().catch(() => null), {
-      status: 422,
-      message: "invalid session event",
-    });
+    const event = parseSessionEventAdmission(await c.req.json().catch(() => null));
     const refinedOperation =
       event.type === "user.approvalDecision"
         ? "session.approval.write"
@@ -4560,7 +4322,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             annotations: event.payload.annotations,
             modelContext: event.payload.modelContext ?? null,
             messageModelSourceRefs: event.payload.messageModelSourceRefs,
-            timeZone: event.payload.timeZone ?? null,
             resources: event.payload.resources ?? [],
             model: event.payload.model ?? null,
             reasoningEffort: event.payload.reasoningEffort ?? null,
@@ -4617,16 +4378,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           subjectId: grant.subjectId,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
-          // The same rule that decides whether a message may confirm app-action
-          // changes: the app's own sign-in, or an embed the deployment opted in.
-          // A key, chat integration or other token with this identity can't.
-          decidedBySignedInPerson:
-            turnAppActionGrant({
-              grant,
-              authorization,
-              delegatedSignInChangesEnabled:
-                settings.delegatedSignInAppActionChangesEnabled === true,
-            })?.changes === "confirm",
           payload,
           mcpCredentialUpdates,
           clientEventId: event.clientEventId ?? null,
@@ -4687,10 +4438,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             authorization.canonicalManagedHumanSession ||
             authorization.canonicalLocalHumanSession ||
             isVerifiedDelegatedHumanAuthorization(authorization),
-          // An agent or personal key acting as the person is not the person
-          // for a secret approval card.
-          personSignedIn:
-            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
           mcpCredentialUpdates,
@@ -5051,18 +4798,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      const parsed = parseRequestBody(
-        AcknowledgeStreamRequest,
-        await c.req.json().catch(() => ({})),
-        { status: 400, message: "invalid stream acknowledgment request" },
-      );
+      const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
+      if (!parsed.success) {
+        throw new HTTPException(400, {
+          message: "invalid stream acknowledgment request",
+        });
+      }
       const recorded = await recordStreamAcknowledgment(db, {
         accountId: grant.accountId,
         workspaceId,
         sandboxGroupId: session.sandboxGroupId,
         subjectId: grant.subjectId,
-        acknowledgeUnredacted: parsed.acknowledgeUnredacted,
-        acknowledgeShared: parsed.acknowledgeShared,
+        acknowledgeUnredacted: parsed.data.acknowledgeUnredacted,
+        acknowledgeShared: parsed.data.acknowledgeShared,
       });
       return c.json({
         acknowledged: recorded.acknowledgedUnredacted,
@@ -5091,21 +4839,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = parseRequestBody(AttachViewerRequest, await c.req.json().catch(() => ({})), {
-      status: 400,
-      message: "invalid viewer attach request",
-    });
+    const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "invalid viewer attach request",
+      });
+    }
     // Resolve exact requested planes before authorization. Empty and
     // `desktop:false` v1 bodies remain terminal-only during rolling upgrades;
     // either new plane flag selects exact semantics. This closes desktop→terminal
     // privilege bleed and lets file edits avoid unrelated terminal bearers.
-    const wantDesktop = parsed.desktop ?? false;
-    const wantFiles = parsed.files ?? false;
-    const hasExactPlaneSet = parsed.terminal !== undefined || parsed.files !== undefined;
+    const wantDesktop = parsed.data.desktop ?? false;
+    const wantFiles = parsed.data.files ?? false;
+    const hasExactPlaneSet = parsed.data.terminal !== undefined || parsed.data.files !== undefined;
     // v1 clients sent only `desktop:false` for both terminal and file warming;
     // retain its terminal-only grant during rolling upgrades. Presence of either
     // v2 flag switches to exact-plane semantics.
-    const wantTerminal = parsed.terminal ?? (!hasExactPlaneSet && !wantDesktop);
+    const wantTerminal = parsed.data.terminal ?? (!hasExactPlaneSet && !wantDesktop);
     if (!wantDesktop && !wantTerminal && !wantFiles) {
       throw new HTTPException(400, {
         message: "viewer attach requires a live plane",
@@ -5153,7 +4903,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
     let result: Awaited<ReturnType<typeof attachViewer>>;
     if (selfhostedActive) {
-      const viewerId = parsed.viewerId ?? crypto.randomUUID();
+      const viewerId = parsed.data.viewerId ?? crypto.randomUUID();
       result = {
         viewerId,
         liveness: "warm",
@@ -5201,7 +4951,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         viewerSubjectId: grant.subjectId,
         grant,
         waitSignal: c.req.raw.signal,
-        ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
+        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
       });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
@@ -5290,11 +5040,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      const parsed = parseRequestBody(
-        ViewerHeartbeatRequest,
-        await c.req.json().catch(() => ({})),
-        { status: 400, message: "viewer heartbeat requires { leaseEpoch }" },
-      );
+      const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
+      if (!parsed.success) {
+        throw new HTTPException(400, {
+          message: "viewer heartbeat requires { leaseEpoch }",
+        });
+      }
       const alive = await heartbeatViewer(
         { db, settings },
         {
@@ -5302,7 +5053,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId,
           sandboxGroupId: session.sandboxGroupId,
           viewerId: c.req.param("viewerId"),
-          expectedEpoch: parsed.leaseEpoch,
+          expectedEpoch: parsed.data.leaseEpoch,
         },
       );
       return c.json({ alive });
@@ -5412,12 +5163,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
-  async function parseChannelABody<Schema extends z.ZodType>(
+  async function parseChannelABody<T>(
     c: Context,
-    schema: Schema,
-  ): Promise<z.output<Schema>> {
+    schema: {
+      safeParse: (v: unknown) => { success: true; data: T } | { success: false };
+    },
+  ): Promise<T> {
     const raw = await c.req.json().catch(() => undefined);
-    return parseRequestBody(schema, raw ?? {}, { status: 400, message: "invalid request body" });
+    const result = schema.safeParse(raw ?? {});
+    if (!result.success) {
+      throw new HTTPException(400, { message: "invalid request body" });
+    }
+    return result.data;
   }
 
   // ── FileSystem ──────────────────────────────────────────────────────────
@@ -6029,8 +5786,6 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
-  // Stands in for the person's own next message, so it needs the same access.
-  if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/admin-access") {
@@ -6349,7 +6104,6 @@ export function sessionListQuery(
 ): {
   originSiteId: string | undefined;
   siteAccessId: string | undefined;
-  siteConversations: "include" | "group" | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -6384,33 +6138,6 @@ export function sessionListQuery(
     });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
     throw new HTTPException(400, { message: "originSiteId must be a Site id" });
-  const siteConversations = query.siteConversations;
-  if (siteConversations !== undefined) {
-    if (siteConversations !== "include" && siteConversations !== "group")
-      throw new HTTPException(400, { message: 'siteConversations must be "include" or "group"' });
-    if (!allowCursor)
-      throw new HTTPException(400, { message: 'siteConversations requires view="page"' });
-    // A Site's own history is already explicit; Site frames never reach this.
-    if (originSiteId !== undefined || siteAccessId !== undefined)
-      throw new HTTPException(400, {
-        message: "siteConversations cannot be combined with a Site filter",
-      });
-    if (
-      siteConversations === "group" &&
-      (query.parentSessionId !== "null" || query.pinsOnly === "true")
-    )
-      throw new HTTPException(400, {
-        message: 'siteConversations="group" requires a root page (parentSessionId=null)',
-      });
-    // Archived is a flat list: its Site conversations are ordinary rows.
-    if (
-      siteConversations === "group" &&
-      (query.archiveStatus === "archived" || query.archivedOnly === "true")
-    )
-      throw new HTTPException(400, {
-        message: 'siteConversations="group" cannot list archived sessions; use "include"',
-      });
-  }
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
   // failure -> 500 rather than an honest 400).
@@ -6578,7 +6305,6 @@ export function sessionListQuery(
     limit: query.limit,
     originSiteId,
     siteAccessId,
-    siteConversations,
     parentSessionId:
       parentSessionId === undefined
         ? undefined
@@ -6703,10 +6429,6 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
           .nullable(),
         claimLimit: z.number().int().positive().max(WORK_CLAIM_DISCOVERY_LIMIT).nullable(),
         cursor: z.object({
-          authorizationScopeKey: z
-            .string()
-            .regex(/^[A-Za-z0-9_-]{43}$/)
-            .optional(),
           orderBy: z.enum(["updatedAt", "relevance"]),
           sortRank: z.number().int().nonnegative().nullable(),
           sortRevision: z.string().max(64),
@@ -7006,22 +6728,6 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
-  if (
-    error instanceof SessionAuthorizationDeniedError ||
-    error instanceof SessionAuthorizationUnavailableError
-  ) {
-    const denied = error instanceof SessionAuthorizationDeniedError;
-    throw new ApiHttpError(denied ? 403 : 503, {
-      code: denied ? "forbidden" : "upstream_unavailable",
-      message: denied ? "You can't start a session here." : "Session authorization is unavailable.",
-      retryable: !denied,
-      outcomeUnknown: false,
-      details: {
-        code: denied ? "SESSION_CREATE_NOT_AUTHORIZED" : "SESSION_AUTHORIZATION_UNAVAILABLE",
-      },
-    });
-  }
-
   if (error instanceof SessionUsageLimitHttpError) {
     // a create-time usage limit the caller may not set (agents and
     // children) or that this server does not accept yet (producer flag off).
@@ -7156,6 +6862,22 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
   throw error;
 }
 
+export function parseSessionEventAdmission(raw: unknown): ClientSessionEvent {
+  const parsed = ClientSessionEvent.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(422, { message: "invalid session event" });
+  }
+  return parsed.data;
+}
+
+export function parseSteerSessionAdmission(raw: unknown): SteerSessionMessageRequest {
+  const parsed = SteerSessionMessageRequest.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(422, { message: "invalid steer request" });
+  }
+  return parsed.data;
+}
+
 function zodErrorFields(error: ZodError): string {
   const paths = [
     ...new Set(
@@ -7170,10 +6892,53 @@ function zodErrorFields(error: ZodError): string {
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
+/** Statuses in which a chat still has work that would keep running after it is archived. */
+const ARCHIVE_LIVE_WORK_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+]);
+
+/**
+ * Archiving a chat you started means you are done with it, so work it still
+ * has (a running or queued turn, a pending wait, an active goal) must not keep
+ * running out of sight. It is paused exactly like the Pause control: reversible
+ * with Resume, and a paused chat dispatches no goal continuations either. A
+ * chat someone else started is never paused: archiving only hides it for you.
+ * Settled chats are left alone so a later message to them still just runs.
+ */
+async function pauseOwnArchivedWork(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  if (session.createdBy.kind !== "subject" || session.createdBy.subjectId !== grant.subjectId)
+    return session;
+  if (!hasPermission(grant.permissions, "sessions:control")) return session;
+  if (session.effectiveControl.directState === "paused") return session;
+  const liveWork =
+    ARCHIVE_LIVE_WORK_STATUSES.has(session.status) ||
+    session.activeTurnId !== null ||
+    Boolean(session.inputWait) ||
+    (await getSessionGoal(deps.db, workspaceId, session.id))?.status === "active";
+  if (!liveWork) return session;
+  const paused = await controlHumanSessionWorkstream(
+    deps,
+    { accountId: grant.accountId, workspaceId, sessionId: session.id, subjectId: grant.subjectId },
+    {
+      action: "pause",
+      reason: "Archived",
+      // One pause per archive: a retried archive replays it instead of pausing twice.
+      clientEventId: `archive-pause:${session.id}:${session.archiveVersion}`,
+    },
+  );
+  return { ...session, effectiveControl: paused.effectiveControl };
+}
+
 function commandConflictResponse(c: Context, error: unknown): Response {
-  if (error instanceof SessionArchiveConfirmationRequiredError) {
-    return c.json({ code: error.code, message: error.message }, 409);
-  }
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
   }

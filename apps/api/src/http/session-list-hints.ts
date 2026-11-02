@@ -6,22 +6,14 @@ export type SessionListHint = {
   available: boolean;
   /** null means reconcile all loaded scopes, including formerly visible rows. */
   sessionIds: string[] | null;
-  /**
-   * The viewer's changed Site conversations, which ordinary lists omit. Only
-   * a surface that shows them (the rail's Site rows) needs to act on these.
-   */
-  siteSessionIds?: string[];
 };
-
-/** Authorized hint IDs; a plain array has no Site conversations. */
-export type SessionListHintIds = string[] | { sessionIds: string[]; siteSessionIds: string[] };
 
 /** Transient commit hints; only the subsequent authorized list read is truth. */
 export function subscribeSessionListHints(options: {
   source: SessionListChangeSource;
   workspaceId: string;
   subjectId: string;
-  authorizeIds: (ids: string[]) => Promise<SessionListHintIds>;
+  authorizeIds: (ids: string[]) => Promise<string[]>;
   write: (hint: SessionListHint) => Promise<unknown>;
   fail: (error: unknown) => void;
   intervalMs: number;
@@ -32,13 +24,12 @@ export function subscribeSessionListHints(options: {
   let all = false;
   const ids = new Set<string>();
   let tail = Promise.resolve();
-  const emit = (available: boolean, sessionIds: string[] | null, siteSessionIds: string[] = []) =>
+  const emit = (available: boolean, sessionIds: string[] | null) =>
     options.write({
       type: "workspace.sessions.changed",
       workspaceId: options.workspaceId,
       available,
       sessionIds,
-      ...(siteSessionIds.length ? { siteSessionIds } : {}),
     });
   const enqueue = (action: () => Promise<unknown>) => {
     tail = tail
@@ -82,14 +73,10 @@ export function subscribeSessionListHints(options: {
     ids.clear();
     enqueue(async () => {
       if (observedGeneration !== generation || !connected) return;
-      const authorized = reconcileAll ? null : await options.authorizeIds(pendingIds);
+      const visibleIds = reconcileAll ? null : await options.authorizeIds(pendingIds);
       if (observedGeneration !== generation || !connected) return;
-      if (authorized === null) return await emit(true, null);
-      const visible = Array.isArray(authorized)
-        ? { sessionIds: authorized, siteSessionIds: [] }
-        : authorized;
-      if (!visible.sessionIds.length && !visible.siteSessionIds.length) return;
-      await emit(true, visible.sessionIds, visible.siteSessionIds);
+      if (visibleIds !== null && !visibleIds.length) return;
+      await emit(true, visibleIds);
     });
   }, options.intervalMs);
   return () => {

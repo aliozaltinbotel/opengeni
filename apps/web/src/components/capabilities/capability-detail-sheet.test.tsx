@@ -10,6 +10,7 @@ import type {
   ConnectionMetadata,
   SocialConnection,
 } from "@opengeni/react/app/types";
+import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
 import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   ConnectionStatus,
@@ -18,7 +19,6 @@ import {
   OwnershipSelector,
   SocialConnectorControls,
 } from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
-import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -153,41 +153,6 @@ describe("connection ownership UI", () => {
       expect(view.container.querySelector('input[type="password"]')).toBeNull();
     } finally {
       await view.unmount();
-    }
-  });
-  test("with Secrets hidden by the host extension, 1Password setup says whether it is connected, without a link", async () => {
-    configurePageAppHost({ hiddenNativeDestinations: ["secrets"] });
-    const view = await render(
-      <DetailBody
-        workspaceId="ws"
-        setupOnly
-        inline
-        showIdentity={false}
-        item={CapabilityCatalogItemSchema.parse({
-          id: "api:1password",
-          kind: "api",
-          source: "built_in",
-          name: "1Password",
-          surfaceType: "first_party_onepassword",
-          runtime: { available: true },
-        })}
-        health={{ state: "none" }}
-        logoSrc={null}
-        busy={false}
-        errorMessage={null}
-        canManageSocial={false}
-        onAction={() => {
-          throw new Error("Must not use generic setup");
-        }}
-      />,
-    );
-    try {
-      expect(view.container.querySelector('a[href*="/secrets"]')).toBeNull();
-      expect(view.container.textContent).not.toContain("Opens Secrets");
-      expect(view.container.textContent).toContain("1Password isn't connected to this workspace.");
-    } finally {
-      await view.unmount();
-      configurePageAppHost({ hiddenNativeDestinations: undefined });
     }
   });
   test("a personal connector enabled by another member waits for this viewer's account before reading permissions", async () => {
@@ -380,7 +345,7 @@ describe("connection ownership UI", () => {
     );
     try {
       expect(rendered.container.textContent).toContain("Personal connection to linear.app");
-      expect(rendered.container.textContent).toContain("Your messages and personal automations");
+      expect(rendered.container.textContent).toContain("Your messages and personal schedules");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
     } finally {
       await rendered.unmount();
@@ -642,6 +607,37 @@ describe("Skill installation authority UI", () => {
   // The enabled Connectors strip can no longer contain a Skill at all: Skills
   // are Bundles and their authority, their remove affordance, and their
   // administrator guidance all live in the Bundles section instead.
+  test("the enabled Connectors strip offers no Skill removal shortcut", async () => {
+    const skill = installedCuratedSkill();
+    const onOpen = mock((_item: CapabilityCatalogItem) => {});
+    const onDisable = mock((_item: CapabilityCatalogItem) => {});
+    const rendered = await render(
+      <EnabledCapabilitiesSection
+        items={[skill]}
+        busyId={null}
+        connectionHealth={() => ({ state: "none" })}
+        logoUrl={() => null}
+        onOpen={onOpen}
+        onDisable={onDisable}
+      />,
+    );
+    try {
+      const inspect = rendered.container.querySelector<HTMLButtonElement>(
+        '[data-capability-id="skill:terraform-style-guide"]',
+      );
+      expect(inspect?.disabled).toBe(false);
+      expect(
+        [...rendered.container.querySelectorAll("button")].map((button) =>
+          button.textContent?.trim(),
+        ),
+      ).not.toContain("Remove");
+      await act(async () => inspect!.click());
+      expect(onOpen).toHaveBeenCalledWith(skill);
+      expect(onDisable).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 describe("social provider integration UI", () => {

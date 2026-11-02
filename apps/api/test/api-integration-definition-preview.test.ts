@@ -70,7 +70,6 @@ test("Microsoft definitions persist bounded provider-validated schemas; custom s
       "/me/calendar": operation,
       "/me/contacts": operation,
       "/me/drive": operation,
-      "/chats/{chat-id}/messages": operation,
     },
   });
   const common = {

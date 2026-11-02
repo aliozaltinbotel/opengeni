@@ -18,7 +18,7 @@ describe("production session rail delivery attention", () => {
     const rendered = await renderComponent(
       createElement(RailTrailingMetadata, {
         summary: failed,
-        automationWait: "schedule",
+        scheduled: true,
         relativeTime: "2m",
       }),
     );
@@ -35,7 +35,7 @@ describe("production session rail delivery attention", () => {
     await rendered.rerender(
       createElement(RailTrailingMetadata, {
         summary: sendFailed,
-        automationWait: "schedule",
+        scheduled: true,
         relativeTime: "2m",
       }),
     );

@@ -172,7 +172,6 @@ describe("framework adapters", () => {
     for (const action of [
       {
         label: "approval",
-        delivery: "approval",
         event: {
           type: "user.approvalDecision",
           clientEventId: "approval-retry",
@@ -181,7 +180,6 @@ describe("framework adapters", () => {
       },
       {
         label: "human-input",
-        delivery: "answer",
         event: {
           type: "user.humanInputResponse",
           clientEventId: "human-input-retry",
@@ -211,7 +209,7 @@ describe("framework adapters", () => {
           resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_1", source: "product" }),
           beforeForwardMessage: async (input, context) => {
             inputs.push(input);
-            if (input.delivery !== action.delivery) return;
+            if (input.delivery !== "send") return;
             expect(context.user).toBe("u_1");
             expect(context.workspaceId).toBe(WORKSPACE_ID);
             expect(context.source).toBe("product");
@@ -284,8 +282,7 @@ describe("framework adapters", () => {
           expect(inputs).toEqual(
             Array.from({ length: forwarded }, () => ({
               sessionId: SESSION_ID,
-              delivery: action.delivery,
-              clientEventId: action.event.clientEventId,
+              delivery: "send",
             })),
           );
 

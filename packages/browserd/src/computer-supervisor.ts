@@ -11,8 +11,7 @@ import type {
   ComputerSessionCapabilities,
   ComputerTarget,
 } from "@opengeni/contracts";
-import { reportUnexpectedDispatchError } from "./controller-diagnostics";
-import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
+import type { UpdateBlocker } from "./update-admission";
 import {
   ComputerInteractionController,
   InteractionControllerError,
@@ -85,7 +84,6 @@ export type ComputerSupervisorOptions = {
   environmentAllocator?: ComputerEnvironmentAllocator;
   baseEnvironment?: NodeJS.ProcessEnv;
   createDriver?: (context: ComputerSupervisorDriverContext) => Promise<ComputerSupervisorDriver>;
-  now?: () => number;
 };
 
 type ValidatedSessionOptions = ComputerSupervisorSessionOptions;
@@ -100,8 +98,6 @@ type Runtime = {
   capabilities: ComputerSessionCapabilities;
   controller: ComputerInteractionController;
   lifecycle: "active" | "ending";
-  /** When a request last reached this session. */
-  lastUsedAt: number;
 };
 
 /** Computer half of the one placement-local interaction authority. */
@@ -121,10 +117,8 @@ export class ComputerSupervisor {
   private closed = false;
   private closePromise: Promise<void> | null = null;
   private cleanupUncertain = false;
-  private readonly now: () => number;
 
   private constructor(options: ComputerSupervisorOptions) {
-    this.now = options.now ?? Date.now;
     this.rootDirectory = resolve(options.rootDirectory);
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
@@ -233,10 +227,7 @@ export class ComputerSupervisor {
             ? "computer_virtual_seat"
             : !runtime.controller.isIdle()
               ? "computer_action"
-              : // Mid-task (see RECENT_USE_UPDATE_HOLD_MS): wait for a pause.
-                this.now() - runtime.lastUsedAt < RECENT_USE_UPDATE_HOLD_MS
-                ? "computer_recent_use"
-                : null;
+              : null;
       if (kind) blockers.push({ kind, resourceId: runtime.options.computerSessionId, count: 1 });
     }
     return blockers;
@@ -361,8 +352,7 @@ export class ComputerSupervisor {
   }
 
   async heartbeat(reference: ComputerSessionReference): Promise<void> {
-    // A locked screen leaves the computer itself alive.
-    await this.requireActive(reference).driver.listTargets().catch(unlessMachineLocked);
+    await this.requireActive(reference).driver.listTargets();
   }
 
   async endSession(
@@ -517,8 +507,6 @@ export class ComputerSupervisor {
             initialJournal,
             onJournalRecord: (record) => journal.write(record),
             loadJournalRecord: (operationId) => journal.read(operationId),
-            onUnexpectedDispatchError: (error, command) =>
-              reportUnexpectedDispatchError("computer", error, command),
             authority: {
               authorizeDispatch: async (command) => {
                 if (runtime?.lifecycle !== "active") {
@@ -542,7 +530,6 @@ export class ComputerSupervisor {
         capabilities,
         controller,
         lifecycle: "active",
-        lastUsedAt: this.now(),
       };
       return runtime;
     } catch (error) {
@@ -596,9 +583,7 @@ export class ComputerSupervisor {
       seatId: runtime.environmentLease.seatId,
       displayId: runtime.environmentLease.displayId,
       capabilities: runtime.capabilities,
-      // A computer opened while its screen is locked stays open with no
-      // targets; listing them says why.
-      targets: (await runtime.driver.listTargets().catch(unlessMachineLocked)) ?? [],
+      targets: await runtime.driver.listTargets(),
     };
   }
 
@@ -630,7 +615,6 @@ export class ComputerSupervisor {
         "computer request targets a stale controller generation",
       );
     }
-    runtime.lastUsedAt = this.now();
     return runtime;
   }
 
@@ -678,14 +662,6 @@ export class ComputerSupervisor {
       throw new InteractionControllerError("resource_unavailable", "computer supervisor is closed");
     }
   }
-}
-
-/** Swallows only the error of a computer whose screen is locked or shows
- * another user's session; the computer and its helper are still fine. */
-function unlessMachineLocked(error: unknown): undefined {
-  if (error instanceof InteractionControllerError && error.code === "machine_locked")
-    return undefined;
-  throw error;
 }
 
 function binding(runtime: Runtime): ComputerSessionReference {

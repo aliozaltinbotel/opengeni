@@ -57,8 +57,6 @@ export type FeedbackPayload = Omit<CreateFeedbackRequest, "idempotencyKey">;
 /**
  * The request to send, reusing the previous idempotency key when the user
  * retries the identical submission (a lost response must not duplicate it).
- * The same comment with other screenshots is a new submission; the context is
- * kept from the first attempt, since a retry describes the same moment.
  */
 export function feedbackSubmission(
   payload: FeedbackPayload,
@@ -70,27 +68,11 @@ export function feedbackSubmission(
     previous.sessionId === payload.sessionId &&
     previous.turnId === payload.turnId &&
     previous.sentiment === payload.sentiment &&
-    previous.comment === payload.comment &&
-    sameScreenshots(previous.screenshots, payload.screenshots)
+    previous.comment === payload.comment
   ) {
     return previous;
   }
   return { ...payload, idempotencyKey: newKey() };
-}
-
-function sameScreenshots(
-  left: CreateFeedbackRequest["screenshots"],
-  right: CreateFeedbackRequest["screenshots"],
-): boolean {
-  const a = left ?? [];
-  const b = right ?? [];
-  return (
-    a.length === b.length &&
-    a.every(
-      (shot, index) =>
-        shot.contentType === b[index]?.contentType && shot.base64 === b[index]?.base64,
-    )
-  );
 }
 
 export function feedbackDialogCopy(

@@ -22,7 +22,9 @@ import {
   requireSubscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
-import { parseRequestBody } from "../http/request-body";
+const allocatorBody = SubscriptionAccountToggleRequest;
+const settingsBody = SubscriptionRotationSettingsRequest;
+const renameBody = SubscriptionAccountRenameRequest;
 
 /** The legacy pool repository; only Claude still has one (until its own cutover). */
 
@@ -89,16 +91,10 @@ export function registerSubscriptionAccountPoolRoutes(
   });
   app.patch(`${organizationPath}/settings`, async (c) => {
     const actor = await organizationActor(c, true);
-    const parsed = parseRequestBody(
-      SubscriptionRotationSettingsRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "rotationEnabled is required",
-      },
-    );
+    const parsed = settingsBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "rotationEnabled is required" });
     await route(async () => actor.organizationId);
-    return await coreOrganizationSettings(c, coreContext!, actor, parsed.rotationEnabled);
+    return await coreOrganizationSettings(c, coreContext!, actor, parsed.data.rotationEnabled);
   });
   const updateOrganizationAccount = async (
     c: Context,
@@ -136,28 +132,17 @@ export function registerSubscriptionAccountPoolRoutes(
     updateOrganizationAccount(c, { disconnect: true }),
   );
   app.patch(`${organizationPath}/accounts/:accountId`, async (c) => {
-    const parsed = parseRequestBody(
-      SubscriptionAccountRenameRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "label is invalid",
-      },
-    );
-    return updateOrganizationAccount(c, { label: parsed.label || null });
+    const parsed = renameBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "label is invalid" });
+    return updateOrganizationAccount(c, { label: parsed.data.label || null });
   });
   app.patch(`${organizationPath}/accounts/:accountId/allocator`, async (c) => {
-    const parsed = parseRequestBody(
-      SubscriptionAccountToggleRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "enabled and expectedVersion are required",
-      },
-    );
+    const parsed = allocatorBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
     return updateOrganizationAccount(c, {
-      allocatorEnabled: parsed.enabled,
-      expectedAllocatorVersion: parsed.expectedVersion,
+      allocatorEnabled: parsed.data.enabled,
+      expectedAllocatorVersion: parsed.data.expectedVersion,
     });
   });
 
@@ -179,16 +164,10 @@ export function registerSubscriptionAccountPoolRoutes(
   app.patch(`${workspacePath}/settings`, async (c) => {
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
-    const parsed = parseRequestBody(
-      SubscriptionRotationSettingsRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "rotationEnabled is required",
-      },
-    );
+    const parsed = settingsBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "rotationEnabled is required" });
     await workspaceRoute(c, workspaceId);
-    return await coreWorkspaceSettings(c, coreContext!, workspaceId, parsed.rotationEnabled);
+    return await coreWorkspaceSettings(c, coreContext!, workspaceId, parsed.data.rotationEnabled);
   });
 
   app.patch(`${workspacePath}/accounts/:accountId/allocator`, async (c) => {
@@ -197,15 +176,10 @@ export function registerSubscriptionAccountPoolRoutes(
     const credentialId = c.req.param("accountId")!;
     await workspaceRoute(c, workspaceId);
 
-    const parsed = parseRequestBody(
-      SubscriptionAccountToggleRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "enabled and expectedVersion are required",
-      },
-    );
-    return await coreWorkspaceAllocator(c, coreContext!, workspaceId, credentialId, parsed);
+    const parsed = allocatorBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success)
+      throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
+    return await coreWorkspaceAllocator(c, coreContext!, workspaceId, credentialId, parsed.data);
   });
 
   app.patch(`${workspacePath}/accounts/:accountId`, async (c) => {
@@ -214,20 +188,14 @@ export function registerSubscriptionAccountPoolRoutes(
     const credentialId = c.req.param("accountId")!;
     await workspaceRoute(c, workspaceId);
 
-    const parsed = parseRequestBody(
-      SubscriptionAccountRenameRequest,
-      await c.req.json().catch(() => null),
-      {
-        status: 400,
-        message: "label is invalid",
-      },
-    );
+    const parsed = renameBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "label is invalid" });
     return await coreWorkspaceRename(
       c,
       coreContext!,
       workspaceId,
       credentialId,
-      parsed.label || null,
+      parsed.data.label || null,
     );
   });
 

@@ -6,7 +6,6 @@ import {
   ORGANIZATION_ADMIN_SECTIONS,
   type OrganizationAdminSection,
 } from "@opengeni/react/app/lib/organization-admin";
-import { isOrganizationSectionHidden } from "@opengeni/react/app/host-extension";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
 import type {
@@ -14,7 +13,6 @@ import type {
   ClientConfig,
   OrganizationMembershipRole,
 } from "@opengeni/react/app/types";
-import { hiddenNativeDestinations, hiddenNativeSections } from "@/host-extension/registry";
 
 export type OrganizationSettingsAccess = {
   actorRole: OrganizationMembershipRole | null;
@@ -120,10 +118,6 @@ export function organizationSettingsAccess(input: {
   // Recovery contacts are members, not only owners and admins: they accept
   // and approve recovery on this page, so every managed person can reach it.
   if (administrator || (managedHumanSession && !singleUser)) visible.add("security");
-  // A section showing a destination the host extension hides is no one's page.
-  const hidden = hiddenNativeDestinations();
-  for (const section of visible)
-    if (isOrganizationSectionHidden(section, hidden, hiddenNativeSections())) visible.delete(section);
 
   return {
     actorRole,

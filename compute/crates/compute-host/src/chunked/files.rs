@@ -22,25 +22,12 @@ use super::{
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, overlaps};
 use crate::layout::Staging;
 
-/// A chunk an earlier copy holds at an offset of the file being stored: a
-/// range there with the same bytes names it instead of storing them again.
-#[derive(Clone, Debug)]
-pub(super) struct Reusable {
-    pub(super) reference: ChunkRef,
-    /// Known to be in the store; otherwise the store is asked first.
-    pub(super) confirmed: bool,
-}
-
-/// What earlier copies hold, by offset, the confirmed first.
-pub(super) type Earlier = HashMap<u64, Vec<Reusable>>;
-
 impl Chunked {
-    /// Stores `path` and returns its manifest's digest. A chunk-sized range
-    /// holding what an `earlier` copy holds at the same offset names that
-    /// chunk. With `known`, the file's per-chunk hashes, such chunks are
-    /// recognised without being read, and every chunk read is checked
-    /// against its hash. A chunk not confirmed to be in the store is asked
-    /// about first, and stored again from the local bytes if it is not.
+    /// Stores `path` and returns its manifest's digest. With `known`, the
+    /// file's per-chunk hashes, chunks equal to the earlier copy's are taken
+    /// from it without being read, and every chunk read is checked against
+    /// its hash. A chunk taken from the earlier copy is first checked to be
+    /// in the store, and stored again from the local bytes if it is not.
     ///
     /// Once `cancel` fires, or a chunk fails, no further chunk is started;
     /// the call returns after the chunks under way have finished, so nothing
@@ -50,7 +37,7 @@ impl Chunked {
         &self,
         path: &Path,
         file: io::Result<File>,
-        earlier: Earlier,
+        earlier: HashMap<u64, ChunkRef>,
         known: Option<Arc<Vec<Hash>>>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, EngineError> {
@@ -90,7 +77,7 @@ impl Chunked {
                         return Ok(None);
                     }
                     let range = chunk_range(index, length);
-                    let earlier = earlier.get(&range.start).cloned().unwrap_or_default();
+                    let earlier = earlier.get(&range.start).cloned();
                     let stored = self
                         .store_chunk(&file, range.clone(), earlier, expected)
                         .await;
@@ -134,13 +121,13 @@ impl Chunked {
     }
 
     /// Stores the chunk-sized `range` of `file` and returns its chunk
-    /// (`None` for zeros): one of the `earlier` copies' chunks there if the
-    /// bytes are the same and it is still in the store, otherwise a new one.
+    /// (`None` for zeros): the `earlier` copy's chunk if the bytes are the
+    /// same and it is still in the store, otherwise a new one.
     async fn store_chunk(
         &self,
         file: &Arc<File>,
         range: Range<u64>,
-        earlier: Vec<Reusable>,
+        earlier: Option<ChunkRef>,
         expected: Option<Hash>,
     ) -> Result<Option<ChunkRef>, EngineError> {
         const OP: &str = "archive";
@@ -154,29 +141,28 @@ impl Chunked {
         )
         .await?
         {
-            Prepared::Known(reusable) if reusable.confirmed => Prepared::Known(reusable),
-            Prepared::Known(reusable) => {
+            Prepared::Known(reference) => {
                 let present = {
                     let _permit = self.transfers.acquire().await.map_err(transient)?;
                     self.chunks
-                        .has_chunk(&reusable.reference)
+                        .has_chunk(&reference)
                         .await
                         .map_err(|error| storage_error(OP, error))?
                 };
                 if present {
-                    Prepared::Known(reusable)
+                    Prepared::Known(reference)
                 } else {
                     // Gone or cut short since: store these bytes again
                     // rather than name a chunk no copy can be read from.
-                    tracing::warn!(chunk = %reusable.reference.key(), "stored chunk missing; storing it again");
-                    prepare_blocking(&self.compress, file, range, Vec::new(), expected).await?
+                    tracing::warn!(chunk = %reference.key(), "stored chunk missing; storing it again");
+                    prepare_blocking(&self.compress, file, range, None, expected).await?
                 }
             }
             prepared => prepared,
         };
         Ok(match prepared {
             Prepared::Zero => None,
-            Prepared::Known(reusable) => Some(reusable.reference),
+            Prepared::Known(reference) => Some(reference),
             Prepared::New(chunk) => {
                 let _permit = self.transfers.acquire().await.map_err(transient)?;
                 let stored = self
@@ -305,30 +291,25 @@ impl Chunked {
 /// What one chunk-sized range of a file turned out to hold.
 enum Prepared {
     Zero,
-    Known(Reusable),
+    Known(ChunkRef),
     New(EncodedChunk),
 }
 
-/// Reads `range` and decides how to store it: as zeros, as a chunk an
-/// earlier copy holds there if the bytes are the same (the first that
-/// matches), or as a new chunk. With `expected`, the range's hash from the
-/// image's chunk map, an unchanged chunk is recognised without reading it,
-/// and a chunk read is checked.
+/// Reads `range` and decides how to store it: as zeros, as the chunk stored
+/// there before if the bytes are unchanged, or as a new chunk. With
+/// `expected`, the range's hash from the image's chunk map, an unchanged
+/// chunk is recognised without reading it, and a chunk read is checked.
 fn prepare(
     file: &File,
     range: Range<u64>,
-    earlier: &[Reusable],
+    earlier: Option<&ChunkRef>,
     expected: Option<Hash>,
 ) -> Result<Prepared, StorageError> {
-    let whole =
-        |reusable: &&Reusable| u64::from(reusable.reference.plain_len) == range.end - range.start;
-    if let Some(expected) = expected
-        && let Some(found) = earlier
-            .iter()
-            .filter(whole)
-            .find(|reusable| hash_from_hex(&reusable.reference.hash) == Ok(expected))
+    if let (Some(expected), Some(earlier)) = (expected, earlier)
+        && u64::from(earlier.plain_len) == range.end - range.start
+        && hash_from_hex(&earlier.hash) == Ok(expected)
     {
-        return Ok(Prepared::Known(found.clone()));
+        return Ok(Prepared::Known(earlier.clone()));
     }
     let length = usize::try_from(range.end - range.start)
         .map_err(|_| StorageError::Invalid("chunk length"))?;
@@ -346,13 +327,11 @@ fn prepare(
     if zero {
         return Ok(Prepared::Zero);
     }
-    let hex = hash.to_hex();
-    if let Some(found) = earlier
-        .iter()
-        .filter(whole)
-        .find(|reusable| hex.as_str() == reusable.reference.hash)
+    if let Some(earlier) = earlier
+        && earlier.plain_len as usize == plain.len()
+        && hash.to_hex().as_str() == earlier.hash
     {
-        return Ok(Prepared::Known(found.clone()));
+        return Ok(Prepared::Known(earlier.clone()));
     }
     EncodedChunk::encode(&plain, ZSTD_LEVEL).map(Prepared::New)
 }
@@ -362,7 +341,7 @@ async fn prepare_blocking(
     permits: &Semaphore,
     file: &Arc<File>,
     range: Range<u64>,
-    earlier: Vec<Reusable>,
+    earlier: Option<ChunkRef>,
     expected: Option<Hash>,
 ) -> Result<Prepared, EngineError> {
     const OP: &str = "archive";
@@ -371,7 +350,7 @@ async fn prepare_blocking(
         .acquire()
         .await
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
-    tokio::task::spawn_blocking(move || prepare(&file, range, &earlier, expected))
+    tokio::task::spawn_blocking(move || prepare(&file, range, earlier.as_ref(), expected))
         .await
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
         .map_err(|error| storage_error(OP, error))

@@ -1,5 +1,5 @@
 import { beforeAll, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { executeMigrationFile } from "../src/migrate";
 import { fromPostgresLosslessJson, toPostgresLosslessJson } from "../src/lossless-json";

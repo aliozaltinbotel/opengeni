@@ -8,7 +8,11 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
+import {
+  AgentBrowserDriver,
+  AgentBrowserJsonRunner,
+  resolvePinnedAgentBrowserBinary,
+} from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -30,9 +34,19 @@ e2e(
     const directory = await mkdtemp("/tmp/ogb-exit-animation-");
     const browserSessionId = randomUUID();
     const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await ManagedBrowserRunner.create({
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `exit_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
       profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),

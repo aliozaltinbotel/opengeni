@@ -1,16 +1,8 @@
-import { capabilitiesSectionFromSearch, isNativeSectionHidden, isNativeCapabilityDetailHidden, type NativeCapabilitiesSection, type NativeSectionId } from "@opengeni/react/app/host-extension";
-import { useHiddenNativeSections } from "@opengeni/react/app/lib/app-host";
-import {
-  DRIVE_CONNECT_RETURN_PARAM,
-  DRIVE_MCP_URL,
-  resolveDriveConnectReturn,
-  completeDriveConnectReturn,
-} from "@opengeni/react/app/lib/drive-connect-return";
 import type { SkillSummary } from "@opengeni/sdk";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
-import { notFound, useLocation, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ConnectionCatalog,
   McpConnectionCard,
@@ -117,8 +109,6 @@ import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-i
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
 import { useOutlookContactsIntegration } from "@/components/capabilities/use-outlook-contacts-integration";
 import { useOutlookMailIntegration } from "@/components/capabilities/use-outlook-mail-integration";
-import { useTeamsBotIntegration } from "@/components/capabilities/use-teams-bot-integration";
-import { useMicrosoftTeamsIntegration } from "@/components/capabilities/use-microsoft-teams-integration";
 import {
   canManageSlackReactionSummon,
   useSlackIntegration,
@@ -128,7 +118,6 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
-import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
@@ -259,29 +248,9 @@ export function canManageApiIntegrations(
   return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
-export function CapabilitiesTabList({ hidden }: { hidden: readonly NativeSectionId[] }) {
-  const plugins = !isNativeSectionHidden("capabilities", "plugins", [], hidden);
-  const connections = !isNativeSectionHidden("capabilities", "connections", [], hidden);
-  return <LineTabsList aria-label="Capability types">
-    {plugins ? <LineTabsTrigger value="all">All</LineTabsTrigger> : null}
-    {connections ? <LineTabsTrigger value="connections">Connections</LineTabsTrigger> : null}
-    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-    {plugins ? <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger> : null}
-  </LineTabsList>;
-}
-
-export function capabilitiesTabNavigation(pathname: string, search: string, value: string): Readonly<{ href: string; replace: true }> | undefined {
-  const section = capabilitiesSectionFromSearch(value);
-  if (value !== "all" && !section) return undefined;
-  const params = new URLSearchParams(search);
-  if (section) params.set("section", section); else params.delete("section");
-  const query = params.toString();
-  return { href: `${pathname}${query ? `?${query}` : ""}`, replace: true };
-}
-
 type CapabilitiesRouteProps = {
   workspaceId: string;
-  initialSection?: NativeCapabilitiesSection;
+  initialSection?: "skills";
   slackLinkToken?: string;
   legacyRedirect?: boolean;
 };
@@ -300,8 +269,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const client = context.client;
-  // Where event triggers run, pull-request review is an automation.
-  const eventTriggersEnabled = context.clientConfig.eventTriggers?.enabled === true;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
     [context, workspaceId],
@@ -335,10 +302,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
-  const activeTab = initialSection ?? "all";
-  const hiddenSections = useHiddenNativeSections();
-  const integrationsHidden = isNativeSectionHidden("capabilities", "connections", [], hiddenSections);
-  const pluginsHidden = isNativeSectionHidden("capabilities", "plugins", [], hiddenSections);
+  const [activeTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
   const [query, setQuery] = useState("");
   const hasQuery = query.trim().length > 0;
   const searchingAll = activeTab === "all";
@@ -356,10 +320,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // search and scroll position.
   const navigate = useNavigate();
   const searchStr = useLocation({ select: (location) => location.searchStr });
-  const setActiveTab = useCallback((value: string) => {
-    const target = capabilitiesTabNavigation(window.location.pathname, searchStr, value);
-    if (target) void navigate(target);
-  }, [navigate, searchStr]);
   const openKey = new URLSearchParams(searchStr).get("open");
   const goTo = useCallback(
     (key: string | null, replace = false) => {
@@ -373,12 +333,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // Strip one-shot return parameters (OAuth outcomes) but keep the open page.
   const clearReturnParams = useCallback(() => {
     const open = new URLSearchParams(window.location.search).get("open");
-    const clean = open ? `?open=${encodeURIComponent(open)}` : "";
-    const target = capabilitiesTabNavigation(window.location.pathname, clean, activeTab);
-    if (!target) return;
-    window.history.replaceState(window.history.state, "", target.href);
-    void navigate(target);
-  }, [navigate, activeTab]);
+    const next = open ? `?open=${encodeURIComponent(open)}` : "";
+    window.history.replaceState(window.history.state, "", `${window.location.pathname}${next}`);
+    void navigate({ href: `${window.location.pathname}${next}`, replace: true });
+  }, [navigate]);
   const [selectionSnapshot, setSelectionSnapshot] = useState<SheetSelection | null>(null);
   const itemKey = openKey?.startsWith("item:") ? openKey.slice("item:".length) : null;
   const selected: SheetSelection | null = useMemo(() => {
@@ -567,8 +525,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const googleDrive = useGoogleDriveIntegration({
     workspaceId,
     connections,
+    connectionsLoaded,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
+    definitions: apiIntegrationDefinitions,
+    instances: apiIntegrationInstances,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
   });
   const atlassian = useAtlassianIntegration({
     workspaceId,
@@ -583,15 +547,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // curated definition here is oauth2-only, so a single shared effect (below)
   // handles the OAuth return for all of them.
   useApiIntegrationOAuthCallback({ workspaceId, refresh, onRuntimeChanged });
-  const teamsBot = useTeamsBotIntegration({ workspaceId, refreshRevision: catalogData.revision });
-  const microsoftTeams = useMicrosoftTeamsIntegration({
-    workspaceId,
-    definitions: apiIntegrationDefinitions,
-    instances: apiIntegrationInstances,
-    refresh,
-    onRuntimeChanged,
-    refreshRevision: catalogData.revision,
-  });
   const outlookMail = useOutlookMailIntegration({
     workspaceId,
     definitions: apiIntegrationDefinitions,
@@ -628,19 +583,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const integrations = [
     { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
     github,
-    ...(googleDrive.hasHistoricalConnection
-      ? [
-          {
-            ...googleDrive,
-            model: connectionAccessModel(googleDrive.model, connectionsAccessDenied),
-          },
-        ]
-      : []),
+    { ...googleDrive, model: connectionAccessModel(googleDrive.model, connectionsAccessDenied) },
     ...(atlassian.hasHistoricalConnection
       ? [{ ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) }]
       : []),
-    ...(teamsBot.visible ? [teamsBot] : []),
-    microsoftTeams,
     outlookMail,
     outlookCalendar,
     outlookContacts,
@@ -1335,65 +1281,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items, setQuery]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (
-      params.get("google_drive") === "error" &&
-      params.get("reason") === "google_drive_native_retired"
-    ) {
-      setCallbackNotice(
-        "The previous Google Drive integration is retired. Connect Google Drive MCP and use an automation for recurring work. Your imported documents and history are kept.",
-      );
-      clearReturnParams();
-    }
-  }, [clearReturnParams]);
-
-  const driveReturnHandled = useRef(false);
-  useEffect(() => {
-    if (driveReturnHandled.current || loading) return;
-    const params = new URLSearchParams(window.location.search);
-    const nonce = params.get(DRIVE_CONNECT_RETURN_PARAM);
-    if (!nonce) return;
-    driveReturnHandled.current = true;
-    let active = true;
-    void resolveDriveConnectReturn({ client, workspaceId, nonce, storage: window.sessionStorage })
-      .then(async ({ itemId, connectionId }) => {
-        if (!active) return;
-        const catalog = await client.listCapabilities(workspaceId);
-        if (!active) return;
-        const item = catalog.items.find((candidate) => candidate.id === itemId);
-        if ((item?.mcpUrl ?? item?.endpointUrl) !== DRIVE_MCP_URL)
-          throw new Error("The Google Drive connector changed. Open Drive to finish setup.");
-        const finished = await resumeOAuthConnect(
-          itemId,
-          connectionId,
-          "drivemcp.googleapis.com",
-          "personal",
-        );
-        if (!active || !finished) return;
-        completeDriveConnectReturn(workspaceId, nonce, window.sessionStorage);
-        const url = new URL(window.location.href);
-        if (url.searchParams.get(DRIVE_CONNECT_RETURN_PARAM) === nonce) {
-          url.searchParams.delete(DRIVE_CONNECT_RETURN_PARAM);
-          window.history.replaceState(window.history.state, "", url.toString());
-        }
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Google Drive setup could not be checked. Reload to try again.";
-        setCallbackNotice(message);
-        toast.error("Google Drive setup needs attention", { description: message });
-      });
-    return () => {
-      active = false;
-      driveReturnHandled.current = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, client, workspaceId]);
-
   // Resume an OAuth round-trip. The callback lands back on this path with
   // ?integration_oauth=success|error; we read it once, strip it from the URL,
   // and either auto-enable with the fresh connection or reopen the sheet with a
@@ -1533,11 +1420,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         toast.success(
           "Connected - but this integration is no longer in the catalog, so it wasn't enabled.",
         );
-        return false;
+        return;
       }
       if (action === "no_connection") {
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
-        return false;
+        return;
       }
       if (action === "reconnect") {
         // Already enabled: the exact pinned row was refreshed in place, or a
@@ -1549,7 +1436,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             ? `Reconnected ${item!.name}`
             : `Connected ${item!.name}`,
         );
-        return true;
+        return;
       }
 
       // Build the enable connectionRef from the redirect's own authoritative
@@ -1564,7 +1451,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         null;
       if (!refDomain) {
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
-        return false;
+        return;
       }
       const returnedConnection = conns?.find((candidate) => candidate.id === connectionId) ?? null;
       const resolvedOwnership =
@@ -1589,7 +1476,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             ? `Connected ${item!.name}`
             : `Reconnected ${item!.name}`,
       );
-      return true;
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
       setSheetError(copy.description);
@@ -1608,7 +1494,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           true,
         );
       toast.error(copy.title, { description: copy.description });
-      return false;
     } finally {
       setBusyId(null);
     }
@@ -1869,8 +1754,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     wasPageOpen.current = pageOpen;
   }, [pageOpen]);
 
-  if (isNativeCapabilityDetailHidden(openKey, hiddenSections, selectedItem?.kind)) throw notFound();
-
   return (
     // The app shell (RailShell) hands each route a fixed-height overflow-hidden
     // flex column, so the PAGE never body-scrolls - the route must own its own
@@ -1909,7 +1792,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 />
               }
               tabs={
-                <CapabilitiesTabList hidden={hiddenSections} />
+                <LineTabsList aria-label="Capability types">
+                  <LineTabsTrigger value="all">All</LineTabsTrigger>
+                  <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                  <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                  <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                </LineTabsList>
               }
             />
             {(connectionsAccessDenied ||
@@ -1964,7 +1852,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             <CatalogActionContext.Provider value={catalogToolbar}>
               <div className="min-w-0">
                 <LineTabsContent value={activeTab} forceMount>
-                  {!integrationsHidden ? <div hidden={!searchingAll && activeTab !== "connections"}>
+                  <div hidden={!searchingAll && activeTab !== "connections"}>
                     {!searchingAll ? (
                       <CatalogHeader
                         title="Connections"
@@ -2173,7 +2061,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         />
                       </div>
                     ) : null}
-                  </div> : null}
+                  </div>
                   <div
                     className={searchingAll ? "capability-search-section" : "pt-6"}
                     hidden={activeTab !== "skills"}
@@ -2202,7 +2090,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }}
                     />
                   </div>
-                  {(!pluginsHidden || activeTab === "skills") ? <div
+                  <div
                     ref={bundlesRef}
                     className={searchingAll ? "capability-search-section" : "pt-6"}
                     hidden={!searchingAll && activeTab === "connections"}
@@ -2267,14 +2155,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }}
                     />
                     {activeTab === "plugins" ? (
-                      <div className="mt-6 grid gap-4">
-                        {eventTriggersEnabled ? (
-                          <PrReviewAutomationCard workspaceId={workspaceId} />
-                        ) : null}
+                      <div className="mt-6">
                         <PrReviewSetupCard
                           client={client}
                           workspaceId={workspaceId}
-                          retiring={eventTriggersEnabled}
                           canManage={
                             canManageApiIntegrationInstances &&
                             hasWorkspacePermission(
@@ -2286,7 +2170,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         />
                       </div>
                     ) : null}
-                  </div> : null}
+                  </div>
                 </LineTabsContent>
               </div>
             </CatalogActionContext.Provider>

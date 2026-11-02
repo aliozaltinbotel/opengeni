@@ -17,9 +17,12 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createApp } from "../src/app";
@@ -237,7 +240,7 @@ describe("first-party MCP handshakes", () => {
   test("handshakes cost one live-attempt read; tools/list still builds the full surface", async () => {
     const { bearer, post } = await fixture();
     const authorization = await bearer();
-    const oneRead = ["begin", "with parent", "select anchor.ordinality", "commit"];
+    const oneRead = ["begin", "with parent", "select target.id", "commit"];
 
     const init = await post(initialize, authorization);
     expect(init.status).toBe(200);

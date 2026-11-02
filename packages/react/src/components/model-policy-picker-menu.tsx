@@ -181,11 +181,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
             ) : null}
           </>
         ) : props.connectModelsHref || rows.length > 0 ? (
-          <ConnectModelsPanel
-            href={props.connectModelsHref}
-            claude={props.claudeSubscriptionAvailable === true}
-            messages={messages}
-          />
+          <ConnectModelsPanel href={props.connectModelsHref} messages={messages} />
         ) : (
           <p className={MENU_NOTE_CLASS}>{messages.noModels}</p>
         )}
@@ -208,14 +204,8 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
 
 const CONNECT_MODEL_OPTIONS = (
   t: OpenGeniText,
-  claude: boolean,
 ): Array<{
-  billingClass:
-    | "codex_subscription"
-    | "claude_subscription"
-    | "supergrok_subscription"
-    | "byok"
-    | "external";
+  billingClass: "codex_subscription" | "supergrok_subscription" | "byok" | "external";
   title: string;
   detail: string;
 }> => [
@@ -224,15 +214,6 @@ const CONNECT_MODEL_OPTIONS = (
     title: t("modelPolicyPickerMenu.codex"),
     detail: "ChatGPT",
   },
-  ...(claude
-    ? [
-        {
-          billingClass: "claude_subscription" as const,
-          title: t("modelPolicyPicker.claude"),
-          detail: "Anthropic",
-        },
-      ]
-    : []),
   { billingClass: "supergrok_subscription", title: "SuperGrok", detail: "xAI" },
   {
     billingClass: "byok",
@@ -244,7 +225,6 @@ const CONNECT_MODEL_OPTIONS = (
 
 function ConnectModelsPanel(props: {
   href: string | undefined;
-  claude: boolean;
   messages: ReturnType<typeof defaultModelPolicyPickerMessages>;
 }) {
   const t = useOpenGeniText();
@@ -259,7 +239,7 @@ function ConnectModelsPanel(props: {
         </p>
       </div>
       <div className="grid grid-cols-2 gap-1">
-        {CONNECT_MODEL_OPTIONS(t, props.claude).map((option) => {
+        {CONNECT_MODEL_OPTIONS(t).map((option) => {
           const content = (
             <>
               <span className="flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-surface-2 text-og-fg">
@@ -280,8 +260,7 @@ function ConnectModelsPanel(props: {
             </>
           );
           const className =
-            // An odd last tile spans both columns instead of sitting alone.
-            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors odd:last:col-span-2 hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40";
+            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40";
           return props.href ? (
             <a key={option.title} href={props.href} className={className}>
               {content}

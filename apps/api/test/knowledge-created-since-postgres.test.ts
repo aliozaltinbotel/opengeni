@@ -15,8 +15,11 @@ import {
   saveKnowledgeEntry,
   type KnowledgeContext,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 
 let shared: SharedTestDatabase;
@@ -132,6 +135,7 @@ test("list query strings and search JSON apply the same creation cutoff, paginat
 
 
 test("human save refuses current external document revocation after body admission without native writes", async () => {
+  const secret = "knowledge-human-proposal-revocation-test";
   const ownerId = crypto.randomUUID(), ownerSubject = `user:${ownerId}`, subjectId = `user:${crypto.randomUUID()}`;
   await ensureManagedAccessForUser(client.db, {userId: ownerId, email: `${ownerId}@example.test`, name: "Synthetic proposal owner"});
   const [organization] = await listSelfOrganizationMemberships(client.db, ownerSubject);

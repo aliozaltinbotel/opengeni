@@ -13,10 +13,13 @@ import {
   type AcceptedConnectionUseContext,
 } from "@opengeni/db";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
-import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { startTestServices } from "@opengeni/testing/compose";
-import { testSettings } from "@opengeni/testing/settings";
+import {
+  functionCall,
+  MemoryEventBus,
+  ScriptedModel,
+  startTestServices,
+  testSettings,
+} from "@opengeni/testing";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { submitTestHumanPrompt } from "../../test/integration/helpers/session-control";
 import { postgresWireBudget } from "./postgres-wire-budget";

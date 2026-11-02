@@ -120,8 +120,7 @@ client.listSessionSummaryPage = async (workspace, options) => {
 const context = {
   client,
   session: null,
-  // Rows read the viewer's workspace grants to label their archive action.
-  accessContext: { subjectId: "rename-qa", workspaceGrants: [] },
+  accessContext: { subjectId: "rename-qa" },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},
   setSession: () => {},

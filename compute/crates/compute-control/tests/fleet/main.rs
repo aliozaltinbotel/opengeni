@@ -5,7 +5,6 @@
 mod certificates;
 mod e2b;
 mod group;
-mod images;
 mod lease;
 mod lifecycle;
 mod metrics;

@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import {
   assertBaselineAdvanceScope,
-  deferredRuntimeRoutinesDueForGrant,
   parseRuntimePostureBaseline,
 } from "./runtime-posture-baseline";
 
@@ -59,18 +58,4 @@ test("the compatibility baseline cannot silently follow HEAD or a moving product
       release: "release receipt",
     }).status,
   ).toBe("production");
-});
-
-test("a withheld runtime definer is due for its grant once the pinned release knows it", () => {
-  const deferred = ["lookup_organization_host_identity(uuid, text, uuid)", "other_v1(integer)"];
-  expect(deferredRuntimeRoutinesDueForGrant({ RUNTIME_DEFINER_ROUTINES: [] }, deferred)).toEqual(
-    [],
-  );
-  expect(deferredRuntimeRoutinesDueForGrant({}, deferred)).toEqual([]);
-  expect(
-    deferredRuntimeRoutinesDueForGrant(
-      { RUNTIME_DEFINER_ROUTINES: ["lookup_organization_host_identity(uuid, text, uuid)"] },
-      deferred,
-    ),
-  ).toEqual(["lookup_organization_host_identity(uuid, text, uuid)"]);
 });

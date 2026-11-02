@@ -24,8 +24,10 @@ e2e(
   "drives the real pinned browser through authenticated HTTP and websocket protocol",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-server-e2e-");
+    const socketDirectory = await mkdtemp("/tmp/ogs-");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
+      socketRootDirectory: socketDirectory,
     });
     const adminToken = `admin.${"a".repeat(48)}`;
     const controlToken = `control.${"c".repeat(48)}`;
@@ -198,6 +200,7 @@ e2e(
       websocket?.close();
       await server.stop();
       await rm(directory, { recursive: true, force: true });
+      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
 );
