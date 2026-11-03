@@ -7,7 +7,7 @@ import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { stripProviderItemId } from "./model-input";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { normalizeProtocolJsonValue } from "./protocol-json";
-import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
+import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import { streamWithPreemption } from "./model-preemption";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ResponsesStreamingTerminalError } from "./responses-terminal-error";
@@ -65,6 +65,8 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
   beforeCall?: BeforeModelCallSourceReceipt;
   callCompleted?: (sourceKey:string,responseId:string|null,response:object,restoreHistorySources:(items:readonly unknown[])=>void) => void | Promise<void>;
   toolSourceKeys?: Map<string,string>;
+  /** Exact native bound used by this run before model dispatch. */
+  modelToolOutputTruncationTokens?: number;
   onModelToolSource?:(source:NativeModelToolSource)=>Promise<void>;
   nextProviderRequestIndex?: () => number;
   onProviderRequest?: (
@@ -436,9 +438,18 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
     if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName
-      || (canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.projection)
-        && (tool.genericSearchTextProjection===undefined
-          || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.genericSearchTextProjection))))continue;
+      || ![tool.projection, tool.genericSearchTextProjection].some(projection => {
+        if (projection === undefined) return false;
+        // Derive aliases only from this exact completed producer's output.
+        // The final native input filter and durable history use this same bound;
+        // input bytes, call ids, or a serialized binding cannot claim ownership.
+        const bounded = boundModelToolOutputItem(
+          { type: "function_call_result", output: projection },
+          capture.modelToolOutputTruncationTokens,
+        ).output;
+        const actual = canonicalModelSourceJson(item.output);
+        return actual === canonicalModelSourceJson(projection) || actual === canonicalModelSourceJson(bounded);
+      }))continue;
     const binding:InputBinding={kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
       parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult};
     state.toolBindingOwners.set(binding,{callId:item.callId,identity:canonicalModelSourceJson(binding)});

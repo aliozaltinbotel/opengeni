@@ -9948,6 +9948,7 @@ const agentModelContextCaptures = new WeakMap<object, ModelRequestCapture>();
 
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
+  modelToolOutputTruncationTokens: number,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
   beforeCall?: RunAgentStreamOptions["beforeModelCallSourceReceipt"],
   callCompleted?: RunAgentStreamOptions["onModelCallSourceCompleted"],
@@ -9970,6 +9971,7 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  capture.modelToolOutputTruncationTokens = modelToolOutputTruncationTokens;
   if (beforeCall) capture.beforeCall = beforeCall;
   if (callCompleted) capture.callCompleted = callCompleted;
   if (onModelToolSource) capture.onModelToolSource = onModelToolSource;
@@ -10066,6 +10068,7 @@ async function runAgentStreamInternal(
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
+    settings.modelToolOutputTruncationTokens,
     overrides.onModelVisibleContext,
     overrides.beforeModelCallSourceReceipt,
     overrides.onModelCallSourceCompleted,
