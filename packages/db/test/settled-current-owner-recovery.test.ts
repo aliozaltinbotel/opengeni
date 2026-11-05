@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { TurnExecutionPolicyV1, TURN_EXECUTION_POLICY_METADATA_KEY } from "@opengeni/contracts";
-import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import {
   bootstrapWorkspace,
   claimPendingSessionWorkflowWakes,
@@ -17,6 +16,10 @@ import {
   peekSessionWork,
   reconcileSettledSessionAttempt,
   recoverSessionDispatch,
+  requestSessionTurnRecovery,
+  markSessionAttemptQuiesced,
+  registerPendingSessionToolCall,
+  appendSessionEventsForTurnAttempt,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -370,6 +373,7 @@ describe("exact settled-current-owner reconciliation", () => {
     "%s committed during authenticated inspection wins under-lock revalidation",
     async (race) => {
       const ctx = await fixture();
+      const {createSessionStateActivities}=await import("../../../apps/worker/src/activities/session-state");
       const activities = createSessionStateActivities(
         async () =>
           ({
@@ -534,3 +538,41 @@ describe("exact settled-current-owner reconciliation", () => {
     expect((await ownerRow(ctx)).quiesced_at).toBeNull();
   });
 });
+
+
+test("host context replacement requires exact-generation zero-dispatch proof under the recovery CAS", async()=>{
+  const recover=async(ctx:Fixture)=>await requestSessionTurnRecovery(client.db,ctx.proof.workspaceId,{
+    sessionId:ctx.proof.sessionId,turnId:ctx.proof.turnId,attemptId:ctx.proof.attemptId,
+    triggerEventId:ctx.turn.triggerEventId,reason:"host_context_changed",requirePreDispatch:true,providerRecoveryCount:1,
+  });
+  const ctx=await fixture(),before=await authorityRow(ctx);
+  expect((await recover(ctx)).action).toBe("recovering");
+  expect((await ownerRow(ctx)).state).toBe("closed");
+  await markSessionAttemptQuiesced(client.db,{accountId:ctx.proof.accountId,workspaceId:ctx.proof.workspaceId,sessionId:ctx.proof.sessionId,attemptId:ctx.proof.attemptId,temporalWorkflowId:ctx.proof.temporalWorkflowId});
+  const next=await successor(ctx);expect(next.action).toBe("claimed");
+  if(next.action!=="claimed")throw Error("Missing fresh generation");
+  expect(next.turn.id).toBe(ctx.proof.turnId);expect(next.turn.executionGeneration).toBe(ctx.proof.executionGeneration+1);
+  expect((await authorityRow(ctx)).trigger_event_id).toBe(before.trigger_event_id);
+  expect((await authorityRow(ctx)).goal_snapshot).toEqual(before.goal_snapshot);
+  expect((await authorityRow(ctx)).metadata.providerRecoveryCount).toBe(1);
+  expect((await recover(ctx)).action).toBe("stale");
+  for(const type of ["agent.model.request","agent.model.usage","agent.toolCall.created","agent.toolCall.output"]){
+    const blocked=await fixture();
+    expect((await appendSessionEventsForTurnAttempt(client.db,blocked.proof.workspaceId,blocked.proof.sessionId,
+      blocked.proof.turnId,blocked.proof.executionGeneration,blocked.proof.attemptId,
+      [{type,payload:{sourceKey:`fixture-${type}`,totalTokens:1}}])).accepted).toBe(true);
+    expect((await recover(blocked)).action).toBe("not_recoverable");expect((await ownerRow(blocked)).state).toBe("claimed");
+  }
+  const pending=await fixture();
+  expect(await registerPendingSessionToolCall(client.db,{
+    accountId:pending.proof.accountId,workspaceId:pending.proof.workspaceId,sessionId:pending.proof.sessionId,
+    turnId:pending.proof.turnId,executionGeneration:pending.proof.executionGeneration,attemptId:pending.proof.attemptId,
+    callId:"retained-call",callType:"function_call",callItem:{type:"function_call",callId:"retained-call",name:"fixture__read",arguments:"{}"},
+  })).toEqual({accepted:true,registered:true});
+  expect((await recover(pending)).action).toBe("not_recoverable");
+  const paused=await fixture();
+  await withWorkspaceSessionActivityRls(client.db,paused.proof.workspaceId,db=>mutateSessionControlInTransaction(db,{
+    accountId:paused.proof.accountId,workspaceId:paused.proof.workspaceId,sessionId:paused.proof.sessionId,actor:{type:"human",subjectId:paused.grant.subjectId},action:"pause",operationKey:crypto.randomUUID(),
+  }));
+  expect((await recover(paused)).action).toBe("stale");
+},60_000);

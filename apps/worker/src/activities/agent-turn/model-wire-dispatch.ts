@@ -5,9 +5,14 @@ type DispatchIdentity = { provider: string; dispatchId: string };
 /** One immutable transport-handoff observation per worker attempt, not a remote
  * receipt. Events retain the matching attempt's dispatch/execution identity. */
 export class InitialModelWireDispatchClock {
+  private dispatched = false;
+
+  hasDispatched(): boolean { return this.dispatched; }
+
   private initial: (DispatchIdentity & { initialWireDispatchedAt: string }) | null = null;
 
   record(identity: DispatchIdentity, clock: ModelTransportDispatchClock): void {
+    this.dispatched = true;
     if (this.initial !== null) return;
     const timestamp = new Date(clock.dispatchedAtUnixMs);
     if (!Number.isFinite(timestamp.getTime())) return;

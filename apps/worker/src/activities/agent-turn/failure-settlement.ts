@@ -1,3 +1,4 @@
+import { HostContextChangedError } from "@opengeni/runtime/host-context";
 import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
@@ -1326,6 +1327,34 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           }))) as ReturnType<typeof agentRunFailurePayload>,
     attempt.modelRoutePresentation,
   );
+  const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
+    !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
+  // A trusted host READ-data change is not a provider failure. Never freshen its frozen frame:
+  // checkpoint this same turn and let a separately admitted generation construct its own input.
+  if (error instanceof HostContextChangedError && attempt.turnId && attempt.triggerEventId
+    && !coreRequestOutcomeUnknown && !coreLeaseCheckpointFailed
+    && coreLaneRecoverable(coreCodex?.requests) && coreLaneRecoverable(coreXai?.requests) && coreLaneRecoverable(coreClaude?.requests)
+    && eventing.publish && eventing.turnStartedPublished && !eventing.initialModelWireDispatch.hasDispatched()) {
+    const recovery = providerRecoveryResult({failureCode:error.code,attemptNumber:attempt.providerRecoveryCount + 1});
+    if (recovery.status === "recovering") {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({requireDurable:true});
+      const recorded = await requestTurnRecovery(db,input.workspaceId,{
+        sessionId:input.sessionId,turnId:attempt.turnId,triggerEventId:attempt.triggerEventId,attemptId:input.attemptId,
+        reason:error.code,requirePreDispatch:true,providerRecoveryCount:attempt.providerRecoveryCount + 1,
+        retryAfterMs:recovery.continueDelayMs,detail:{code:error.code,retryable:true},
+      });
+      if(recorded.action === "stale") {
+        acknowledgeLostAttemptOwnership();control.activityStatus="cancelled";control.turnMetricOutcome="cancelled";
+        return claimedResult({status:"cancelled"});
+      }
+      if(recorded.action === "recovering") {
+        acknowledgeRecoveryQuiescence();await publishDurableSessionEvents(bus,input.workspaceId,input.sessionId,recorded.events);
+        control.activityStatus="recovering";control.turnMetricOutcome="recovering";control.activityError=error;
+        return claimedResult(recovery);
+      }
+    } else failure=providerRecoveryExhaustedFailure(failure,recovery);
+  }
   // F-2: a turn that declared a route names why it ended when its model was refused.
   if (declaredRoute && modelRefusal !== null && !failure.retryable) {
     failure = {
@@ -1350,8 +1379,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       refusal: hostRefusal,
     } as typeof failure;
   }
-  const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
-    !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
   // A core lane holds the answered request that asked for a tool until the
   // next model call checkpoints it, so a retryable failure thrown while a
   // tool runs (a command that never started, an MCP transport failure) or a

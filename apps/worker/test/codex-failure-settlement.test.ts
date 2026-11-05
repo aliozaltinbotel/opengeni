@@ -1,3 +1,5 @@
+import {InitialModelWireDispatchClock} from "../src/activities/agent-turn/model-wire-dispatch";
+import { HostContextChangedError } from "@opengeni/runtime/host-context";
 import { settleTurnFailure as settleHistoricalCodexFailure } from "./fixtures/legacy-codex/failure-settlement";
 import * as historicalDb from "../../../packages/db/test/fixtures/legacy-codex";
 import { describe, expect, mock, spyOn, test } from "bun:test";
@@ -2026,6 +2028,37 @@ describe("historical pre-cutover Codex plan entitlement settlement", () => {
       listAccounts.mockRestore();
       quarantine.mockRestore();
       failover.mockRestore();
+    }
+  });
+});
+
+
+describe("pre-dispatch host context replacement", () => {
+  test("uses the existing bounded same-turn recovery with an independent dispatch guard", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({action:"recovering",events:[]} as never);
+    try {
+      const {deps} = codexFailureDeps({error:new HostContextChangedError()});
+      deps.billingState.isCodexTurn=false;
+      Object.assign(deps.eventing,{initialModelWireDispatch:new InitialModelWireDispatchClock()});
+      const result=await settleTurnFailure(deps as never);
+      expect(result).toMatchObject({status:"recovering"});
+      expect(recovery).toHaveBeenCalledWith({},"workspace-1",expect.objectContaining({
+        turnId:"turn-1",attemptId:"attempt-1",triggerEventId:"trigger-1",reason:"host_context_changed",providerRecoveryCount:1,requirePreDispatch:true,
+      }));
+    } finally { recovery.mockRestore(); }
+  });
+  test("wire dispatch, rejected durable proof, and exhaustion stay terminal", async () => {
+    for(const mode of ["wire","proof","exhausted"]){
+      const recovery=spyOn(opengeniDb,"requestSessionTurnRecovery").mockResolvedValue({action:"not_recoverable",events:[],providerArtifactsInvalidated:0} as never);
+      try{
+        const {deps}=codexFailureDeps({error:new HostContextChangedError()});deps.billingState.isCodexTurn=false;
+        const wire=new InitialModelWireDispatchClock();
+        if(mode==="wire")wire.record({provider:"fixture",dispatchId:"dispatch-1"},{dispatchedAtUnixMs:NaN,monotonicTimeMs:0});
+        Object.assign(deps.eventing,{initialModelWireDispatch:wire});
+        if(mode==="exhausted")deps.attempt.providerRecoveryCount=5;
+        expect(await settleTurnFailure(deps as never)).toMatchObject({status:"failed"});
+        if(mode!=="proof")expect(recovery).not.toHaveBeenCalled();
+      }finally{recovery.mockRestore();}
     }
   });
 });

@@ -82727,6 +82727,8 @@ import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core
 import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
 
 export type RequestSessionTurnRecoveryInput = {
+  /** Host data drift: independently require no model/tool dispatch in this exact generation. */
+  requirePreDispatch?: true;
   /** Route selection only: keep this logical turn on HTTP after socket refusal/exhaustion. */
   persistentModelTransportHttpOnly?: true;
   /** C2 only: proposal is persisted atomically with recovery, never placement. */
@@ -82937,6 +82939,24 @@ export async function requestSessionTurnRecovery(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (input.requirePreDispatch === true) {
+        const [progress] = await rawRows<{ dispatched: boolean }>(tx, sql`select (
+          exists (select 1 from session_events e where e.account_id = ${session.accountId}
+            and e.workspace_id = ${workspaceId} and e.session_id = ${input.sessionId}
+            and e.turn_id = ${input.turnId} and e.turn_attempt_id = ${input.attemptId}
+            and e.turn_generation = ${attempt.executionGeneration}
+            and e.type in ('agent.model.request','agent.model.usage','agent.toolCall.created','agent.toolCall.output'))
+          or exists (select 1 from model_call_facts f where f.account_id = ${session.accountId}
+            and f.workspace_id = ${workspaceId} and f.session_id = ${input.sessionId}
+            and f.turn_id = ${input.turnId} and f.turn_attempt_id = ${input.attemptId})
+          or exists (select 1 from session_pending_tool_calls p where p.account_id = ${session.accountId}
+            and p.workspace_id = ${workspaceId} and p.session_id = ${input.sessionId}
+            and p.turn_id = ${input.turnId} and p.attempt_id = ${input.attemptId}
+            and p.execution_generation = ${attempt.executionGeneration})
+        ) as dispatched`);
+        if (progress?.dispatched !== false) return { action: "not_recoverable" as const, events: [] as [], providerArtifactsInvalidated: 0 };
       }
 
       const now = new Date();

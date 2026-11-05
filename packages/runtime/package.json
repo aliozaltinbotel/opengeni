@@ -21,6 +21,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./host-context": {
+      "types": "./src/model-provider-errors.ts",
+      "default": "./src/model-provider-errors.ts"
+    },
     "./sandbox": {
       "types": "./src/sandbox/index.ts",
       "default": "./src/sandbox/index.ts"
