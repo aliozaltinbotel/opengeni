@@ -1,4 +1,4 @@
-import { HostContextChangedError } from "@opengeni/runtime/host-context";
+import { isHostContextChangedError } from "@opengeni/runtime/host-context";
 import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
@@ -1331,7 +1331,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
   // A trusted host READ-data change is not a provider failure. Never freshen its frozen frame:
   // checkpoint this same turn and let a separately admitted generation construct its own input.
-  if (error instanceof HostContextChangedError && attempt.turnId && attempt.triggerEventId
+  if (isHostContextChangedError(error) && attempt.turnId && attempt.triggerEventId
     && !coreRequestOutcomeUnknown && !coreLeaseCheckpointFailed
     && coreLaneRecoverable(coreCodex?.requests) && coreLaneRecoverable(coreXai?.requests) && coreLaneRecoverable(coreClaude?.requests)
     && eventing.publish && eventing.turnStartedPublished && !eventing.initialModelWireDispatch.hasDispatched()) {

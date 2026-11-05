@@ -1,8 +1,26 @@
+// Process-local protocol shared by source SDK consumers and inlined worker bundles.
+// JSON/RPC name/code fields cannot carry this immutable own Symbol property.
+const hostContextChangedBrand=Symbol.for("opengeni.host-context-changed.v1");
 /** A trusted host rejected changed READ data. This signal never authorizes replay;
  * the worker must prove pre-dispatch and apply its existing same-turn budget. */
 export class HostContextChangedError extends Error {
   readonly code = 'host_context_changed';
-  constructor() { super('Current host context changed before model dispatch'); this.name = 'HostContextChangedError'; }
+  constructor() {
+    super("Current host context changed before model dispatch");
+    this.name="HostContextChangedError";
+    Object.defineProperty(this,hostContextChangedBrand,{value:true});
+  }
+}
+/** Trusted local host signal only; neither text nor remote JSON establishes this protocol. */
+export function isHostContextChangedError(error:unknown):error is HostContextChangedError {
+  try {
+    if(!(error instanceof Error))return false;
+    const brand=Object.getOwnPropertyDescriptor(error,hostContextChangedBrand);
+    return brand?.value===true&&brand.enumerable===false&&brand.writable===false&&brand.configurable===false
+      &&Object.getOwnPropertyDescriptor(error,"code")?.value==="host_context_changed"
+      &&Object.getOwnPropertyDescriptor(error,"name")?.value==="HostContextChangedError"
+      &&typeof Object.getOwnPropertyDescriptor(error,"message")?.value==="string";
+  }catch{return false;}
 }
 export class WorkspaceGatewayUnavailableError extends Error {
   constructor() {

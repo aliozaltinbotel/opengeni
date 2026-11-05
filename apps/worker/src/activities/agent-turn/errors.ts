@@ -1,4 +1,4 @@
-import { HostContextChangedError } from "@opengeni/runtime/host-context";
+import { isHostContextChangedError } from "@opengeni/runtime/host-context";
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
@@ -1892,7 +1892,7 @@ function baseAgentRunFailurePayload(
   maxProviderRecoveryCount?: number;
   providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
-  if (error instanceof HostContextChangedError) return {error:error.message,code:error.code,retryable:false};
+  if (isHostContextChangedError(error)) return {error:error.message,code:error.code,retryable:false};
   if (error instanceof KnowledgeLearningScopeChangedError) {
     return { error: error.message, code: error.code, retryable: false };
   }
