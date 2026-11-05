@@ -68,3 +68,27 @@ process.stdout.write("liteparse-native-runtime-ready");
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test("host context signal survives source versus production-bundle class identity", async () => {
+  const temporaryRoot = await mkdtemp(join(root, "packages/runtime/.host-context-boundary-"));
+  const outdir = join(temporaryRoot, "dist");
+  try {
+    const entrypoint=join(root,"packages/runtime/src/model-provider-errors.ts");
+    const build=Bun.spawn({cmd:[process.execPath,"build",entrypoint,`--outdir=${outdir}`,"--target=bun","--format=esm","--splitting","--minify-syntax","--minify-whitespace"],cwd:root,stdout:"pipe",stderr:"pipe",stdin:"ignore"});
+    const [code,output,error]=await Promise.all([build.exited,new Response(build.stdout).text(),new Response(build.stderr).text()]);
+    expect(code,`${output}\n${error}`).toBe(0);
+    const source=await import("../packages/runtime/src/model-provider-errors");
+    const bundled=await import(join(outdir,"model-provider-errors.js"));
+    const signal=new source.HostContextChangedError();
+    expect(signal instanceof bundled.HostContextChangedError).toBe(false);
+    expect(bundled.isHostContextChangedError(signal)).toBe(true);
+    expect(source.isHostContextChangedError(new bundled.HostContextChangedError())).toBe(true);
+    const brand=Symbol.for("opengeni.host-context-changed.v1");
+    const textOnly=Object.assign(new Error(signal.message),{name:signal.name,code:signal.code});
+    const accessor=Object.defineProperty(new Error(),brand,{get(){throw Error("must not invoke getter");}});
+    const mutable=Object.defineProperty(new Error(),brand,{value:true,writable:true});
+    for(const rejected of [textOnly,JSON.parse(JSON.stringify(signal)),Object.create(signal),accessor,mutable,new Proxy(new Error(),{getOwnPropertyDescriptor(){throw Error("unreadable");}})]){
+      expect(bundled.isHostContextChangedError(rejected)).toBe(false);
+    }
+  } finally { await rm(temporaryRoot,{recursive:true,force:true}); }
+});

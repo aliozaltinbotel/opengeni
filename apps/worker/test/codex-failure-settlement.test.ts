@@ -1,3 +1,6 @@
+import {mkdtemp,rm} from "node:fs/promises";
+import {join} from "node:path";
+import {tmpdir} from "node:os";
 import {InitialModelWireDispatchClock} from "../src/activities/agent-turn/model-wire-dispatch";
 import { HostContextChangedError } from "@opengeni/runtime/host-context";
 import { settleTurnFailure as settleHistoricalCodexFailure } from "./fixtures/legacy-codex/failure-settlement";
@@ -29,6 +32,7 @@ import {
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import {
+  agentRunFailurePayload,
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryResult,
   shouldRecoverCompactionProviderFailure,
@@ -2034,6 +2038,24 @@ describe("historical pre-cutover Codex plan entitlement settlement", () => {
 
 
 describe("pre-dispatch host context replacement", () => {
+  test("a bundled host constructor reaches both source worker recovery consumers", async()=>{
+    const directory=await mkdtemp(join(tmpdir(),"opengeni-host-context-consumer-"));
+    const recovery=spyOn(opengeniDb,"requestSessionTurnRecovery").mockResolvedValue({action:"recovering",events:[]} as never);
+    try{
+      const source=new URL("../../../packages/runtime/src/model-provider-errors.ts",import.meta.url).pathname;
+      const build=Bun.spawn({cmd:[process.execPath,"build",source,`--outdir=${directory}`,"--target=bun","--format=esm","--splitting","--minify-syntax","--minify-whitespace"],stdout:"pipe",stderr:"pipe",stdin:"ignore"});
+      const [code,output,error]=await Promise.all([build.exited,new Response(build.stdout).text(),new Response(build.stderr).text()]);
+      expect(code,`${output}\n${error}`).toBe(0);
+      const bundled=await import(join(directory,"model-provider-errors.js")),signal=new bundled.HostContextChangedError();
+      expect(signal instanceof HostContextChangedError).toBe(false);
+      expect(agentRunFailurePayload(signal)).toMatchObject({code:"host_context_changed",retryable:false});
+      const {deps}=codexFailureDeps({error:signal});deps.billingState.isCodexTurn=false;
+      Object.assign(deps.eventing,{initialModelWireDispatch:new InitialModelWireDispatchClock()});
+      expect(await settleTurnFailure(deps as never)).toMatchObject({status:"recovering"});
+      expect(recovery).toHaveBeenCalledWith({},"workspace-1",expect.objectContaining({requirePreDispatch:true,reason:"host_context_changed"}));
+    }finally{recovery.mockRestore();await rm(directory,{recursive:true,force:true});}
+  });
+
   test("uses the existing bounded same-turn recovery with an independent dispatch guard", async () => {
     const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({action:"recovering",events:[]} as never);
     try {
