@@ -1,3 +1,9 @@
+/** A trusted host rejected changed READ data. This signal never authorizes replay;
+ * the worker must prove pre-dispatch and apply its existing same-turn budget. */
+export class HostContextChangedError extends Error {
+  readonly code = 'host_context_changed';
+  constructor() { super('Current host context changed before model dispatch'); this.name = 'HostContextChangedError'; }
+}
 export class WorkspaceGatewayUnavailableError extends Error {
   constructor() {
     super(

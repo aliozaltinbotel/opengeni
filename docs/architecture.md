@@ -400,6 +400,12 @@ Settled-owner recovery re-inspects original dispatch and atomically closes
 only the exact current owner under control and physical/inference writer fences,
 committing quiescence receipt, same-turn recovery and durable wake.
 
+A trusted embedding host may signal changed admitted READ data with
+`HostContextChangedError` from `@opengeni/runtime/host-context`. The worker retains
+its frozen frame and uses the existing bounded same-turn recovery only when no
+wire handoff or exact-generation model/tool records exist. The next generation
+must obtain its own current host admission; this signal grants no authority.
+
 Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different

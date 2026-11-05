@@ -71,6 +71,7 @@
       "@opengeni/interaction": ["./packages/interaction/src/index.ts"],
       "@opengeni/documents": ["./packages/documents/src/index.ts"],
       "@opengeni/runtime": ["./packages/runtime/src/index.ts"],
+      "@opengeni/runtime/host-context": ["./packages/runtime/src/model-provider-errors.ts"],
       "@opengeni/react/artifacts": ["./packages/react/src/artifacts.ts"],
       "@opengeni/react/artifacts/document": ["./packages/react/src/artifacts-document.ts"],
       "@opengeni/react/artifacts/presentation": ["./packages/react/src/artifacts-presentation.ts"],
