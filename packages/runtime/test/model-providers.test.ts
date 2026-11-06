@@ -7,6 +7,8 @@ import {
   OpenAIChatCompletionsModel,
   OpenAIResponsesModel,
   RunContext,
+  type AgentInputItem,
+  type ModelRequest,
 } from "@openai/agents";
 import { getOrCreateTrace } from "@openai/agents-core";
 import { createRequire } from "node:module";
@@ -61,7 +63,7 @@ import {
 } from "../src/index";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
 import { azureModelRequestPolicy } from "../src/model-provider-request-policy";
-import { callModelInputFilterForSettings } from "../src/model-input";
+import { callModelInputFilterForSettings, stripProviderItemId } from "../src/model-input";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 describe("Azure hosted-search evidence continuity", () => {
@@ -2811,4 +2813,162 @@ describe("registry model shadowing is closed — the built-in never claims a nam
       'model id "gpt-5.6-sol" is declared by both azure and shadow',
     );
   });
+});
+
+describe("OpenAI portable encrypted reasoning replay", () => {
+  test("only a direct OpenAI full-history request changes, without mutating input or stateful chains", () => {
+    const provider: ResolvedModelProvider = {
+      id: "openai",
+      label: "OpenAI",
+      kind: "api-key",
+      api: "responses",
+      wireProfile: "openai",
+      builtin: true,
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    };
+    const input = Object.freeze([
+      Object.freeze({ type: "reasoning", encrypted_content: "opaque-synthetic-artifact" }),
+    ]);
+    const body = Object.freeze({ input, include: Object.freeze(["reasoning.encrypted_content"]) });
+    const policy = modelRequestPolicyForProvider(provider);
+    const projected = policy({ path: "/v1/responses", body })?.body;
+    expect(projected).toEqual({ ...body, store: false });
+    expect(projected?.input).toBe(input);
+    expect(projected?.include).toBe(body.include);
+    expect("store" in body).toBe(false);
+    for (const store of [true, false, null])
+      expect(policy({ path: "/v1/responses", body: { ...body, store } })).toBeUndefined();
+    for (const baseUrl of [
+      "http://127.0.0.1:5555/v1",
+      "https://gateway.example/v1",
+      "https://api.openai.com/v1?route=other",
+      "https://api.openai.com/compat",
+    ])
+      expect(
+        modelRequestPolicyForProvider({ ...provider, baseUrl })({ path: "/responses", body }),
+      ).toBeUndefined();
+    for (const other of [
+      { ...provider, builtin: false },
+      {
+        ...provider,
+        kind: "direct-openai-workspace" as const,
+        baseUrl: "https://gateway.example/v1",
+      },
+      { ...provider, api: "chat" as const },
+      { ...provider, kind: "anonymous" as const, builtin: false },
+    ])
+      expect(modelRequestPolicyForProvider(other)({ path: "/responses", body })).toBeUndefined();
+    for (const change of [
+      { previous_response_id: "resp_prior" },
+      { conversation: "conv_prior" },
+      { input: [...input, { type: "item_reference", id: "rs_prior" }] },
+      {
+        input: [
+          ...input,
+          { type: "message", role: "assistant", id: "msg_prior", content: "Synthetic" },
+        ],
+      },
+      { input: [{ ...input[0], id: "rs_prior" }] },
+      { input: [{ type: "reasoning", encrypted_content: "" }] },
+      { input: [{ type: "reasoning", encrypted_content: null }] },
+      { input: [{ type: "message", role: "user", content: "Synthetic" }] },
+    ])
+      expect(policy({ path: "/responses", body: { ...body, ...change } })).toBeUndefined();
+    expect(policy({ path: "/chat/completions", body })).toBeUndefined();
+    const azure = modelRequestPolicyForProvider({
+      ...provider,
+      id: "azure",
+      wireProfile: "azure-openai",
+    });
+    expect(azure({ path: "/responses", body })?.body?.store).not.toBe(false);
+  });
+
+  for (const kind of ["builtin", "direct-openai-workspace"] as const) {
+    for (const stream of [false, true]) {
+      test(`${kind} ${stream ? "stream" : "response"} serializes a detached encrypted reasoning item without server storage`, async () => {
+        const provider: ResolvedModelProvider = {
+          id: kind === "builtin" ? "openai" : "workspace-openai",
+          label: "OpenAI",
+          kind: kind === "builtin" ? "api-key" : kind,
+          api: "responses",
+          wireProfile: "openai",
+          builtin: kind === "builtin",
+          apiKey: `synthetic-replay-${kind}-${stream}`,
+          credentialSource: {
+            kind: kind === "builtin" ? "deployment" : "workspace_connection",
+            mechanism: "api_key",
+          },
+          billing: {
+            upstreamPayer: kind === "builtin" ? "deployment" : "workspace",
+            metering: kind === "builtin" ? "opengeni_credits" : "external",
+          },
+        };
+        const reasoning: AgentInputItem = {
+          type: "reasoning",
+          id: "rs_synthetic",
+          content: [],
+          providerData: { id: "rs_synthetic", encrypted_content: "opaque-synthetic-artifact" },
+        };
+        const source: AgentInputItem[] = [
+          reasoning,
+          { type: "message", role: "user", content: "Continue the synthetic task." },
+        ];
+        const input = source.map(stripProviderItemId);
+        let captured: Record<string, unknown> | undefined;
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (_url, init) => {
+          captured = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          const response = {
+            id: "resp_synthetic",
+            status: "completed",
+            output: [],
+            usage: null,
+          };
+          return stream
+            ? new Response(
+                `data: ${JSON.stringify({ type: "response.completed", response })}\n\n`,
+                { status: 200, headers: { "content-type": "text/event-stream" } },
+              )
+            : new Response(JSON.stringify(response), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+        };
+        try {
+          const settings = testSettings({
+            openaiProvider: "openai",
+            openaiApiKey: provider.apiKey,
+            openaiMaxRetries: 0,
+            openaiResponsesWebSocketEnabled: false,
+          });
+          const client = buildProviderClient(provider, settings);
+          const model = buildModelInstance(provider, client, "gpt-6-sol");
+          const request: ModelRequest = {
+            input,
+            modelSettings: { providerData: { include: ["reasoning.encrypted_content"] } },
+            tools: [],
+            handoffs: [],
+            outputType: "text" as const,
+            tracing: false as const,
+          };
+          if (stream) {
+            for await (const _event of model.getStreamedResponse(request)) {
+              /* consume the synthetic stream */
+            }
+          } else await getOrCreateTrace(() => model.getResponse(request));
+          expect(captured?.store).toBe(false);
+          expect(captured?.input).toEqual([
+            { type: "reasoning", summary: [], encrypted_content: "opaque-synthetic-artifact" },
+            { role: "user", content: "Continue the synthetic task." },
+          ]);
+          expect(captured?.include).toContain("reasoning.encrypted_content");
+          expect(reasoning.id).toBe("rs_synthetic");
+          expect(reasoning.providerData?.encrypted_content).toBe("opaque-synthetic-artifact");
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+    }
+  }
 });

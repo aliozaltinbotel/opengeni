@@ -44,6 +44,7 @@ import {
   azureModelRequestPolicy,
   chatModelRequestPolicy,
   modelRequestPolicyForProvider,
+  openAIResponsesReasoningRequestPolicy,
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
@@ -51,7 +52,10 @@ import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
-import { authorizeModelSourceProviderDispatch, captureProviderRequestBody } from "./model-request-capture";
+import {
+  authorizeModelSourceProviderDispatch,
+  captureProviderRequestBody,
+} from "./model-request-capture";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
@@ -145,6 +149,14 @@ export function buildOpenAIClientFromSettings(
       },
     );
   }
+  const responsesReasoningPolicy = openAIResponsesReasoningRequestPolicy({
+    id: providerId,
+    kind: "api-key",
+    api: "responses",
+    wireProfile: "openai",
+    builtin: true,
+    ...(settings.openaiBaseUrl ? { baseUrl: settings.openaiBaseUrl } : {}),
+  });
   return new ReplayableJsonOpenAI(
     {
       apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
@@ -163,7 +175,10 @@ export function buildOpenAIClientFromSettings(
         ),
       ),
     },
-    { modelRequestPolicy: chatModelRequestPolicy },
+    {
+      modelRequestPolicy: (request) =>
+        chatModelRequestPolicy(request) ?? responsesReasoningPolicy(request),
+    },
   );
 }
 
