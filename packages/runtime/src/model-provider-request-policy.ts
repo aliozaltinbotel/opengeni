@@ -1,5 +1,9 @@
 import type { ConfiguredModel, ResolvedModelProvider } from "@opengeni/config";
-import { OPENGENI_GATEWAY_MODELS, gatewayRequestPolicyForUpstreamModel } from "@opengeni/config";
+import {
+  OPENGENI_GATEWAY_MODELS,
+  gatewayRequestPolicyForUpstreamModel,
+  isDirectOpenAiApiBaseUrl,
+} from "@opengeni/config";
 import {
   CODEX_REQUEST_BODY_NORMALIZED_HEADER,
   CODEX_REQUEST_CALLER_STREAM_HEADER,
@@ -254,6 +258,54 @@ function hasExplicitChatCacheControl(body: Record<string, unknown>): boolean {
   );
 }
 
+/** Default only the direct OpenAI portable-reasoning request, after SDK serialization. */
+export function openAIResponsesReasoningRequestPolicy(
+  provider: Pick<
+    ResolvedModelProvider,
+    "id" | "kind" | "api" | "wireProfile" | "builtin" | "baseUrl"
+  >,
+): ModelJsonRequestPolicy {
+  return ({ path, body }) => {
+    // Portable reasoning is replayed inline after provider IDs are detached. Direct OpenAI
+    // requires stateless replay here; preserve stored-response/conversation chains and every
+    // unrelated route. https://developers.openai.com/api/docs/guides/reasoning
+    if (
+      provider.api === "responses" &&
+      provider.wireProfile === "openai" &&
+      ((provider.builtin && provider.kind === "api-key" && provider.id === "openai") ||
+        provider.kind === "direct-openai-workspace") &&
+      isDirectOpenAiApiBaseUrl(provider.baseUrl) &&
+      (path.split("?", 1)[0] ?? path).endsWith("/responses") &&
+      body.previous_response_id === undefined &&
+      body.conversation === undefined &&
+      body.store === undefined &&
+      Array.isArray(body.input)
+    ) {
+      const items = body.input;
+      const references = items.some(
+        (item) =>
+          item !== null &&
+          typeof item === "object" &&
+          ((item as Record<string, unknown>).type === "item_reference" ||
+            (item as Record<string, unknown>).id !== undefined),
+      );
+      const portableReasoning = items.some((item) => {
+        if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
+        const candidate = item as Record<string, unknown>;
+        const encryptedContent = candidate.encrypted_content;
+        return (
+          candidate.type === "reasoning" &&
+          candidate.id === undefined &&
+          typeof encryptedContent === "string" &&
+          encryptedContent.length > 0
+        );
+      });
+      if (!references && portableReasoning) return { body: { ...body, store: false } };
+    }
+    return undefined;
+  };
+}
+
 /**
  * One object-stage request policy for both Responses and Chat Completions.
  * Transport wrappers only authenticate, route, observe, and translate errors;
@@ -265,7 +317,10 @@ export function modelRequestPolicyForProvider(
   /** Opper upstream id -> `max_tokens` sent when a request sets no output cap. */
   opperOutputLimits?: ReadonlyMap<string, number>,
 ): ModelJsonRequestPolicy {
+  const reasoningPolicy = openAIResponsesReasoningRequestPolicy(provider);
   const providerPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
+    const reasoning = reasoningPolicy({ path, body });
+    if (reasoning) return reasoning;
     if (
       (provider.kind === "openrouter-managed" ||
         provider.kind === "openrouter-workspace" ||
