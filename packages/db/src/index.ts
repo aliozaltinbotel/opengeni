@@ -82726,9 +82726,114 @@ export type SettleCodexCredentialLeaseLossResult =
 import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
 import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
 
+/** Existing recovery CAS calls this only while holding the exact current turn/attempt locks. */
+async function hasSettledHostContextHistory(
+  tx: Database,
+  scope: { accountId: string; workspaceId: string; sessionId: string; turnId: string; attemptId: string; executionGeneration: number },
+): Promise<boolean> {
+  const usage = await tx.select().from(schema.usageEvents).where(and(
+    eq(schema.usageEvents.accountId, scope.accountId), eq(schema.usageEvents.workspaceId, scope.workspaceId),
+    eq(schema.usageEvents.sessionId, scope.sessionId), eq(schema.usageEvents.turnId, scope.turnId),
+    eq(schema.usageEvents.turnAttemptId, scope.attemptId),
+    inArray(schema.usageEvents.eventType, ["model.call.dispatch", "model.call", "model.call.dispatch.refused"]),
+  ));
+  const calls = new Map<string, Map<string, typeof usage[number]>>();
+  for (const row of usage) {
+    const sourceKey = row.attributes?.sourceKey;
+    if (typeof sourceKey !== "string" || sourceKey.length === 0) return false;
+    let stages = calls.get(sourceKey);
+    if (!stages) { stages = new Map(); calls.set(sourceKey, stages); }
+    if (stages.has(row.eventType)) return false;
+    stages.set(row.eventType, row);
+  }
+  if (calls.size === 0) return false;
+  const facts = await tx.select({ sourceKey: schema.modelCallFacts.sourceKey }).from(schema.modelCallFacts).where(and(
+    eq(schema.modelCallFacts.accountId, scope.accountId), eq(schema.modelCallFacts.workspaceId, scope.workspaceId),
+    eq(schema.modelCallFacts.sessionId, scope.sessionId), eq(schema.modelCallFacts.turnId, scope.turnId),
+    eq(schema.modelCallFacts.turnAttemptId, scope.attemptId),
+  ));
+  const factKeys = new Set(facts.map(fact => fact.sourceKey));
+  const completedKeys = new Set<string>();
+  for (const [sourceKey, stages] of calls) {
+    const dispatch = stages.get("model.call.dispatch"), terminal = stages.get("model.call"), refused = stages.get("model.call.dispatch.refused");
+    if (!dispatch || (terminal !== undefined) === (refused !== undefined)) return false;
+    if (terminal) {
+      if (terminal.attributes?.outcome !== "completed" || terminal.attributes?.usageReported !== true || !factKeys.delete(sourceKey)) return false;
+      completedKeys.add(sourceKey);
+    } else if (refused?.attributes?.outcome !== "cancelled" || factKeys.has(sourceKey)) return false;
+  }
+  if (completedKeys.size === 0 || factKeys.size !== 0) return false;
+  const receipts = await tx.select().from(schema.modelCallSourceReceipts).where(and(
+    eq(schema.modelCallSourceReceipts.accountId, scope.accountId), eq(schema.modelCallSourceReceipts.workspaceId, scope.workspaceId),
+    eq(schema.modelCallSourceReceipts.sessionId, scope.sessionId), eq(schema.modelCallSourceReceipts.turnId, scope.turnId),
+    eq(schema.modelCallSourceReceipts.attemptId, scope.attemptId), eq(schema.modelCallSourceReceipts.executionGeneration, scope.executionGeneration),
+  ));
+  const history = await tx.select({basis:schema.sessionHistoryItems.sourceBasis}).from(schema.sessionHistoryItems).where(and(
+    eq(schema.sessionHistoryItems.accountId, scope.accountId), eq(schema.sessionHistoryItems.workspaceId, scope.workspaceId),
+    eq(schema.sessionHistoryItems.sessionId, scope.sessionId), eq(schema.sessionHistoryItems.turnId, scope.turnId),
+  ));
+  for (const sourceKey of completedKeys) {
+    const stored = receipts.find(receipt => receipt.sourceKey === sourceKey);
+    if (!stored) return false;
+    let receipt: ReturnType<typeof validatedStoredModelCallSourceReceipt>;
+    try { receipt = validatedStoredModelCallSourceReceipt(stored); } catch { return false; }
+    if (!receipt.complete || receipt.incompleteReasons.length !== 0 || receipt.purpose !== "AGENT"
+      || receipt.id !== stored.id || receipt.accountId !== scope.accountId || receipt.workspaceId !== scope.workspaceId
+      || receipt.sessionId !== scope.sessionId || receipt.turnId !== scope.turnId || receipt.attemptId !== scope.attemptId
+      || receipt.executionGeneration !== scope.executionGeneration || receipt.sourceKey !== sourceKey
+      || receipt.requestIndex !== stored.requestIndex) return false;
+    // The history writer binds this parent only from completed native outputs; arbitrary caller basis is refused.
+    if (!history.some(row => row.basis?.kind === "HISTORY_ROW" && row.basis.parents.some(parent =>
+      parent.owner === "model_call_source_receipts" && parent.id === receipt.id && parent.sha256 === receipt.digest))) return false;
+  }
+  const pending = await tx.select({ id: schema.sessionPendingToolCalls.id }).from(schema.sessionPendingToolCalls).where(and(
+    eq(schema.sessionPendingToolCalls.accountId, scope.accountId), eq(schema.sessionPendingToolCalls.workspaceId, scope.workspaceId),
+    eq(schema.sessionPendingToolCalls.sessionId, scope.sessionId), eq(schema.sessionPendingToolCalls.turnId, scope.turnId),
+  )).limit(1);
+  if (pending.length !== 0) return false;
+  const events = await tx.select().from(schema.sessionEvents).where(and(
+    eq(schema.sessionEvents.accountId, scope.accountId), eq(schema.sessionEvents.workspaceId, scope.workspaceId),
+    eq(schema.sessionEvents.sessionId, scope.sessionId), eq(schema.sessionEvents.turnId, scope.turnId),
+    eq(schema.sessionEvents.turnAttemptId, scope.attemptId), eq(schema.sessionEvents.turnGeneration, scope.executionGeneration),
+    inArray(schema.sessionEvents.type, ["agent.model.request", "agent.toolCall.created", "agent.toolCall.output"]),
+  )).orderBy(asc(schema.sessionEvents.sequence));
+  const started = new Set<string>(), ended = new Set<string>();
+  const tools = new Map<string, { id: string; callId: string; callType: string }>();
+  const outputs = new Set<string>();
+  for (const event of events) {
+    const payload = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion);
+    if (event.type === "agent.model.request") {
+      // The installed first-wire clock is keyed by modelUsageDispatchId = attemptId (claim.ts).
+      if (payload.dispatchId !== scope.attemptId) return false;
+      if (payload.phase === "started") { if (started.has(payload.dispatchId)) return false; started.add(payload.dispatchId); }
+      else if (payload.phase === "completed") { if (!started.has(payload.dispatchId) || ended.has(payload.dispatchId)) return false; ended.add(payload.dispatchId); }
+      else if (payload.phase !== "first_byte" && payload.phase !== "first_event") return false;
+      continue;
+    }
+    const callId = payload.id;
+    if (typeof callId !== "string" || callId.length === 0) return false;
+    if (event.type === "agent.toolCall.created") {
+      const raw = payload.raw;
+      if (tools.has(callId) || raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+      const callType = (raw as Record<string, unknown>).type;
+      if (typeof callType !== "string" || !TOOL_RESULT_TYPE_BY_CALL_TYPE[callType]) return false;
+      tools.set(callId, { id: callId, callId, callType });
+    } else {
+      if (!tools.has(callId) || outputs.has(callId) || payload.error === true || payload.recovery !== undefined) return false;
+      outputs.add(callId);
+    }
+  }
+  if (started.size === 0 || started.size !== ended.size || tools.size !== outputs.size) return false;
+  // Reuse the canonical receipt-retirement proof: ordered SDK call/result pairs must already be persisted.
+  const durable = await durableToolCallPairIdsTx(tx, scope, [...tools.values()]);
+  return durable.length === tools.size;
+}
+
 export type RequestSessionTurnRecoveryInput = {
   /** Host data drift: independently require no model/tool dispatch in this exact generation. */
   requirePreDispatch?: true;
+  /** Host READ drift after dispatch: require exact settled calls and canonical tool history. */
+  requireSettledDispatch?: true;
   /** Route selection only: keep this logical turn on HTTP after socket refusal/exhaustion. */
   persistentModelTransportHttpOnly?: true;
   /** C2 only: proposal is persisted atomically with recovery, never placement. */
@@ -82939,6 +83044,17 @@ export async function requestSessionTurnRecovery(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (input.requireSettledDispatch === true) {
+        if (input.requirePreDispatch === true || input.reason !== "host_context_changed") {
+          throw new Error("settled host-context recovery requires its exclusive proof mode");
+        }
+        const settled = await hasSettledHostContextHistory(tx as unknown as Database, {
+          accountId: session.accountId, workspaceId, sessionId: input.sessionId, turnId: input.turnId,
+          attemptId: input.attemptId, executionGeneration: attempt.executionGeneration,
+        });
+        if (!settled) return { action: "not_recoverable" as const, events: [] as [], providerArtifactsInvalidated: 0 };
       }
 
       if (input.requirePreDispatch === true) {
