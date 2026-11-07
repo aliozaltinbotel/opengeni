@@ -1331,17 +1331,20 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
   // A trusted host READ-data change is not a provider failure. Never freshen its frozen frame:
   // checkpoint this same turn and let a separately admitted generation construct its own input.
+  // After dispatch, the DB must additionally prove every model/tool effect is settled in durable history.
   if (isHostContextChangedError(error) && attempt.turnId && attempt.triggerEventId
     && !coreRequestOutcomeUnknown && !coreLeaseCheckpointFailed
     && coreLaneRecoverable(coreCodex?.requests) && coreLaneRecoverable(coreXai?.requests) && coreLaneRecoverable(coreClaude?.requests)
-    && eventing.publish && eventing.turnStartedPublished && !eventing.initialModelWireDispatch.hasDispatched()) {
+    && eventing.publish && eventing.turnStartedPublished) {
     const recovery = providerRecoveryResult({failureCode:error.code,attemptNumber:attempt.providerRecoveryCount + 1});
     if (recovery.status === "recovering") {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({requireDurable:true});
       const recorded = await requestTurnRecovery(db,input.workspaceId,{
         sessionId:input.sessionId,turnId:attempt.turnId,triggerEventId:attempt.triggerEventId,attemptId:input.attemptId,
-        reason:error.code,requirePreDispatch:true,providerRecoveryCount:attempt.providerRecoveryCount + 1,
+        reason:error.code,
+        ...(eventing.initialModelWireDispatch.hasDispatched() ? {requireSettledDispatch:true as const} : {requirePreDispatch:true as const}),
+        providerRecoveryCount:attempt.providerRecoveryCount + 1,
         retryAfterMs:recovery.continueDelayMs,detail:{code:error.code,retryable:true},
       });
       if(recorded.action === "stale") {

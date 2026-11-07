@@ -402,9 +402,15 @@ committing quiescence receipt, same-turn recovery and durable wake.
 
 A trusted embedding host may signal changed admitted READ data with
 `HostContextChangedError` from `@opengeni/runtime/host-context`. The worker retains
-its frozen frame and uses the existing bounded same-turn recovery only when no
-wire handoff or exact-generation model/tool records exist. The next generation
-must obtain its own current host admission; this signal grants no authority.
+its frozen frame and uses the existing bounded same-turn recovery when no wire
+handoff or exact-generation model/tool records exist. After wire dispatch, a
+separate locked recovery proof requires every exact-attempt dispatch to have a
+matching completed usage/fact or known pre-wire refusal, completed request
+milestones, no pending tool calls, and canonical ordered tool call/result pairs.
+The worker flushes and reconciles durable history before that proof; unknown or
+incomplete effects remain terminal. The next generation must obtain its own
+current host admission, preserving the same Goal and turn, prior completed
+history, deadline and recovery budget. This signal grants no authority.
 
 Idle [omits grace](run-lifecycle.md), retaining durable fences.
 

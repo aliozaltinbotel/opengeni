@@ -2079,8 +2079,24 @@ describe("pre-dispatch host context replacement", () => {
         Object.assign(deps.eventing,{initialModelWireDispatch:wire});
         if(mode==="exhausted")deps.attempt.providerRecoveryCount=5;
         expect(await settleTurnFailure(deps as never)).toMatchObject({status:"failed"});
-        if(mode!=="proof")expect(recovery).not.toHaveBeenCalled();
+        if(mode==="exhausted")expect(recovery).not.toHaveBeenCalled();
+        if(mode==="wire")expect(recovery).toHaveBeenCalledWith({},"workspace-1",expect.objectContaining({requireSettledDispatch:true}));
       }finally{recovery.mockRestore();}
     }
   });
 });
+
+ test("settled host context drift uses independently proven same-turn recovery after dispatch", async () => {
+  const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({action:"recovering",events:[]} as never);
+  try {
+   const {deps}=codexFailureDeps({error:new HostContextChangedError()});deps.billingState.isCodexTurn=false;
+   const wire=new InitialModelWireDispatchClock();
+   wire.record({provider:"fixture",dispatchId:"completed-dispatch"},{dispatchedAtUnixMs:1,monotonicTimeMs:0});
+   Object.assign(deps.eventing,{initialModelWireDispatch:wire});
+   expect(await settleTurnFailure(deps as never)).toMatchObject({status:"recovering"});
+   expect(recovery).toHaveBeenCalledWith({},"workspace-1",expect.objectContaining({
+    turnId:"turn-1",attemptId:"attempt-1",triggerEventId:"trigger-1",reason:"host_context_changed",
+    requireSettledDispatch:true,providerRecoveryCount:1,
+   }));
+  } finally { recovery.mockRestore(); }
+ });

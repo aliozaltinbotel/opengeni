@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { TurnExecutionPolicyV1, TURN_EXECUTION_POLICY_METADATA_KEY } from "@opengeni/contracts";
+import { ModelCallUsageAttributes, MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, TurnExecutionPolicyV1, TURN_EXECUTION_POLICY_METADATA_KEY } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   claimPendingSessionWorkflowWakes,
@@ -20,6 +20,10 @@ import {
   markSessionAttemptQuiesced,
   registerPendingSessionToolCall,
   appendSessionEventsForTurnAttempt,
+  appendSessionHistoryItems,
+  recordUsageEvent,
+  persistModelCallSourceReceipt,
+  getSessionHistoryItems,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -556,7 +560,7 @@ test("host context replacement requires exact-generation zero-dispatch proof und
   expect((await authorityRow(ctx)).goal_snapshot).toEqual(before.goal_snapshot);
   expect((await authorityRow(ctx)).metadata.providerRecoveryCount).toBe(1);
   expect((await recover(ctx)).action).toBe("stale");
-  for(const type of ["agent.model.request","agent.model.usage","agent.toolCall.created","agent.toolCall.output"]){
+  for(const type of ["agent.model.request","agent.model.usage","agent.toolCall.created","agent.toolCall.output"] as const){
     const blocked=await fixture();
     expect((await appendSessionEventsForTurnAttempt(client.db,blocked.proof.workspaceId,blocked.proof.sessionId,
       blocked.proof.turnId,blocked.proof.executionGeneration,blocked.proof.attemptId,
@@ -576,3 +580,79 @@ test("host context replacement requires exact-generation zero-dispatch proof und
   }));
   expect((await recover(paused)).action).toBe("stale");
 },60_000);
+
+// These are synthetic native receipt fixtures, not business-outcome attestations.
+async function settledContextFixture(mode = "complete") {
+  const ctx = await fixture();
+  const identity = {accountId:ctx.proof.accountId,workspaceId:ctx.proof.workspaceId,sessionId:ctx.session.id,
+    turnId:ctx.turn.id,turnAttemptId:ctx.proof.attemptId};
+  for (const stage of ["model.call.dispatch", ...(mode === "unmatched" ? [] : ["model.call"])]) {
+    await recordUsageEvent(client.db, {...identity,eventType:stage,quantity:1,unit:"call",
+      sourceResourceType:"model_response",sourceResourceId:`${ctx.turn.id}:settled`,idempotencyKey:`${stage}:${ctx.turn.id}`,
+      attributes:ModelCallUsageAttributes.parse({schema:MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,sourceKey:"settled",
+        outcome:stage === "model.call.dispatch" ? "indeterminate" : mode === "failed-response" ? "failed" : "completed",
+        usageReported:mode !== "unreported" && stage !== "model.call.dispatch",callKind:"response",scope:"call",
+        provider:"fixture",providerApi:"responses",upstreamProvider:null,model:"fixture",billingPath:"external",
+        inputTokens:null,outputTokens:null,cachedTokens:null,cacheWriteTokens:null,reasoningTokens:null,totalTokens:null,
+        estimatedProviderCostMicros:null,pricingSource:null,priceVersion:null})});
+  }
+  if (mode !== "missing-fact") await shared.admin`insert into model_call_facts ${shared.admin({
+    account_id:identity.accountId,workspace_id:identity.workspaceId,session_id:identity.sessionId,
+    turn_id:identity.turnId,turn_attempt_id:identity.turnAttemptId,source_key:"settled",provider:"fixture",provider_api:"responses",
+    model:"fixture",billing_path:"external",occurred_at:new Date(),
+  })}`;
+  const retained = await getSessionHistoryItems(client.db,identity.workspaceId,identity.sessionId);
+  const receipt = await persistModelCallSourceReceipt(client.db,{
+    accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,turnId:identity.turnId,
+    attemptId:ctx.proof.attemptId,executionGeneration:ctx.proof.executionGeneration,sourceKey:"settled",requestIndex:1,
+  },{input:retained.map(row=>row.item)});
+  expect(receipt.complete).toBe(true);
+  const dispatchId = mode === "foreign-dispatch" ? crypto.randomUUID() : ctx.proof.attemptId;
+  const events: Parameters<typeof appendSessionEventsForTurnAttempt>[6] = [
+    {type:"agent.model.request",payload:{phase:"started",dispatchId}},
+    ...(mode === "open-request" ? [] : [{type:"agent.model.request" as const,payload:{phase:"completed",dispatchId}}]),
+    ...(mode === "no-tool-missing-model-history" ? [] : [{type:"agent.toolCall.created" as const,payload:{id:"settled-tool",raw:{type:"function_call"}}}]),
+    ...(mode === "open-tool" || mode === "no-tool-missing-model-history" ? [] : [{type:"agent.toolCall.output" as const,payload:{id:"settled-tool",output:"known result",...(mode === "unknown-tool" ? {recovery:{outcome:"unknown"}} : {})}}]),
+  ];
+  expect((await appendSessionEventsForTurnAttempt(client.db,identity.workspaceId,identity.sessionId,
+    identity.turnId,ctx.proof.executionGeneration,ctx.proof.attemptId,events)).accepted).toBe(true);
+  if (mode !== "missing-history" && mode !== "no-tool-missing-model-history") expect(await appendSessionHistoryItems(client.db,{
+    ...identity,expectedExecutionGeneration:ctx.proof.executionGeneration,expectedAttemptId:ctx.proof.attemptId,
+    items:[{position:100,...(mode === "missing-model-basis" ? {} : {nativeProducerSourceKey:"settled"}),item:{type:"function_call",callId:"settled-tool",name:"fixture_read",arguments:"{}"}},
+      {position:101,item:{type:"function_call_result",callId:"settled-tool",name:"fixture_read",output:"known result"}}],
+  })).toBe(true);
+  if (mode === "pending-tool") await registerPendingSessionToolCall(client.db,{
+    accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,turnId:identity.turnId,
+    executionGeneration:ctx.proof.executionGeneration,attemptId:ctx.proof.attemptId,
+    callId:"pending",callType:"function_call",callItem:{type:"function_call",callId:"pending",name:"fixture_read",arguments:"{}"},
+  });
+  return ctx;
+}
+
+test("settled host-context recovery preserves the same turn and refuses incomplete model/tool history", async () => {
+  const recover = (ctx:Fixture) => requestSessionTurnRecovery(client.db,ctx.proof.workspaceId,{
+    sessionId:ctx.session.id,turnId:ctx.turn.id,attemptId:ctx.proof.attemptId,triggerEventId:ctx.turn.triggerEventId,
+    reason:"host_context_changed",requireSettledDispatch:true,providerRecoveryCount:1,
+  });
+  for (const mode of ["unmatched","failed-response","unreported","missing-fact","open-request","open-tool","unknown-tool","missing-history","pending-tool","foreign-dispatch","no-tool-missing-model-history","missing-model-basis"]) {
+    const ctx=await settledContextFixture(mode);
+    expect((await recover(ctx)).action,mode).toBe("not_recoverable");
+    expect((await ownerRow(ctx)).state,mode).toBe("claimed");
+  }
+  const ctx=await settledContextFixture(),before=await authorityRow(ctx);
+  expect((await recover(ctx)).action).toBe("recovering");
+  await markSessionAttemptQuiesced(client.db,{accountId:ctx.proof.accountId,workspaceId:ctx.proof.workspaceId,
+    sessionId:ctx.session.id,attemptId:ctx.proof.attemptId,temporalWorkflowId:ctx.proof.temporalWorkflowId});
+  const next=await successor(ctx);expect(next.action).toBe("claimed");
+  if(next.action!=="claimed")throw Error("Missing successor");
+  expect(next.turn.id).toBe(ctx.turn.id);expect(next.turn.executionGeneration).toBe(ctx.proof.executionGeneration+1);
+  expect((await authorityRow(ctx)).goal_snapshot).toEqual(before.goal_snapshot);
+  expect((await authorityRow(ctx)).trigger_event_id).toBe(before.trigger_event_id);
+  expect((await recover(ctx)).action).toBe("stale");
+  const paused=await settledContextFixture();
+  await withWorkspaceSessionActivityRls(client.db,paused.proof.workspaceId,db=>mutateSessionControlInTransaction(db,{
+    accountId:paused.proof.accountId,workspaceId:paused.proof.workspaceId,sessionId:paused.session.id,
+    actor:{type:"human",subjectId:paused.grant.subjectId},action:"pause",operationKey:crypto.randomUUID(),
+  }));
+  expect((await recover(paused)).action).toBe("stale");
+},120_000);
