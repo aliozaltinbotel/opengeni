@@ -871,7 +871,7 @@ test("a dispatch refused before bytes is settled and leaves the quiesced-intent 
   const refusal=new Error("authority withdrawn");
   const refused=createModelCallUsageSourceHooks(app.db,call,new Set(),async()=>{throw refusal;});
   await expect(refused.beforeProviderDispatch!(refusedKey)).rejects.toBe(refusal);
-  await refused.onDispatchFailure!(refusedKey);
+  await refused.onDispatchFailure!(refusedKey, { providerHandoffStarted: false });
   // Transport loss after bytes: the intent stays unknown.
   const lost=createModelCallUsageSourceHooks(app.db,call,new Set(),async()=>{});
   await lost.beforeProviderDispatch!(unknownKey);
@@ -1469,3 +1469,40 @@ async function humanInputSourceScenario(tamperedResult = false): Promise<void> {
 
 test("human-input answer resumes with the exact original model producer across generations", () => humanInputSourceScenario(), 120_000);
 test("human-input promotion refuses a forged durable result with unchanged committed event output", () => humanInputSourceScenario(true), 120_000);
+
+
+test("literal transport late refusal settles only an exact source with no prior handoff", async () => {
+  const { createModelCallUsageSourceHooks } = await import("../src/activities/agent-turn/model-usage");
+  const { instrumentedModelFetch } = await import("../../../packages/runtime/src/model-provider-client");
+  const { withModelCallSourceDispatch } = await import("../../../packages/runtime/src/model-request-capture");
+  const { withModelTransportStartedObserver } = await import("../../../packages/runtime/src/model-preparation-diagnostics");
+  const { identity } = await fixture();
+  const call = {
+    accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, turnId: identity.turnId,
+    turnAttemptId: identity.attemptId, callKind: "response" as const, scope: "call" as const, provider: "gateway", providerApi: "responses",
+    upstreamProvider: null, model: "scripted", billingPath: "external" as const,
+  };
+  const keys = [crypto.randomUUID(), crypto.randomUUID()];
+  for (const [index, sourceKey] of keys.entries()) {
+    await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey, requestIndex: index + 1 }, { input: "Synthetic request" });
+  }
+  const producer = Object.assign(async () => "unused", createModelCallUsageSourceHooks(app.db, call, new Set(), async () => {}));
+  let wires = 0;
+  const transport = instrumentedModelFetch("synthetic", Object.assign(async () => {
+    wires++;
+    return Response.json({});
+  }, { preconnect: globalThis.fetch.preconnect }));
+  const refusal = new Error("late host context refusal");
+  const sendRequest = (sourceKey: string) => withModelCallSourceDispatch(producer, sourceKey, () => transport("https://source.invalid/v1/responses"));
+  await sendRequest(keys[0]!);
+  for (const sourceKey of keys) {
+    await expect(withModelTransportStartedObserver(() => { throw refusal; }, () => sendRequest(sourceKey))).rejects.toBe(refusal);
+  }
+  expect(wires).toBe(1);
+  const rows = await shared.admin`SELECT event_type, attributes FROM usage_events WHERE turn_id=${identity.turnId}::uuid ORDER BY recorded_at`;
+  expect(rows.filter(row => row.event_type === "model.call.dispatch")).toHaveLength(2);
+  const refused = rows.filter(row => row.event_type === "model.call.dispatch.refused");
+  expect(refused).toHaveLength(1);
+  expect(refused[0]!.attributes).toMatchObject({ sourceKey: keys[1], outcome: "cancelled", usageReported: false, totalTokens: null });
+  expect(rows.filter(row => row.event_type === "model.call")).toHaveLength(0);
+});

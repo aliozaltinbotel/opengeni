@@ -54,6 +54,8 @@ import {
 } from "./model-preparation-diagnostics";
 import {
   authorizeModelSourceProviderDispatch,
+  markModelSourceProviderHandoffStarted,
+  withModelSourceProviderTransport,
   captureProviderRequestBody,
 } from "./model-request-capture";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
@@ -606,87 +608,90 @@ export function instrumentedModelFetch(
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
-    const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
-    init = prepared.init;
-    // The attempt-local observer durably checkpoints provider dispatch before
-    // this process can place request bytes on the network.
-    await authorizeModelSourceProviderDispatch();
-    await recordModelTransportStarted();
-    const capture = captureProviderRequestBody(provider, input, init);
-    const started = performance.now();
-    // A request whose bearer a subscription core leased is admitted by its
-    // custody as the last awaited step before the fetch, then settled from
-    // its outcome; any other request passes straight through.
-    const send = async (current: PreparedClaudeRequest, requestInit: RequestInit | undefined) => {
-      const requestToken = captureClaudeRequestToken(input, requestInit);
-      await current.admit();
-      let response: Response;
-      try {
-        response = await withResponsesContinuationAdmission(
-          async (replacementSignal) => {
-            replacementSignal.throwIfAborted();
-            requestInit?.signal?.throwIfAborted();
-            // OpenAI/Azure have no subscription custody lane, but every physical
-            // continuation retry still crosses the ordinary dispatch checkpoint.
-            await recordModelTransportStarted();
-            replacementSignal.throwIfAborted();
-            requestInit?.signal?.throwIfAborted();
-            if (!transportReportsDispatch) recordModelTransportDispatched(performance.now());
-          },
-          () => {
-            // No awaited admission remains between this notification and fetch
-            // entry. Dispatch-triggered preparation must not run ahead of the
-            // credential custody check above.
-            if (transportReportsDispatch) {
-              return withModelTransportObservation(
-                () => recordModelTransportDispatched(performance.now()),
-                () => inner(input, requestInit),
-              );
-            }
-            recordModelTransportDispatched(performance.now());
-            return inner(input, requestInit);
-          },
-        );
-      } catch (error) {
-        await current.failed();
-        throw error;
-      }
-      try {
-        current.observe(response, requestToken);
-        return await current.responded(response);
-      } catch (error) {
-        // A response the custody could not take is never left open.
-        await response.body?.cancel().catch(() => undefined);
-        throw error;
-      }
-    };
-    try {
-      let response = await send(prepared, capture.init);
-      // A leased bearer refused as unauthorized is renewed (at most once per
-      // request; the custody decides whether the retry may run) and the same
-      // request sent again when its body can be sent again.
-      if (response.status === 401 && prepared.renew && replayableRequest(input, capture.init)) {
-        const refused = response;
-        const renewed = await prepared.renew().catch(async (error: unknown) => {
-          await refused.body?.cancel().catch(() => undefined);
+    return await withModelSourceProviderTransport(async () => {
+      const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
+      init = prepared.init;
+      // The attempt-local observer durably checkpoints provider dispatch before
+      // this process can place request bytes on the network.
+      await authorizeModelSourceProviderDispatch();
+      await recordModelTransportStarted();
+      const capture = captureProviderRequestBody(provider, input, init);
+      const started = performance.now();
+      // A request whose bearer a subscription core leased is admitted by its
+      // custody as the last awaited step before the fetch, then settled from
+      // its outcome; any other request passes straight through.
+      const send = async (current: PreparedClaudeRequest, requestInit: RequestInit | undefined) => {
+        const requestToken = captureClaudeRequestToken(input, requestInit);
+        await current.admit();
+        let response: Response;
+        try {
+          response = await withResponsesContinuationAdmission(
+            async (replacementSignal) => {
+              replacementSignal.throwIfAborted();
+              requestInit?.signal?.throwIfAborted();
+              // OpenAI/Azure have no subscription custody lane, but every physical
+              // continuation retry still crosses the ordinary dispatch checkpoint.
+              await recordModelTransportStarted();
+              replacementSignal.throwIfAborted();
+              requestInit?.signal?.throwIfAborted();
+              if (!transportReportsDispatch) recordModelTransportDispatched(performance.now());
+            },
+            () => {
+              // No awaited admission remains between this notification and fetch
+              // entry. Dispatch-triggered preparation must not run ahead of the
+              // credential custody check above.
+              markModelSourceProviderHandoffStarted();
+              if (transportReportsDispatch) {
+                return withModelTransportObservation(
+                  () => recordModelTransportDispatched(performance.now()),
+                  () => inner(input, requestInit),
+                );
+              }
+              recordModelTransportDispatched(performance.now());
+              return inner(input, requestInit);
+            },
+          );
+        } catch (error) {
+          await current.failed();
           throw error;
-        });
-        // Without a renewal the refusal the provider sent is surfaced as is.
-        if (renewed) {
-          await refused.body?.cancel().catch(() => undefined);
-          response = await send(renewed, {
-            ...capture.init,
-            ...(renewed.init?.headers ? { headers: renewed.init.headers } : {}),
-          });
         }
+        try {
+          current.observe(response, requestToken);
+          return await current.responded(response);
+        } catch (error) {
+          // A response the custody could not take is never left open.
+          await response.body?.cancel().catch(() => undefined);
+          throw error;
+        }
+      };
+      try {
+        let response = await send(prepared, capture.init);
+        // A leased bearer refused as unauthorized is renewed (at most once per
+        // request; the custody decides whether the retry may run) and the same
+        // request sent again when its body can be sent again.
+        if (response.status === 401 && prepared.renew && replayableRequest(input, capture.init)) {
+          const refused = response;
+          const renewed = await prepared.renew().catch(async (error: unknown) => {
+            await refused.body?.cancel().catch(() => undefined);
+            throw error;
+          });
+          // Without a renewal the refusal the provider sent is surfaced as is.
+          if (renewed) {
+            await refused.body?.cancel().catch(() => undefined);
+            response = await send(renewed, {
+              ...capture.init,
+              ...(renewed.init?.headers ? { headers: renewed.init.headers } : {}),
+            });
+          }
+        }
+        recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+        return response;
+      } catch (error) {
+        capture.cancel();
+        recordModelCallMetric(provider, "failed", started);
+        throw error;
       }
-      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
-      return response;
-    } catch (error) {
-      capture.cancel();
-      recordModelCallMetric(provider, "failed", started);
-      throw error;
-    }
+    });
   }) as typeof fetch;
 }
 
