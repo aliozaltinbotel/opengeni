@@ -1223,10 +1223,9 @@ export async function recordModelCallUsageEvent(
  * A failed transport has unknown provider effect, so its call is indeterminate.
  * Source authority is checked once per literal dispatch, after the intent: the
  * receipt-persistence check has just run, so a check before the intent would
- * only repeat it. A refusal here throws before bytes, so its effect is known to
- * be none: the intent is settled by a `model.call.dispatch.refused` row
- * (outcome cancelled, no usage, no cost), never left indeterminate, and
- * `onDispatchFailure` leaves a settled refusal alone.
+ * only repeat it. Failure settlement needs source-local transport proof: only
+ * a source that never entered its provider transport can receive a refused row.
+ * A prior handoff, including an SDK retry, remains indeterminate.
  */
 export function createModelCallUsageSourceHooks(
   db: ActivityServices["db"],
@@ -1241,18 +1240,9 @@ export function createModelCallUsageSourceHooks(
       await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "dispatch", outcome: "indeterminate", billing: null });
       // The one live check at the final literal boundary, outside the intent
       // transaction: persistence may have waited, so it runs after the intent.
-      try {
-        await authorize?.(sourceKey);
-      } catch (refusal) {
-        try {
-          await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "refused", billing: null });
-        } catch {
-          // The intent then stays unknown (indeterminate): still never billed.
-        }
-        throw refusal;
-      }
+      await authorize?.(sourceKey);
     },
-    onDispatchFailure: async sourceKey => {
+    onDispatchFailure: async (sourceKey, transport) => {
       assertRoot();
       if (claimedSourceKeys.has(sourceKey)) return;
       const dispatchKey = `usage:${MODEL_CALL_DISPATCH_EVENT_TYPE}:${call.turnId}:${sourceKey}`;
@@ -1262,6 +1252,14 @@ export function createModelCallUsageSourceHooks(
         accountId: call.accountId, workspaceId: call.workspaceId, keys: [dispatchKey, terminalKey, refusedKey],
       });
       if (!existing.has(dispatchKey) || existing.has(terminalKey) || existing.has(refusedKey)) return;
+      if (transport?.providerHandoffStarted === false) {
+        // The runtime observed every transport scope of this exact source and
+        // never entered the underlying provider. Later admission failures are
+        // as effect-free as source-authorization refusal. A failed write stays
+        // unknown and propagates as a settlement error; it cannot permit recovery.
+        await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "refused", billing: null });
+        return;
+      }
       // Transport loss supplies no provider terminal. Preserve the existing
       // unknown dispatch SOURCE_FACT without claiming the final accounting key
       // or suppressing a later authenticated provider terminal.

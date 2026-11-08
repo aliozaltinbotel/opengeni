@@ -18,9 +18,17 @@ import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } 
  * committed source at each literal transport attempt, including HTTP retries. */
 export type BeforeModelCallSourceReceipt = ((request: ModelRequest) => Promise<string>) & {
   beforeProviderDispatch?: (sourceKey: string) => Promise<void>;
-  onDispatchFailure?: (sourceKey: string) => Promise<void>;
+  onDispatchFailure?: (sourceKey: string, transport?: { providerHandoffStarted: boolean }) => Promise<void>;
 };
-const modelSourceDispatch = new AsyncLocalStorage<{ sourceKey: string; authorize: (sourceKey: string) => Promise<void> } | undefined>();
+type SourceTransportState = { observed: boolean; providerHandoffStarted: boolean; activeTransports: number; refusal?: { error: unknown } };
+// A streaming iterator enters multiple scopes for the same source. Preserve its
+// first handoff across next()/return() and SDK retries, but never across producers.
+const sourceTransportStates = new WeakMap<BeforeModelCallSourceReceipt, Map<string, SourceTransportState>>();
+const modelSourceDispatch = new AsyncLocalStorage<{
+  sourceKey: string;
+  authorize: (sourceKey: string) => Promise<void>;
+  transport: SourceTransportState;
+} | undefined>();
 
 /** Mandatory receipt refusal is never an optional title/provider failure. */
 export class ModelCallFailureSettlementError extends Error {
@@ -38,14 +46,31 @@ export function withModelCallSourceDispatch<T>(
 ): T {
   if (!producer?.beforeProviderDispatch) return modelSourceDispatch.run(undefined, operation);
   if (!sourceKey) throw new Error("MODEL_SOURCE_RECEIPT_UNAVAILABLE");
-  return modelSourceDispatch.run({ sourceKey, authorize: producer.beforeProviderDispatch }, () => {
+  let states = sourceTransportStates.get(producer);
+  if (!states) {
+    states = new Map();
+    sourceTransportStates.set(producer, states);
+  }
+  let transport = states.get(sourceKey);
+  if (!transport) {
+    transport = { observed: false, providerHandoffStarted: false, activeTransports: 0 };
+    states.set(sourceKey, transport);
+  }
+  const context = { sourceKey, authorize: producer.beforeProviderDispatch, transport };
+  return modelSourceDispatch.run(context, () => {
     const result = operation();
     if (!(result instanceof Promise)) return result;
     return result.catch(async (error: unknown) => {
       try {
         if (error instanceof ResponsesStreamingTerminalError && error.terminalResponse)
           await observeTerminalFailure?.(error.terminalResponse);
-        await producer.onDispatchFailure?.(sourceKey);
+        // Close this source before awaiting its zero-handoff refusal receipt.
+        // A later sibling cannot send while that receipt is being persisted.
+        if (context.transport.observed && context.transport.activeTransports === 0
+          && !context.transport.providerHandoffStarted) context.transport.refusal = { error };
+        await producer.onDispatchFailure?.(sourceKey, context.transport.observed && context.transport.activeTransports === 0
+          ? { providerHandoffStarted: context.transport.providerHandoffStarted }
+          : undefined);
       } catch (cause) {
         throw new ModelCallFailureSettlementError(cause);
       }
@@ -57,7 +82,34 @@ export function withModelCallSourceDispatch<T>(
 /** Called only at the real provider transport boundary, before request bytes. */
 export async function authorizeModelSourceProviderDispatch(): Promise<void> {
   const context = modelSourceDispatch.getStore();
-  if (context) await context.authorize(context.sourceKey);
+  if (context) {
+    await context.authorize(context.sourceKey);
+  }
+}
+
+/** Keep concurrent scopes for a source indeterminate while another transport
+ * may still pass admission and send. Failure settlement never races that send. */
+export async function withModelSourceProviderTransport<T>(operation: () => Promise<T>): Promise<T> {
+  const context = modelSourceDispatch.getStore();
+  if (!context) return await operation();
+  if (context.transport.refusal) throw context.transport.refusal.error;
+  context.transport.observed = true;
+  context.transport.activeTransports++;
+  try {
+    return await operation();
+  } finally {
+    context.transport.activeTransports--;
+  }
+}
+
+/** Conservative boundary: entering the inner transport may send bytes, even if
+ * it throws synchronously. This mark must precede that entry without an await. */
+export function markModelSourceProviderHandoffStarted(): void {
+  const context = modelSourceDispatch.getStore();
+  if (context) {
+    if (context.transport.refusal) throw context.transport.refusal.error;
+    context.transport.providerHandoffStarted = true;
+  }
 }
 
 export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<void>) & {

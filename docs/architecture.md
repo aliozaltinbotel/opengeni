@@ -411,6 +411,14 @@ The worker flushes and reconciles durable history before that proof; unknown or
 incomplete effects remain terminal. The next generation must obtain its own
 current host admission, preserving the same Goal and turn, prior completed
 history, deadline and recovery budget. This signal grants no authority.
+Pre-wire refusal certification is per model-source producer/key, across streamed
+iterator scopes and HTTP retries. The runtime closes a source synchronously
+before persisting its refusal only after every tracked transport has exited and
+none entered the underlying provider. Pending transports or any earlier handoff
+keep the source indeterminate; late sibling transports cannot pass a certified
+refusal. Failed refusal persistence remains a settlement error, never recovery
+permission. The transport owner is `model-provider-client.ts`, the source fence
+is `model-request-capture.ts`, and the worker usage owner persists the receipt.
 
 Idle [omits grace](run-lifecycle.md), retaining durable fences.
 

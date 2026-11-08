@@ -196,3 +196,93 @@ test("dispatch scope refuses an absent exact key and never leaks a prior call in
   expect(keys.sort()).toEqual(["first", "second"]);
   await fetch("https://source.invalid/v1/responses"); expect(keys).toHaveLength(2);
 });
+
+
+test("late transport refusal after a completed source reports exact-source zero handoffs", async () => {
+  const { withModelTransportStartedObserver } = await import("../src/model-preparation-diagnostics");
+  const outcomes: unknown[] = [];
+  let wires = 0;
+  const producer: BeforeModelCallSourceReceipt = async () => "unused";
+  producer.beforeProviderDispatch = async () => {};
+  producer.onDispatchFailure = async (...args) => { outcomes.push(args); };
+  const transport = instrumentedModelFetch("synthetic", Object.assign(async () => {
+    wires++;
+    return Response.json({});
+  }, { preconnect: globalThis.fetch.preconnect }));
+  await withModelCallSourceDispatch(producer, "completed-source", () => transport("https://source.invalid/v1/responses"));
+  let checkpoints = 0;
+  await expect(withModelTransportStartedObserver(() => {
+    checkpoints++;
+    if (checkpoints === 1) throw refusal;
+  }, () => withModelCallSourceDispatch(producer, "refused-source", () => transport("https://source.invalid/v1/responses")))).rejects.toBe(refusal);
+  expect(wires).toBe(1);
+  expect(outcomes).toEqual([["refused-source", { providerHandoffStarted: false }]]);
+});
+
+test("source handoff proof survives separate stream scopes and does not erase an earlier wire", async () => {
+  const { withModelTransportStartedObserver } = await import("../src/model-preparation-diagnostics");
+  const outcomes: unknown[] = [];
+  const producer: BeforeModelCallSourceReceipt = async () => "unused";
+  producer.beforeProviderDispatch = async () => {};
+  producer.onDispatchFailure = async (...args) => { outcomes.push(args); };
+  const transport = instrumentedModelFetch("synthetic", Object.assign(async () => Response.json({}), { preconnect: globalThis.fetch.preconnect }));
+  await withModelCallSourceDispatch(producer, "retried-source", () => transport("https://source.invalid/v1/responses"));
+  await expect(withModelTransportStartedObserver(() => { throw refusal; }, () =>
+    withModelCallSourceDispatch(producer, "retried-source", () => transport("https://source.invalid/v1/responses")))).rejects.toBe(refusal);
+  expect(outcomes).toEqual([["retried-source", { providerHandoffStarted: true }]]);
+});
+
+
+test("zero-handoff certification fences later siblings while its receipt is persisting", async () => {
+  const { withModelTransportStartedObserver } = await import("../src/model-preparation-diagnostics");
+  const writing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let wires = 0;
+  const outcomes: unknown[] = [];
+  const producer: BeforeModelCallSourceReceipt = async () => "unused";
+  producer.beforeProviderDispatch = async () => {};
+  producer.onDispatchFailure = async (...args) => { outcomes.push(args); writing.resolve(); await release.promise; };
+  const transport = instrumentedModelFetch("synthetic", Object.assign(async () => { wires++; return Response.json({}); }, { preconnect: globalThis.fetch.preconnect }));
+  const first = withModelTransportStartedObserver(() => { throw refusal; }, () =>
+    withModelCallSourceDispatch(producer, "closed-source", () => transport("https://source.invalid/v1/responses")));
+  const firstRejected = first.catch((error: unknown) => error);
+  await writing.promise;
+  const sibling = withModelCallSourceDispatch(producer, "closed-source", () => transport("https://source.invalid/v1/responses"));
+  const siblingRejected = sibling.catch((error: unknown) => error);
+  release.resolve();
+  expect(await Promise.all([firstRejected, siblingRejected])).toEqual([refusal, refusal]);
+  expect(wires).toBe(0);
+  expect(outcomes).toEqual(Array.from({ length: 2 }, () => ["closed-source", { providerHandoffStarted: false }]));
+});
+
+test("concurrent pending transport prevents zero-handoff certification", async () => {
+  const pending = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let admissions = 0;
+  let wires = 0;
+  const outcomes: unknown[] = [];
+  const producer: BeforeModelCallSourceReceipt = async () => "unused";
+  producer.beforeProviderDispatch = async () => {
+    if (++admissions === 1) { pending.resolve(); await release.promise; }
+    else throw refusal;
+  };
+  producer.onDispatchFailure = async (...args) => { outcomes.push(args); };
+  const transport = instrumentedModelFetch("synthetic", Object.assign(async () => { wires++; return Response.json({}); }, { preconnect: globalThis.fetch.preconnect }));
+  const first = withModelCallSourceDispatch(producer, "concurrent-source", () => transport("https://source.invalid/v1/responses"));
+  await pending.promise;
+  await expect(withModelCallSourceDispatch(producer, "concurrent-source", () => transport("https://source.invalid/v1/responses"))).rejects.toBe(refusal);
+  expect(outcomes).toEqual([["concurrent-source", undefined]]);
+  release.resolve();
+  await first;
+  expect(wires).toBe(1);
+});
+
+test("failed refusal persistence cannot become a recoverable original admission error", async () => {
+  const { withModelTransportStartedObserver } = await import("../src/model-preparation-diagnostics");
+  const producer: BeforeModelCallSourceReceipt = async () => "unused";
+  producer.beforeProviderDispatch = async () => {};
+  producer.onDispatchFailure = async () => { throw new Error("receipt unavailable"); };
+  const transport = instrumentedModelFetch("synthetic", Object.assign(async () => Response.json({}), { preconnect: globalThis.fetch.preconnect }));
+  await expect(withModelTransportStartedObserver(() => { throw refusal; }, () =>
+    withModelCallSourceDispatch(producer, "receipt-failed-source", () => transport("https://source.invalid/v1/responses")))).rejects.toThrow("MODEL_CALL_FAILURE_RECEIPT_REFUSED");
+});
