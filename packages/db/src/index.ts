@@ -82729,7 +82729,7 @@ import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/
 /** Existing recovery CAS calls this only while holding the exact current turn/attempt locks. */
 async function hasSettledHostContextHistory(
   tx: Database,
-  scope: { accountId: string; workspaceId: string; sessionId: string; turnId: string; attemptId: string; executionGeneration: number },
+  scope: { accountId: string; workspaceId: string; sessionId: string; turnId: string; attemptId: string; executionGeneration: number; temporalActivityId: string },
 ): Promise<boolean> {
   const usage = await tx.select().from(schema.usageEvents).where(and(
     eq(schema.usageEvents.accountId, scope.accountId), eq(schema.usageEvents.workspaceId, scope.workspaceId),
@@ -82803,8 +82803,9 @@ async function hasSettledHostContextHistory(
   for (const event of events) {
     const payload = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion);
     if (event.type === "agent.model.request") {
-      // The installed first-wire clock is keyed by modelUsageDispatchId = attemptId (claim.ts).
-      if (payload.dispatchId !== scope.attemptId) return false;
+      // Request phases use the Temporal activity identity recorded by the claim,
+      // separately from the attempt UUID used by literal model-usage receipts.
+      if (payload.dispatchId !== scope.temporalActivityId) return false;
       if (payload.phase === "started") { if (started.has(payload.dispatchId)) return false; started.add(payload.dispatchId); }
       else if (payload.phase === "completed") { if (!started.has(payload.dispatchId) || ended.has(payload.dispatchId)) return false; ended.add(payload.dispatchId); }
       else if (payload.phase !== "first_byte" && payload.phase !== "first_event") return false;
@@ -83053,6 +83054,7 @@ export async function requestSessionTurnRecovery(
         const settled = await hasSettledHostContextHistory(tx as unknown as Database, {
           accountId: session.accountId, workspaceId, sessionId: input.sessionId, turnId: input.turnId,
           attemptId: input.attemptId, executionGeneration: attempt.executionGeneration,
+          temporalActivityId: attempt.temporalActivityId,
         });
         if (!settled) return { action: "not_recoverable" as const, events: [] as [], providerArtifactsInvalidated: 0 };
       }
