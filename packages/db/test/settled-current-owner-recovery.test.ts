@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { parseSync, type Node } from "oxc-parser";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { ModelCallUsageAttributes, MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, TurnExecutionPolicyV1, TURN_EXECUTION_POLICY_METADATA_KEY } from "@opengeni/contracts";
 import {
@@ -581,6 +583,36 @@ test("host context replacement requires exact-generation zero-dispatch proof und
   expect((await recover(paused)).action).toBe("stale");
 },60_000);
 
+// Execute the installed first-byte producer, as model-wire-dispatch.test.ts does.
+// Its Temporal activity identity is distinct from the usage/attempt UUID.
+async function nativeFirstByteEvent(ctx: Fixture, dispatchId: string) {
+  const source = readFileSync(new URL("../../../apps/worker/src/activities/agent-turn/stream-attempt.ts", import.meta.url), "utf8");
+  const parsed = parseSync("stream-attempt.ts", source);
+  let producer: Node | undefined;
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
+    if ("type" in value && value.type === "VariableDeclarator" && "id" in value
+      && value.id !== null && typeof value.id === "object" && "name" in value.id
+      && value.id.name === "settleFallbackProviderFirstByte" && "init" in value) producer = value.init as Node;
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(parsed.program);
+  if (!producer) throw new Error("Missing installed first-byte publisher");
+  const compiled = new Bun.Transpiler({loader:"ts"}).transformSync(`const settle = ${source.slice(producer.start,producer.end)};`);
+  const events: Parameters<typeof appendSessionEventsForTurnAttempt>[6] = [];
+  const publish = new Function("eventing", "input", "activeTurnId", "attempt", "dispatchId", `
+    let fallbackProviderRequestStartedAt = 1; const streamProvider = "fixture";
+    ${compiled}
+    return settle;
+  `)({publish:async (items:typeof events)=>{events.push(...items);},initialModelWireDispatch:{payload:()=>({})}},
+    {attemptId:ctx.proof.attemptId},ctx.turn.id,{executionGeneration:ctx.proof.executionGeneration},dispatchId) as () => Promise<void>;
+  await publish();
+  expect(events).toHaveLength(1);
+  expect(events[0]?.payload).toMatchObject({phase:"first_byte",dispatchId,attemptId:ctx.proof.attemptId,executionGeneration:ctx.proof.executionGeneration});
+  return events[0]!;
+}
+
 // These are synthetic native receipt fixtures, not business-outcome attestations.
 async function settledContextFixture(mode = "complete") {
   const ctx = await fixture();
@@ -607,9 +639,12 @@ async function settledContextFixture(mode = "complete") {
     attemptId:ctx.proof.attemptId,executionGeneration:ctx.proof.executionGeneration,sourceKey:"settled",requestIndex:1,
   },{input:retained.map(row=>row.item)});
   expect(receipt.complete).toBe(true);
-  const dispatchId = mode === "foreign-dispatch" ? crypto.randomUUID() : ctx.proof.attemptId;
+  const dispatchId = mode === "foreign-dispatch" ? (await fixture()).proof.temporalActivityId
+    : mode === "attempt-as-dispatch" ? ctx.proof.attemptId : ctx.proof.temporalActivityId;
+  expect(ctx.proof.temporalActivityId).not.toBe(ctx.proof.attemptId);
   const events: Parameters<typeof appendSessionEventsForTurnAttempt>[6] = [
     {type:"agent.model.request",payload:{phase:"started",dispatchId}},
+    await nativeFirstByteEvent(ctx,dispatchId),
     ...(mode === "open-request" ? [] : [{type:"agent.model.request" as const,payload:{phase:"completed",dispatchId}}]),
     ...(mode === "no-tool-missing-model-history" ? [] : [{type:"agent.toolCall.created" as const,payload:{id:"settled-tool",raw:{type:"function_call"}}}]),
     ...(mode === "open-tool" || mode === "no-tool-missing-model-history" ? [] : [{type:"agent.toolCall.output" as const,payload:{id:"settled-tool",output:"known result",...(mode === "unknown-tool" ? {recovery:{outcome:"unknown"}} : {})}}]),
@@ -634,11 +669,6 @@ test("settled host-context recovery preserves the same turn and refuses incomple
     sessionId:ctx.session.id,turnId:ctx.turn.id,attemptId:ctx.proof.attemptId,triggerEventId:ctx.turn.triggerEventId,
     reason:"host_context_changed",requireSettledDispatch:true,providerRecoveryCount:1,
   });
-  for (const mode of ["unmatched","failed-response","unreported","missing-fact","open-request","open-tool","unknown-tool","missing-history","pending-tool","foreign-dispatch","no-tool-missing-model-history","missing-model-basis"]) {
-    const ctx=await settledContextFixture(mode);
-    expect((await recover(ctx)).action,mode).toBe("not_recoverable");
-    expect((await ownerRow(ctx)).state,mode).toBe("claimed");
-  }
   const ctx=await settledContextFixture(),before=await authorityRow(ctx);
   expect((await recover(ctx)).action).toBe("recovering");
   await markSessionAttemptQuiesced(client.db,{accountId:ctx.proof.accountId,workspaceId:ctx.proof.workspaceId,
@@ -649,6 +679,11 @@ test("settled host-context recovery preserves the same turn and refuses incomple
   expect((await authorityRow(ctx)).goal_snapshot).toEqual(before.goal_snapshot);
   expect((await authorityRow(ctx)).trigger_event_id).toBe(before.trigger_event_id);
   expect((await recover(ctx)).action).toBe("stale");
+  for (const mode of ["unmatched","failed-response","unreported","missing-fact","open-request","open-tool","unknown-tool","missing-history","pending-tool","foreign-dispatch","attempt-as-dispatch","no-tool-missing-model-history","missing-model-basis"]) {
+    const refused=await settledContextFixture(mode);
+    expect((await recover(refused)).action,mode).toBe("not_recoverable");
+    expect((await ownerRow(refused)).state,mode).toBe("claimed");
+  }
   const paused=await settledContextFixture();
   await withWorkspaceSessionActivityRls(client.db,paused.proof.workspaceId,db=>mutateSessionControlInTransaction(db,{
     accountId:paused.proof.accountId,workspaceId:paused.proof.workspaceId,sessionId:paused.session.id,
