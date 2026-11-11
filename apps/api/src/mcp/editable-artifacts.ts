@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { codemodeArtifactIds } from "@opengeni/codemode";
 import type { AccessGrant } from "@opengeni/contracts";
 import type {
   EditableArtifactAgentApplication,
@@ -204,7 +205,7 @@ export function registerEditableArtifactAgentTools(
     {
       title: "Inspect editable artifact",
       description:
-        "Query the artifact's current canonical head through the same native kernel used by the browser. Use bounded modality queries; results are current, not a sandbox-file snapshot. Native document queries return a server-issued inspectionReceiptId; use a post-edit body inspection receipt for declared report completion. If the document changes during inspection, retry against its current head.",
+        "Query the artifact's current canonical head through the same native kernel used by the browser. Use bounded modality queries; results are current, not a sandbox-file snapshot. A document summary can return authoringIds.paragraph for one new paragraph.add command. Native document queries return a server-issued inspectionReceiptId; use a post-edit body inspection receipt for declared report completion. If the document changes during inspection, retry against its current head.",
       inputSchema: {
         artifactId: ArtifactId,
         modality: Modality,
@@ -214,18 +215,30 @@ export function registerEditableArtifactAgentTools(
         artifact: ArtifactMetadata,
         projection: z.unknown(),
         inspectionReceiptId: z.string().uuid().optional(),
+        authoringIds: z
+          .object({ paragraph: z.string().regex(/^p\/[0-9a-f]{32}$/u) })
+          .strict()
+          .optional(),
       },
       annotations: readOnlyAnnotations("Inspect editable artifact"),
     },
     async ({ artifactId, modality, request }, extra) =>
-      await execute(
-        async () =>
-          await application().inspect({
-            ...context("editable_artifact_inspect", extra),
-            artifactId: editableArtifactId(artifactId),
-            request: { modality, query: request } as EditableArtifactAgentQuery,
-          }),
-      ),
+      await execute(async () => {
+        const result = await application().inspect({
+          ...context("editable_artifact_inspect", extra),
+          artifactId: editableArtifactId(artifactId),
+          request: { modality, query: request } as EditableArtifactAgentQuery,
+        });
+        if (
+          modality !== "document" ||
+          request.kind !== "summary" ||
+          result.artifact.modality !== "document" ||
+          result.artifact.lifecycle !== "active"
+        )
+          return result;
+        const authoringIds = documentSummaryAuthoringIds(result.projection);
+        return authoringIds === undefined ? result : { ...result, authoringIds };
+      }),
   );
 
   input.server.registerTool(
@@ -233,7 +246,7 @@ export function registerEditableArtifactAgentTools(
     {
       title: "Edit editable artifact",
       description:
-        "Atomically apply a bounded modality command batch to the current durable artifact head. Inspect first, use stable object IDs from that projection, and verify the result afterward.",
+        "Atomically apply a bounded modality command batch to the current durable artifact head. Inspect first and use projected object IDs for existing objects. Use the document summary's authoringIds.paragraph for a new paragraph. Verify the result afterward.",
       inputSchema: {
         artifactId: ArtifactId,
         modality: Modality,
@@ -393,6 +406,25 @@ function requireApplication(deps: ApiRouteDeps): EditableArtifactAgentApplicatio
     throw new Error("Editable artifact agent service is unavailable");
   }
   return deps.editableArtifactAgent;
+}
+
+/** Offer a native candidate ID without reserving it or changing the inspected head. */
+function documentSummaryAuthoringIds(
+  projection: unknown,
+): Readonly<{ paragraph: string }> | undefined {
+  if (
+    !isRecord(projection) ||
+    projection.truncated !== false ||
+    projection.nextCursor !== null ||
+    !Array.isArray(projection.items) ||
+    projection.items.length !== 1
+  )
+    return undefined;
+  const summary: unknown = projection.items[0];
+  if (!isRecord(summary) || summary.kind !== "summary" || typeof summary.idNamespace !== "bigint") {
+    return undefined;
+  }
+  return { paragraph: codemodeArtifactIds.document("paragraph", summary.idNamespace) };
 }
 
 function jsonResult(value: unknown) {

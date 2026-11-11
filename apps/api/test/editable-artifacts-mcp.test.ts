@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
+import {
+  DOCUMENT_ARTIFACT_COMMAND_VERSION,
+  encodeDocumentArtifactCommandBatch,
+} from "@opengeni/contracts/editable-artifacts";
+import type { EditableArtifactAgentApplication } from "@opengeni/core/editable-artifacts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -80,6 +85,165 @@ describe("editable artifact MCP surface", () => {
       await Promise.all([client.close(), server.close()]);
     }
   });
+  test("returns a namespaced authoring ID for a document summary and applies it at the inspected head", async () => {
+    const server = new McpServer({ name: "document-authoring", version: "1" });
+    const document = metadata("document");
+    const receiptId = "66666666-6666-4666-8666-666666666666";
+    const namespace = 0xfedcba9876543210n;
+    let authorized = true;
+    let headSequence = 0;
+    let paragraphId: string | undefined;
+    registerEditableArtifactAgentTools({
+      server,
+      deps: {
+        editableArtifactAgent: {
+          async create() {
+            return document;
+          },
+          async inspect(input: Parameters<EditableArtifactAgentApplication["inspect"]>[0]) {
+            const projection = { nextCursor: null, truncated: false };
+            if (input.request.modality !== "document") {
+              return { artifact: metadata("presentation"), projection };
+            }
+            expect(input.actor).toMatchObject({ sessionId, turnId, attemptId, generation: 7 });
+            return {
+              artifact: { ...document, headSequence },
+              projection: {
+                ...projection,
+                items:
+                  input.request.query.kind === "summary"
+                    ? [{ kind: "summary", idNamespace: namespace }]
+                    : [{ kind: "paragraph", id: paragraphId }],
+              },
+              inspectionReceiptId: receiptId,
+            };
+          },
+          async apply(input: Parameters<EditableArtifactAgentApplication["apply"]>[0]) {
+            if (input.batch.modality !== "document") throw new Error("Expected document");
+            expect(input.expectedHeadSequence).toBe(0);
+            expect(input.expectedStateHash).toBe(document.stateHash);
+            expect(input.actor).toMatchObject({ sessionId, turnId, attemptId, generation: 7 });
+            const command = input.batch.commands[0];
+            if (command?.kind !== "paragraph.add") throw new Error("Expected a paragraph");
+            expect(
+              encodeDocumentArtifactCommandBatch({
+                version: DOCUMENT_ARTIFACT_COMMAND_VERSION,
+                commands: input.batch.commands,
+              }).byteLength,
+            ).toBeGreaterThan(0);
+            paragraphId = command.id;
+            headSequence = 1;
+            return {
+              artifact: { ...document, headSequence },
+              transaction: {
+                id: "c".repeat(32),
+                clientTransactionId: "author-report",
+                sequenceStart: 1,
+                sequenceEnd: 1,
+                stateHash: document.stateHash,
+                committedAt: document.updatedAt,
+                replayed: false,
+              },
+            };
+          },
+        },
+      } as never,
+      grant: grant(),
+      sessionId,
+      async authorize() {
+        if (!authorized) throw new Error("Signed attempt withdrawn");
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "document-authoring", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const summaryArgs = { artifactId, modality: "document", request: { kind: "summary" } };
+    try {
+      const created = await client.callTool({
+        name: "editable_artifact_create",
+        arguments: { modality: "document", title: document.title },
+      });
+      expect(created.structuredContent).not.toHaveProperty("authoringIds");
+      const summary = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: summaryArgs,
+      });
+      expect(summary.isError).not.toBe(true);
+      expect(summary.structuredContent).toMatchObject({
+        projection: { items: [{ kind: "summary", idNamespace: namespace.toString() }] },
+        inspectionReceiptId: receiptId,
+      });
+      const authoringIds = summary.structuredContent?.authoringIds;
+      if (
+        typeof authoringIds !== "object" ||
+        authoringIds === null ||
+        !("paragraph" in authoringIds) ||
+        typeof authoringIds.paragraph !== "string"
+      ) {
+        throw new Error("Document authoring ID is missing");
+      }
+      expect(authoringIds.paragraph).toMatch(/^p\/fedcba9876543210[0-9a-f]{16}$/u);
+      const edited = await client.callTool({
+        name: "editable_artifact_apply",
+        arguments: {
+          artifactId,
+          modality: "document",
+          expectedHeadSequence: document.headSequence,
+          expectedStateHash: document.stateHash,
+          commands: [
+            {
+              kind: "paragraph.add",
+              id: authoringIds.paragraph,
+              target: { kind: "body" },
+              runs: [{ text: "Synthetic report", style: {} }],
+              style: {},
+            },
+          ],
+        },
+        _meta: { opengeniOperationId: "author-report" },
+      });
+      expect(edited.isError).not.toBe(true);
+      const body = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: {
+          artifactId,
+          modality: "document",
+          request: {
+            kind: "body",
+            startBlock: 0,
+            limits: { maxItems: 1, maxTextUtf16: 100, maxTableCells: 1 },
+          },
+        },
+      });
+      expect(body.structuredContent).not.toHaveProperty("authoringIds");
+      expect(body.structuredContent).toMatchObject({
+        artifact: { headSequence: 1 },
+        projection: { items: [{ id: authoringIds.paragraph }] },
+        inspectionReceiptId: receiptId,
+      });
+      const presentation = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: {
+          artifactId,
+          modality: "presentation",
+          request: { kind: "metadata", maxBytes: 1024 },
+        },
+      });
+      expect(presentation.isError).not.toBe(true);
+      expect(presentation.structuredContent).not.toHaveProperty("authoringIds");
+      authorized = false;
+      const refused = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: summaryArgs,
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.structuredContent).toBeUndefined();
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   test("uses exact signed attempt context and returns CodeMode-compatible structured output", async () => {
     const creates: Array<Record<string, unknown>> = [];
     let authorizationCalls = 0;
