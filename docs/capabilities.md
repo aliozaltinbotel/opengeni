@@ -72,6 +72,14 @@ a separate function-tool output event.
 
 MCP tool refs are strict by default. A newly submitted bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails closed when the turn demands that server's catalog or a tool. Startup eagerness is independent: only an exact session ref with `"eager": true` makes connection and schema admission a first-model-request barrier. A client can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning. Persisted refs have a separate turn-time safety rule: if a previously valid server is later disconnected, disabled, or removed from the runtime registry, Opengeni preserves that selection in the session's effective-policy audit projection but omits it from executable tools for the turn. The model receives a bounded system notice naming the unavailable server and must not claim to have read or updated it, so one disappearing integration cannot trap every later chat turn in an `Unknown MCP server id` failure loop.
 
+Embedded hosts can set `PrepareToolsOptions.mcpCatalogConcurrency` to an integer
+from 1 through 8 (default 8). Use 1 when selected MCP catalogs share an
+authorization lock: each catalog still performs its own current-authority read,
+in the existing preparation order, without overlapping another catalog read from the
+same preparation. This applies to attempt and workspace gateway catalogs,
+including deferred preparation. It does not change connection or tool-invocation
+concurrency, authority, required-server failures, or cleanup.
+
 An optional connection-backed MCP whose credential is unavailable during
 `initialize` or `tools/list` is setup availability, not proof that the user
 asked to use that integration. Opengeni skips it without emitting a

@@ -5028,6 +5028,13 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /**
+   * Maximum concurrent server catalog reads (1–8, default 8). Hosts whose
+   * catalogs share an authorization lock can choose 1 without caching or
+   * skipping either server's current-authority checks. Connection and tool
+   * invocation concurrency are unchanged.
+   */
+  mcpCatalogConcurrency?: number;
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
   /**
@@ -5470,6 +5477,16 @@ export async function prepareAgentTools(
   tools: ToolRef[],
   options: PrepareToolsOptions = {},
 ): Promise<PreparedAgentTools> {
+  if (
+    options.mcpCatalogConcurrency !== undefined &&
+    (!Number.isInteger(options.mcpCatalogConcurrency) ||
+      options.mcpCatalogConcurrency < 1 ||
+      options.mcpCatalogConcurrency > MCP_MAX_CONCURRENT_SERVER_OPERATIONS)
+  ) {
+    throw new Error(
+      `mcpCatalogConcurrency must be an integer between 1 and ${MCP_MAX_CONCURRENT_SERVER_OPERATIONS}`,
+    );
+  }
   const inputWaitYield = new InputWaitYield(options.inputWaitReplyGuard);
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
@@ -6129,12 +6146,12 @@ export async function prepareAgentTools(
   );
   void ready.catch(() => undefined);
   try {
-    await Promise.all(
-      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-        async (server) => {
-          if (server instanceof PrefixedMcpServer) await server.freezeTools();
-        },
-      ),
+    await boundedParallelMap(
+      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])],
+      options.mcpCatalogConcurrency ?? MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+      async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      },
     );
   } catch (error) {
     // Publication did not complete, so no caller can own these resources.
@@ -6312,6 +6329,7 @@ async function prepareAttemptToolEnvironment(
   const prepared = await prepareToolGatewayDefinitionsFromServers(
     servers,
     registry,
+    options.mcpCatalogConcurrency,
     {
       workspaceId: scope.workspaceId,
       sessionId: scope.sessionId,
@@ -6677,7 +6695,11 @@ async function prepareWorkspaceToolGatewayEnvironment(
   if (!options.accountId || !options.workspaceId || !options.workspaceToolGateway) {
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
-  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
+  const prepared = await prepareToolGatewayDefinitionsFromServers(
+    servers,
+    registry,
+    options.mcpCatalogConcurrency,
+  );
   const admittedDefinitions = options.workspaceToolGateway.filterDefinition
     ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
     : prepared.definitions;
@@ -6726,6 +6748,7 @@ export type McpCallIdentity = {
 async function prepareToolGatewayDefinitionsFromServers(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  catalogConcurrency = MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   callIdentity?: McpCallIdentity,
   externalIdentityTargets: readonly { id: string; url: string }[] = [],
   runMcpCredentials?: RunMcpCredentials,
@@ -6748,7 +6771,7 @@ async function prepareToolGatewayDefinitionsFromServers(
   });
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
-    MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+    catalogConcurrency,
     async ({
       server,
       config,
