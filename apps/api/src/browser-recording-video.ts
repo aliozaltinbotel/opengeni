@@ -11,6 +11,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ffmpegInputDecoderOptions } from "@opengeni/runtime/media-input";
 
 const MAGIC = "OGREC1\n";
 /** How long the final frame stays on screen when nothing followed it. */
@@ -132,6 +133,12 @@ export async function encodeBrowserRecording(input: {
   const durationMs = Math.max(header.durationMs, lastFrameAt + MIN_LAST_FRAME_MS);
   const directory = await mkdtemp(join(tmpdir(), "opengeni-browser-recording-"));
   try {
+    let decoderOptions: readonly string[];
+    try {
+      decoderOptions = await ffmpegInputDecoderOptions(input.ffmpegPath, input.signal);
+    } catch {
+      throw new BrowserRecordingVideoError("the recording could not be encoded", "encode_failed");
+    }
     const list: string[] = ["ffconcat version 1.0"];
     for (const [index, frame] of frames.entries()) {
       const name = `f${String(index).padStart(6, "0")}.jpg`;
@@ -156,6 +163,7 @@ export async function encodeBrowserRecording(input: {
         "concat",
         "-safe",
         "0",
+        ...decoderOptions,
         "-i",
         join(directory, "frames.ffconcat"),
         // Frames from a tab of another size are fitted, not stretched.

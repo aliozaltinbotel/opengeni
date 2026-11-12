@@ -5,6 +5,7 @@ import { open, mkdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import sharp from "sharp";
+import { ffmpegInputDecoderOptions } from "@opengeni/runtime/media-input";
 
 const RANGE_BYTES = 1024 * 1024;
 const PROBE_STDOUT_MAX_BYTES = 64 * 1024;
@@ -162,11 +163,13 @@ async function probeBrowserCompatibleMp4(
 ): Promise<GeneratedVideoFacts> {
   const file = await stat(path);
   if (!file.isFile() || file.size <= 0) throw new Error("Media probe input is not a regular file");
+  const decoderOptions = await ffmpegInputDecoderOptions(ffprobePath);
   const result = await spawnBounded(ffprobePath, [
     "-v",
     "error",
     "-protocol_whitelist",
     "file,pipe",
+    ...decoderOptions,
     "-probesize",
     "8388608",
     "-analyzeduration",

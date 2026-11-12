@@ -17,6 +17,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./media-input": {
+      "types": "./src/media-input.ts",
+      "default": "./src/media-input.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
