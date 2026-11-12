@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -59,6 +59,35 @@ function bundle(
 }
 
 describe("browser recording video", () => {
+  test("restricts decoders before opening concat recording inputs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recording-decoder-guard-"));
+    try {
+      const executable = join(directory, "ffmpeg");
+      await writeFile(executable, `#!/bin/sh
+if [ "$2" = "-decoders" ]; then
+  printf 'Decoders:\n V....D mjpeg JPEG\n A....D mace6 MACE6\n V....D cfhd CineForm\n'
+  exit 0
+fi
+guarded=0
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = "-codec_whitelist" ] && [ "$argument" = "mjpeg" ]; then guarded=1; fi
+  if [ "$argument" = "-i" ] && [ "$guarded" != 1 ]; then exit 9; fi
+  previous="$argument"
+  output="$argument"
+done
+printf 'recording' > "$output"
+`, { mode: 0o700 });
+      const frame = Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 2, 0, 0, 0]);
+      const result = await encodeBrowserRecording({
+        bundle: bundle([{ t: 0, data: frame }], 1_000), ffmpegPath: executable,
+      });
+      expect(result.frameCount).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("rejects foreign or truncated bundles", () => {
     expect(() => parseBrowserRecordingBundle(new TextEncoder().encode("nope"))).toThrow(
       BrowserRecordingVideoError,

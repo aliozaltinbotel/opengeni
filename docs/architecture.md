@@ -1321,6 +1321,14 @@ the control worker via Temporal: only the worker image carries LiteParse's nativ
 closure, LibreOffice and English OCR data. API-local voice normalization/segmentation
 retains FFmpeg,
 with no additional hop or cold start; native artifact rendering retains fonts.
+Before opening untrusted media, API voice/recording and worker video probes use
+`packages/runtime/src/media-input.ts` to derive an exact input decoder whitelist
+from the configured executable. ADX, both MACE decoders and CFHD are refused
+before decoder initialization, including stream-info probing and concat child
+inputs; other installed decoders and existing container support are retained.
+An unavailable or malformed decoder inventory fails closed. These restrictions
+mitigate the identified decoder vulnerabilities, not every FFmpeg vulnerability;
+the installed binary still requires image-specific security qualification.
 Worker-side video validation needs FFprobe from the FFmpeg package. Desktop
 recording executes inside the desktop sandbox, not the worker host. Native
 artifact import/export uses the artifact runtime, not LibreOffice. Embedded API

@@ -1,4 +1,5 @@
 import type { PreparedTranscriptionSegment, TranscriptionSegmenter } from "@opengeni/core";
+import { ffmpegInputDecoderOptions } from "@opengeni/runtime/media-input";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -68,6 +69,16 @@ export function createFfmpegTranscriptionSegmenter(input: {
       );
       const outputPattern = join(directory, "segment-%06d.wav");
       try {
+        let decoderOptions: readonly string[];
+        try {
+          decoderOptions = await ffmpegInputDecoderOptions(input.ffmpegPath, request.signal);
+        } catch {
+          throw new TranscriptionSegmenterError(
+            "Audio segmentation is unavailable",
+            request.signal?.aborted ? "cancelled" : "unavailable",
+            true,
+          );
+        }
         await writeChunks(inputPath, request.chunks, request.signal);
         const result = await runCommand(
           input.ffmpegPath,
@@ -77,6 +88,7 @@ export function createFfmpegTranscriptionSegmenter(input: {
             "-loglevel",
             "error",
             "-y",
+            ...decoderOptions,
             "-i",
             inputPath,
             // Output-side ceiling: audio past it is never decoded or written.

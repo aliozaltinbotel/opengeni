@@ -17,24 +17,18 @@ let probe = "";
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "opengeni-video-media-"));
-  probe = join(root, "ffprobe-fixture");
-  await writeFile(
-    probe,
-    `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({
-      streams: [
-        {
-          codec_name: "h264",
-          codec_type: "video",
-          width: 160,
-          height: 90,
-          avg_frame_rate: "8/1",
-        },
-      ],
-      format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4.000000" },
-    })}'\n`,
-    { mode: 0o700 },
-  );
-  await chmod(probe, 0o700);
+  probe = await writeProbeFixture({
+    streams: [
+      {
+        codec_name: "h264",
+        codec_type: "video",
+        width: 160,
+        height: 90,
+        avg_frame_rate: "8/1",
+      },
+    ],
+    format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4.000000" },
+  });
 });
 
 afterAll(async () => {
@@ -187,7 +181,20 @@ describe("video media validation", () => {
 
 async function writeProbeFixture(value: unknown): Promise<string> {
   const path = join(root, `ffprobe-${randomUUID()}`);
-  await writeFile(path, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(value)}'\n`, {
+  await writeFile(path, `#!/bin/sh
+if [ "$2" = "-decoders" ]; then
+  printf 'Decoders:\n V....D h264 H264\n A....D aac AAC\n V....D mjpeg JPEG\n V....D png PNG\n A....D adpcm_adx ADX\n A....D mace3 MACE3\n A....D mace6 MACE6\n V....D cfhd CineForm\n'
+  exit 0
+fi
+guarded=0
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = "-codec_whitelist" ] && [ "$argument" = "aac,h264,mjpeg,png" ]; then guarded=1; fi
+  if [ "$argument" = "--" ] && [ "$guarded" != 1 ]; then exit 9; fi
+  previous="$argument"
+done
+printf '%s\\n' '${JSON.stringify(value)}'
+`, {
     mode: 0o700,
   });
   await chmod(path, 0o700);
