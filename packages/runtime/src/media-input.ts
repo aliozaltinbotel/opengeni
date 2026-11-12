@@ -36,10 +36,10 @@ export async function ffmpegInputDecoderOptions(
   const allowed = new Set<string>();
   for (const line of inventory.split(/\r?\n/u)) {
     if (!/^\s*[VAS][A-Z.]{5}\s/u.test(line) || /^\s*[VAS][A-Z.]{5}\s+=/u.test(line)) continue;
-    const match = /^\s*[VAS][A-Z.]{5}\s+([a-zA-Z0-9_]+)(?:\s+(.*))?$/u.exec(line);
+    const match = /^\s*[VAS][A-Z.]{5}\s+([a-zA-Z0-9_][a-zA-Z0-9_.-]*)(?:\s+(.*))?$/u.exec(line);
     const name = match?.[1];
     if (!name) throw new Error("Media decoder inventory is invalid");
-    const codec = /\(codec ([a-zA-Z0-9_]+)\)/u.exec(match?.[2] ?? "")?.[1] ?? name;
+    const codec = /\(codec ([a-zA-Z0-9_][a-zA-Z0-9_.-]*)\)/u.exec(match?.[2] ?? "")?.[1] ?? name;
     if (!UNSAFE_DECODERS.has(name) && !UNSAFE_DECODERS.has(codec)) allowed.add(name);
   }
   if (allowed.size === 0) throw new Error("Media decoder inventory is empty");

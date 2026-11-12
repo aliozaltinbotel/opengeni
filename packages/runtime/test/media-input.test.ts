@@ -23,15 +23,18 @@ Decoders:
  VF...D h264 H.264
  V....D mjpeg JPEG
  VF...D png PNG
+ V....D libaom-av1 libaom AV1 (codec av1)
+ V..... libvpx-vp9 libvpx VP9 (codec vp9)
+ A....D acelp.kelvin Sipro ACELP.KELVIN
  A....D adpcm_adx ADX
  A....D mace3 MACE 3
  A....D mace6 MACE 6
  VF...D cfhd CineForm
- VF...D vendor_cfhd External decoder (codec cfhd)
+ VF...D vendor-cfhd.1 External decoder (codec cfhd)
 DECODERS
 `, { mode: 0o700 });
       expect(await ffmpegInputDecoderOptions(executable)).toEqual([
-        "-codec_whitelist", "aac,adpcm_ima_wav,h264,mjpeg,opus,pcm_s24le,png",
+        "-codec_whitelist", "aac,acelp.kelvin,adpcm_ima_wav,h264,libaom-av1,libvpx-vp9,mjpeg,opus,pcm_s24le,png",
       ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -41,7 +44,7 @@ DECODERS
   test("refuses failed, empty and malformed decoder inventories", async () => {
     const directory = await mkdtemp(join(tmpdir(), "media-decoders-refusal-"));
     try {
-      for (const [index, body] of ["exit 1", "echo Decoders:", "echo ' A..... = Audio'", "printf 'Decoders:\\n A....D aac AAC\\n V....D bad,name invalid\\n'"].entries()) {
+      for (const [index, body] of ["exit 1", "echo Decoders:", "echo ' A..... = Audio'", "printf 'Decoders:\\n A....D aac AAC\\n V....D bad,name invalid\\n'", "printf 'Decoders:\\n A....D aac AAC\\n V....D -cfhd invalid\\n'", "printf 'Decoders:\\n A....D aac AAC\\n V....D * invalid\\n'"].entries()) {
         const executable = join(directory, String(index));
         await writeFile(executable, `#!/bin/sh\n${body}\n`, { mode: 0o700 });
         await expect(ffmpegInputDecoderOptions(executable)).rejects.toThrow();
