@@ -946,7 +946,9 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
     return {};
   }
   return {
-    inputTokensDetails: details as Record<string, number> | Array<Record<string, number>>,
+    inputTokensDetails: withoutNestedDetailMembers(details) as
+      | Record<string, number>
+      | Array<Record<string, number>>,
   };
 }
 
@@ -959,8 +961,25 @@ function outputTokenDetailsProp(
     return {};
   }
   return {
-    outputTokensDetails: normalized as Record<string, number> | Array<Record<string, number>>,
+    outputTokensDetails: withoutNestedDetailMembers(normalized) as
+      | Record<string, number>
+      | Array<Record<string, number>>,
   };
+}
+
+/**
+ * A detail record holds token counts, but a provider can nest a breakdown in
+ * it (the Responses API's `input_tokens_details.cache_write_tokens_details`).
+ * Drop only such nested members: every scalar stays verbatim, so malformed
+ * counts still reach the shared normalizer's field-path diagnostics, and a
+ * strict retained-usage schema never fails over an object it does not price.
+ */
+function withoutNestedDetailMembers(details: unknown): unknown {
+  if (Array.isArray(details)) return details.map(withoutNestedDetailMembers);
+  if (!details || typeof details !== "object") return details;
+  return Object.fromEntries(
+    Object.entries(details).filter(([, member]) => member === null || typeof member !== "object"),
+  );
 }
 
 function requestUsageEntriesProp(
